@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Node/Next
+node_modules/
+.next/
+
+# Local environment and secrets
+backend/.env
+frontend/.env.local
+functions/local.settings.json
+
+# Local tooling and temp artifacts
+.deploytmp/
+.vscode/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
