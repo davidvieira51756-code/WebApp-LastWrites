@@ -35,6 +35,8 @@ jobs:
         working-directory: frontend
         env:
           NEXT_TELEMETRY_DISABLED: "1"
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_DEFAULT_USER_ID: "academic-demo-user"
         run: npm run build
 
       - name: Prepare standalone deployment package
