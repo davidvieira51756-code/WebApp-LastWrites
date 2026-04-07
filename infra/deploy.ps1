@@ -376,6 +376,7 @@ try {
     Write-Step "Applying runtime settings to backend, frontend, and function apps"
     Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "node server.js", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("functionapp", "config", "appsettings", "set", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--settings", "COSMOS_CONNECTION_STRING=$cosmosConnectionString", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "EVENT_GRID_ENDPOINT=$eventGridEndpoint", "EVENT_GRID_KEY=$eventGridKey", "BLOB_CONNECTION_STRING=$blobConnectionString", "-o", "none") | Out-Null
 
     if (-not $SkipLocalFileUpdate) {
