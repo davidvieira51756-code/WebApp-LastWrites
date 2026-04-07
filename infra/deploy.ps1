@@ -329,6 +329,12 @@ try {
     Write-Step "Creating Function App"
     Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--consumption-plan-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "--functions-version", "4", "--os-type", "Linux", "-o", "none") | Out-Null
 
+    Write-Step "Enabling basic publishing credentials for SCM deployment"
+    foreach ($siteName in @($backendAppName, $frontendAppName, $functionAppName)) {
+        Invoke-AzCli -Arguments @("resource", "update", "--resource-group", $ResourceGroupName, "--namespace", "Microsoft.Web", "--resource-type", "basicPublishingCredentialsPolicies", "--parent", "sites/$siteName", "--name", "scm", "--set", "properties.allow=true", "-o", "none") | Out-Null
+        Invoke-AzCli -Arguments @("resource", "update", "--resource-group", $ResourceGroupName, "--namespace", "Microsoft.Web", "--resource-type", "basicPublishingCredentialsPolicies", "--parent", "sites/$siteName", "--name", "ftp", "--set", "properties.allow=true", "-o", "none") | Out-Null
+    }
+
     Write-Step "Creating Cosmos DB account, database, and container"
     Invoke-AzCli -Arguments @("cosmosdb", "create", "--name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--kind", "GlobalDocumentDB", "--locations", "regionName=$Location", "failoverPriority=0", "--default-consistency-level", "Session", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("cosmosdb", "sql", "database", "create", "--account-name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--name", $cosmosDatabaseName, "-o", "none") | Out-Null
