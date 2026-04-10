@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 try:
@@ -14,11 +15,15 @@ try:
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
     from backend.services.keyvault_service import KeyVaultService
+    from backend.services.local_blob_service import LocalBlobService
+    from backend.services.local_cosmos_service import LocalCosmosService
 except ModuleNotFoundError:
     from models.vault import VaultCreate, VaultResponse
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
     from services.keyvault_service import KeyVaultService
+    from services.local_blob_service import LocalBlobService
+    from services.local_cosmos_service import LocalCosmosService
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -76,22 +81,38 @@ def is_valid_email(email: str) -> bool:
 @app.on_event("startup")
 def startup_event() -> None:
     try:
-        keyvault_service = KeyVaultService()
-        secure_settings = keyvault_service.get_connection_strings()
+        local_dev_mode = os.getenv("LOCAL_DEV_MODE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
-        cosmos_service = CosmosService(
-            connection_string=secure_settings["cosmos_connection_string"]
-        )
-        cosmos_service.initialize()
+        if local_dev_mode:
+            cosmos_service = LocalCosmosService()
+            cosmos_service.initialize()
+            blob_service = LocalBlobService()
+            blob_service.initialize()
+            app.state.keyvault_service = None
+            logger.info("Application startup completed in LOCAL_DEV_MODE.")
+        else:
+            keyvault_service = KeyVaultService()
+            secure_settings = keyvault_service.get_connection_strings()
 
-        blob_service = BlobService(
-            connection_string=secure_settings["blob_connection_string"]
-        )
+            cosmos_service = CosmosService(
+                connection_string=secure_settings["cosmos_connection_string"]
+            )
+            cosmos_service.initialize()
 
-        app.state.keyvault_service = keyvault_service
+            blob_service = BlobService(
+                connection_string=secure_settings["blob_connection_string"]
+            )
+
+            app.state.keyvault_service = keyvault_service
+            logger.info("Application startup completed.")
+
         app.state.cosmos_service = cosmos_service
         app.state.blob_service = blob_service
-        logger.info("Application startup completed.")
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise
@@ -305,13 +326,41 @@ def get_vault_file_download_url(vault_id: str, file_id: str, request: Request):
             detail="Failed to generate download URL.",
         ) from None
 
+    download_url = sas_payload["url"]
+    if getattr(blob_service, "is_local", False) and download_url.startswith("/"):
+        base_url = str(request.base_url).rstrip("/")
+        download_url = f"{base_url}{download_url}"
+
     return {
         "vault_id": vault_id,
         "file_id": file_id,
         "file_name": file_metadata.get("file_name"),
-        "download_url": sas_payload["url"],
+        "download_url": download_url,
         "expires_at": sas_payload["expires_at"],
     }
+
+
+@app.get("/local-downloads/{container_name}/{blob_name:path}")
+def download_local_blob(container_name: str, blob_name: str, request: Request):
+    blob_service = get_blob_service(request)
+    if not getattr(blob_service, "is_local", False):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Local download route is only available in local development mode.",
+        )
+
+    try:
+        file_path = blob_service.get_local_file_path(
+            container_name=container_name,
+            blob_name=blob_name,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Blob not found for requested file.",
+        ) from None
+
+    return FileResponse(path=file_path, filename=file_path.name)
 
 
 @app.post("/vaults/{vault_id}/files", status_code=status.HTTP_201_CREATED)

@@ -17,7 +17,7 @@ functions/local.settings.json
 
 # Local tooling and temp artifacts
 .deploytmp/
-.vscode/
+
 *.log
 
 # OS

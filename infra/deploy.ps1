@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Location = "norwayeast",
+    [string]$Location = "italynorth",
     [string]$Prefix = "lastwrites",
     [string]$ResourceGroupName = "",
     [string]$GithubRepo = "",
@@ -326,8 +326,8 @@ try {
     Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "vaults", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "deliveries", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
 
-    Write-Step "Creating Function App"
-    Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--consumption-plan-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "--functions-version", "4", "--os-type", "Linux", "-o", "none") | Out-Null
+    Write-Step "Creating Function App (Flex Consumption)"
+    Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--flexconsumption-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "--functions-version", "4", "-o", "none") | Out-Null
 
     Write-Step "Enabling basic publishing credentials for SCM deployment"
     foreach ($siteName in @($backendAppName, $frontendAppName, $functionAppName)) {

@@ -117,12 +117,15 @@ if (-not (Test-Path $backendEnvFile)) {
 }
 
 $backendEnv = Get-DotEnvMap -FilePath $backendEnvFile
+$localDevMode = (($backendEnv["LOCAL_DEV_MODE"] | ForEach-Object { "$_".Trim().ToLower() }) -in @("1", "true", "yes", "on"))
 $cosmosConnectionString = [string]$backendEnv["COSMOS_CONNECTION_STRING"]
 $blobConnectionString = [string]$backendEnv["BLOB_CONNECTION_STRING"]
 $missingBackendVars = @()
-foreach ($requiredVar in @("COSMOS_CONNECTION_STRING", "BLOB_CONNECTION_STRING")) {
-    if ((-not $backendEnv.ContainsKey($requiredVar)) -or [string]::IsNullOrWhiteSpace($backendEnv[$requiredVar])) {
-        $missingBackendVars += $requiredVar
+if (-not $localDevMode) {
+    foreach ($requiredVar in @("COSMOS_CONNECTION_STRING", "BLOB_CONNECTION_STRING")) {
+        if ((-not $backendEnv.ContainsKey($requiredVar)) -or [string]::IsNullOrWhiteSpace($backendEnv[$requiredVar])) {
+            $missingBackendVars += $requiredVar
+        }
     }
 }
 
@@ -132,6 +135,7 @@ if ($missingBackendVars.Count -gt 0) {
 }
 
 if (
+    (-not $localDevMode) -and
     (-not [string]::IsNullOrWhiteSpace($cosmosConnectionString)) -and
     (-not (Test-ConnectionStringFormat -ConnectionString $cosmosConnectionString -RequiredTokens @("AccountEndpoint=", "AccountKey=")))
 ) {
@@ -139,14 +143,18 @@ if (
 }
 
 if (
+    (-not $localDevMode) -and
     (-not [string]::IsNullOrWhiteSpace($blobConnectionString)) -and
     (-not (Test-ConnectionStringFormat -ConnectionString $blobConnectionString -RequiredTokens @("DefaultEndpointsProtocol=", "AccountName=", "AccountKey=")))
 ) {
     $preflightErrors += "BLOB_CONNECTION_STRING in backend/.env does not look valid (expected DefaultEndpointsProtocol, AccountName, and AccountKey)."
 }
 
-if (-not (Get-Command func -ErrorAction SilentlyContinue)) {
-    $preflightErrors += "Azure Functions Core Tools is not installed or not in PATH."
+$funcCommand = Get-Command func -ErrorAction SilentlyContinue
+$shouldStartFunctions = $null -ne $funcCommand
+
+if (-not $shouldStartFunctions) {
+    Write-Host "Azure Functions Core Tools not found. Functions host will be skipped." -ForegroundColor Yellow
 }
 
 if ($preflightErrors.Count -gt 0) {
@@ -184,10 +192,12 @@ Start-DevWindow `
     -WorkingDirectory $frontendDir `
     -Command $frontendCommand
 
-Start-DevWindow `
-    -Title "Last Writes - Functions" `
-    -WorkingDirectory $functionsDir `
-    -Command $functionsCommand
+if ($shouldStartFunctions) {
+    Start-DevWindow `
+        -Title "Last Writes - Functions" `
+        -WorkingDirectory $functionsDir `
+        -Command $functionsCommand
+}
 
 Write-Host ""
 Write-Host "  HEAVY WORKER (DOCKER) " -ForegroundColor Black -BackgroundColor Yellow
