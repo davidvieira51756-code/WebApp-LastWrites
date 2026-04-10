@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 class VaultStatus(str, Enum):
     ACTIVE = "active"
     GRACE_PERIOD = "grace_period"
+    DELIVERY_INITIATED = "delivery_initiated"
     DELIVERED = "delivered"
     DISABLED = "disabled"
 

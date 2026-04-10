@@ -75,6 +75,31 @@ class LocalCosmosService:
 
         return None
 
+    def remove_recipient_from_vault(self, vault_id: str, email: str) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+        normalized_email = email.strip().lower()
+
+        for item in items:
+            if str(item.get("id")) != vault_id:
+                continue
+
+            recipients = item.get("recipients", [])
+            if not isinstance(recipients, list):
+                recipients = []
+
+            item["recipients"] = [
+                recipient
+                for recipient in recipients
+                if not (
+                    isinstance(recipient, str)
+                    and recipient.strip().lower() == normalized_email
+                )
+            ]
+            self._write_items(items)
+            return item
+
+        return None
+
     def get_vault_files(self, vault_id: str) -> Optional[List[Dict[str, Any]]]:
         vault = self.get_vault_by_id(vault_id)
         if vault is None:
@@ -84,6 +109,30 @@ class LocalCosmosService:
         if not isinstance(files, list):
             return []
         return [file_item for file_item in files if isinstance(file_item, dict)]
+
+    def remove_file_from_vault(self, vault_id: str, file_id: str) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+
+        for item in items:
+            if str(item.get("id")) != vault_id:
+                continue
+
+            files = item.get("files", [])
+            if not isinstance(files, list):
+                files = []
+
+            item["files"] = [
+                file_item
+                for file_item in files
+                if not (
+                    isinstance(file_item, dict)
+                    and str(file_item.get("id")) == file_id
+                )
+            ]
+            self._write_items(items)
+            return item
+
+        return None
 
     def update_vault(self, vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         items = self._read_items()

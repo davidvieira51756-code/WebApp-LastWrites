@@ -102,9 +102,8 @@ def _update_vault_status_to_delivery_initiated(
 
     try:
         updated_document = container.replace_item(
-            item=vault_document["id"],
+            item=vault_document,
             body=vault_document,
-            partition_key=user_id,
         )
         logger.info(
             "Vault status updated successfully. vault_id=%s previous_status=%s new_status=%s",

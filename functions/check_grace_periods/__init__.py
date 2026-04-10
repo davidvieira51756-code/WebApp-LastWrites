@@ -148,9 +148,8 @@ def _mark_event_published(
 
     try:
         container.replace_item(
-            item=patched_document["id"],
+            item=vault_document,
             body=patched_document,
-            partition_key=user_id,
         )
     except exceptions.CosmosHttpResponseError:
         logger.exception(

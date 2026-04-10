@@ -156,14 +156,59 @@ class CosmosService:
 
         try:
             saved_item = container.replace_item(
-                item=existing_item["id"],
+                item=existing_item,
                 body=updated_item,
-                partition_key=user_id,
             )
             return saved_item
         except exceptions.CosmosHttpResponseError:
             logger.exception(
                 "Cosmos DB recipient update failed for vault id=%s",
+                vault_id,
+            )
+            raise
+
+    def remove_recipient_from_vault(
+        self,
+        vault_id: str,
+        email: str,
+    ) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        existing_item = self.get_vault_by_id(vault_id)
+        if existing_item is None:
+            return None
+
+        user_id = existing_item.get("user_id")
+        if not user_id:
+            raise ValueError(
+                f"Vault document is missing user_id partition key. vault_id={vault_id}"
+            )
+
+        recipients = existing_item.get("recipients", [])
+        if not isinstance(recipients, list):
+            recipients = []
+
+        normalized_email = email.strip().lower()
+        updated_recipients = [
+            recipient
+            for recipient in recipients
+            if not (
+                isinstance(recipient, str)
+                and recipient.strip().lower() == normalized_email
+            )
+        ]
+
+        updated_item = dict(existing_item)
+        updated_item["recipients"] = updated_recipients
+
+        try:
+            saved_item = container.replace_item(
+                item=existing_item,
+                body=updated_item,
+            )
+            return saved_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception(
+                "Cosmos DB recipient removal failed for vault id=%s",
                 vault_id,
             )
             raise
@@ -180,6 +225,47 @@ class CosmosService:
         files = [file_item for file_item in raw_files if isinstance(file_item, dict)]
         return files
 
+    def remove_file_from_vault(self, vault_id: str, file_id: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        existing_item = self.get_vault_by_id(vault_id)
+        if existing_item is None:
+            return None
+
+        user_id = existing_item.get("user_id")
+        if not user_id:
+            raise ValueError(
+                f"Vault document is missing user_id partition key. vault_id={vault_id}"
+            )
+
+        existing_files = existing_item.get("files", [])
+        if not isinstance(existing_files, list):
+            existing_files = []
+
+        updated_files = [
+            file_item
+            for file_item in existing_files
+            if not (
+                isinstance(file_item, dict)
+                and str(file_item.get("id")) == file_id
+            )
+        ]
+
+        updated_item = dict(existing_item)
+        updated_item["files"] = updated_files
+
+        try:
+            saved_item = container.replace_item(
+                item=existing_item,
+                body=updated_item,
+            )
+            return saved_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception(
+                "Cosmos DB file removal failed for vault id=%s",
+                vault_id,
+            )
+            raise
+
     def update_vault(
         self, vault_id: str, update_data: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -195,9 +281,8 @@ class CosmosService:
 
         try:
             updated_item = container.replace_item(
-                item=existing_item["id"],
+                item=existing_item,
                 body=merged_item,
-                partition_key=existing_item["user_id"],
             )
             logger.info("Updated vault id=%s", existing_item["id"])
             return updated_item

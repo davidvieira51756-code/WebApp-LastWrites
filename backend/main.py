@@ -11,14 +11,14 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 try:
-    from backend.models.vault import VaultCreate, VaultResponse
+    from backend.models.vault import VaultCreate, VaultResponse, VaultUpdate
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
     from backend.services.keyvault_service import KeyVaultService
     from backend.services.local_blob_service import LocalBlobService
     from backend.services.local_cosmos_service import LocalCosmosService
 except ModuleNotFoundError:
-    from models.vault import VaultCreate, VaultResponse
+    from models.vault import VaultCreate, VaultResponse, VaultUpdate
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
     from services.keyvault_service import KeyVaultService
@@ -35,6 +35,41 @@ EMAIL_ADDRESS_REGEX = re.compile(
 
 class RecipientCreateRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
+
+
+def normalize_recipients(recipients: List[str]) -> List[str]:
+    normalized_recipients: List[str] = []
+    seen_recipients = set()
+
+    for recipient in recipients:
+        if not isinstance(recipient, str):
+            raise ValueError("Recipients must be email strings.")
+
+        normalized_email = recipient.strip().lower()
+        if not is_valid_email(normalized_email):
+            raise ValueError(f"Invalid recipient email: {recipient}")
+        if normalized_email in seen_recipients:
+            continue
+
+        seen_recipients.add(normalized_email)
+        normalized_recipients.append(normalized_email)
+
+    return normalized_recipients
+
+
+def get_vault_file_metadata(vault_item: dict, file_id: str) -> Optional[dict]:
+    files = vault_item.get("files", [])
+    if not isinstance(files, list):
+        return None
+
+    return next(
+        (
+            file_item
+            for file_item in files
+            if isinstance(file_item, dict) and str(file_item.get("id")) == file_id
+        ),
+        None,
+    )
 
 app = FastAPI(title="Last Writes Backend API", version="1.0.0")
 
@@ -172,6 +207,114 @@ def get_vault(vault_id: str, request: Request) -> VaultResponse:
     return VaultResponse(**vault_item)
 
 
+@app.patch("/vaults/{vault_id}", response_model=VaultResponse)
+def update_vault(vault_id: str, payload: VaultUpdate, request: Request) -> VaultResponse:
+    cosmos_service = get_cosmos_service(request)
+    update_data = payload.model_dump(exclude_unset=True)
+
+    try:
+        if "recipients" in update_data and update_data["recipients"] is not None:
+            update_data["recipients"] = normalize_recipients(update_data["recipients"])
+
+        updated_vault = cosmos_service.update_vault(vault_id, update_data)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Unhandled error while updating vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update vault.",
+        ) from None
+
+    if updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return VaultResponse(**updated_vault)
+
+
+@app.delete("/vaults/{vault_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vault(vault_id: str, request: Request) -> None:
+    cosmos_service = get_cosmos_service(request)
+    blob_service = get_blob_service(request)
+
+    try:
+        vault_item = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while reading vault before delete id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to read vault before delete.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    files = vault_item.get("files", [])
+    if not isinstance(files, list):
+        files = []
+
+    try:
+        for file_item in files:
+            if not isinstance(file_item, dict):
+                continue
+
+            container_name = file_item.get("container_name")
+            blob_name = file_item.get("blob_name")
+            if container_name and blob_name:
+                blob_service.delete_blob(container_name=container_name, blob_name=blob_name)
+
+        deleted = cosmos_service.delete_vault(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while deleting vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete vault.",
+        ) from None
+
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return None
+
+
+@app.get("/vaults/{vault_id}/recipients")
+def list_vault_recipients(vault_id: str, request: Request):
+    cosmos_service = get_cosmos_service(request)
+
+    try:
+        vault_item = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while reading recipients. vault_id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list recipients.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    recipients = vault_item.get("recipients", [])
+    if not isinstance(recipients, list):
+        recipients = []
+
+    return {
+        "vault_id": vault_id,
+        "recipients": recipients,
+    }
+
+
 @app.post("/vaults/{vault_id}/recipients")
 def add_vault_recipient(
     vault_id: str,
@@ -202,6 +345,50 @@ def add_vault_recipient(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to add recipient.",
+        ) from None
+
+    if updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    recipients = updated_vault.get("recipients", [])
+    if not isinstance(recipients, list):
+        recipients = []
+
+    return {
+        "vault_id": vault_id,
+        "recipients": recipients,
+    }
+
+
+@app.delete("/vaults/{vault_id}/recipients/{recipient_email:path}")
+def delete_vault_recipient(vault_id: str, recipient_email: str, request: Request):
+    cosmos_service = get_cosmos_service(request)
+    normalized_email = recipient_email.strip().lower()
+
+    if not is_valid_email(normalized_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid recipient email is required.",
+        )
+
+    try:
+        updated_vault = cosmos_service.remove_recipient_from_vault(vault_id, normalized_email)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception(
+            "Unhandled error while deleting recipient. vault_id=%s",
+            vault_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete recipient.",
         ) from None
 
     if updated_vault is None:
@@ -265,18 +452,7 @@ def get_vault_file_download_url(vault_id: str, file_id: str, request: Request):
             detail="Vault not found.",
         )
 
-    files = vault_item.get("files", [])
-    if not isinstance(files, list):
-        files = []
-
-    file_metadata = next(
-        (
-            file_item
-            for file_item in files
-            if isinstance(file_item, dict) and str(file_item.get("id")) == file_id
-        ),
-        None,
-    )
+    file_metadata = get_vault_file_metadata(vault_item, file_id)
     if file_metadata is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -338,6 +514,64 @@ def get_vault_file_download_url(vault_id: str, file_id: str, request: Request):
         "download_url": download_url,
         "expires_at": sas_payload["expires_at"],
     }
+
+
+@app.delete("/vaults/{vault_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vault_file(vault_id: str, file_id: str, request: Request) -> None:
+    cosmos_service = get_cosmos_service(request)
+    blob_service = get_blob_service(request)
+
+    try:
+        vault_item = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while reading vault before file delete. vault_id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to read vault before deleting file.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    file_metadata = get_vault_file_metadata(vault_item, file_id)
+    if file_metadata is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found for vault.",
+        )
+
+    container_name = file_metadata.get("container_name")
+    blob_name = file_metadata.get("blob_name")
+    if not container_name or not blob_name:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="File metadata is missing blob location details.",
+        )
+
+    try:
+        blob_service.delete_blob(container_name=container_name, blob_name=blob_name)
+        updated_vault = cosmos_service.remove_file_from_vault(vault_id, file_id)
+    except Exception:
+        logger.exception(
+            "Unhandled error while deleting file. vault_id=%s file_id=%s",
+            vault_id,
+            file_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete file.",
+        ) from None
+
+    if updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return None
 
 
 @app.get("/local-downloads/{container_name}/{blob_name:path}")
