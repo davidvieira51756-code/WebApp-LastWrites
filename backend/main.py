@@ -3,22 +3,42 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 try:
+    from backend.models.auth import (
+        AuthLoginRequest,
+        AuthMeResponse,
+        AuthRegisterRequest,
+        AuthRegisterResponse,
+        AuthTokenResponse,
+        EmailVerificationRequest,
+    )
     from backend.models.vault import VaultCreate, VaultResponse, VaultUpdate
+    from backend.services.auth_service import AuthService
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
     from backend.services.keyvault_service import KeyVaultService
     from backend.services.local_blob_service import LocalBlobService
     from backend.services.local_cosmos_service import LocalCosmosService
 except ModuleNotFoundError:
+    from models.auth import (
+        AuthLoginRequest,
+        AuthMeResponse,
+        AuthRegisterRequest,
+        AuthRegisterResponse,
+        AuthTokenResponse,
+        EmailVerificationRequest,
+    )
     from models.vault import VaultCreate, VaultResponse, VaultUpdate
+    from services.auth_service import AuthService
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
     from services.keyvault_service import KeyVaultService
@@ -31,6 +51,7 @@ logger = logging.getLogger(__name__)
 EMAIL_ADDRESS_REGEX = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
 )
+auth_bearer = HTTPBearer(auto_error=False)
 
 
 class RecipientCreateRequest(BaseModel):
@@ -109,6 +130,116 @@ def get_blob_service(request: Request) -> BlobService:
     return blob_service
 
 
+def get_auth_service(request: Request) -> AuthService:
+    auth_service = getattr(request.app.state, "auth_service", None)
+    if auth_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Auth service is not initialized.",
+        )
+    return auth_service
+
+
+def _is_truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_expose_verification_token() -> bool:
+    explicit_value = os.getenv("AUTH_EXPOSE_VERIFICATION_TOKEN", "true").strip()
+    return _is_truthy(explicit_value)
+
+
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+
+    normalized_value = value.strip()
+    if normalized_value.endswith("Z"):
+        normalized_value = f"{normalized_value[:-1]}+00:00"
+
+    try:
+        parsed_value = datetime.fromisoformat(normalized_value)
+    except ValueError:
+        return None
+
+    if parsed_value.tzinfo is None:
+        return parsed_value.replace(tzinfo=timezone.utc)
+    return parsed_value.astimezone(timezone.utc)
+
+
+def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_bearer),
+) -> Dict[str, Any]:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    auth_service = get_auth_service(request)
+    cosmos_service = get_cosmos_service(request)
+
+    try:
+        payload = auth_service.verify_access_token(credentials.credentials)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    user_id = str(payload.get("sub", "")).strip()
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token subject.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        user = cosmos_service.get_user_by_id(user_id)
+    except Exception:
+        logger.exception("Failed to resolve authenticated user id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to resolve authenticated user.",
+        ) from None
+
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account was not found.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user
+
+
+def get_owned_vault_or_404(
+    cosmos_service: CosmosService,
+    vault_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    try:
+        vault_item = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while retrieving vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve vault.",
+        ) from None
+
+    if vault_item is None or str(vault_item.get("user_id")) != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return vault_item
+
+
 def is_valid_email(email: str) -> bool:
     return bool(EMAIL_ADDRESS_REGEX.fullmatch(email.strip()))
 
@@ -128,6 +259,7 @@ def startup_event() -> None:
             cosmos_service.initialize()
             blob_service = LocalBlobService()
             blob_service.initialize()
+            auth_service = AuthService()
             app.state.keyvault_service = None
             logger.info("Application startup completed in LOCAL_DEV_MODE.")
         else:
@@ -142,23 +274,213 @@ def startup_event() -> None:
             blob_service = BlobService(
                 connection_string=secure_settings["blob_connection_string"]
             )
+            auth_service = AuthService()
 
             app.state.keyvault_service = keyvault_service
             logger.info("Application startup completed.")
 
         app.state.cosmos_service = cosmos_service
         app.state.blob_service = blob_service
+        app.state.auth_service = auth_service
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise
 
 
-@app.post("/vaults", response_model=VaultResponse, status_code=status.HTTP_201_CREATED)
-def create_vault(vault: VaultCreate, request: Request) -> VaultResponse:
+@app.post(
+    "/auth/register",
+    response_model=AuthRegisterResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegisterResponse:
     cosmos_service = get_cosmos_service(request)
+    auth_service = get_auth_service(request)
+
+    normalized_email = auth_service.normalize_email(payload.email)
+    if not is_valid_email(normalized_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid email is required.",
+        )
 
     try:
-        created_item = cosmos_service.create_vault(vault.model_dump())
+        password_hash = auth_service.hash_password(payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    verification_payload = auth_service.issue_email_verification()
+    user_document = {
+        "email": normalized_email,
+        "password_hash": password_hash,
+        "is_email_verified": False,
+        "verification_token_hash": verification_payload["token_hash"],
+        "verification_token_expires_at": verification_payload["expires_at"],
+    }
+
+    try:
+        created_user = cosmos_service.create_user(user_document)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Unhandled error while creating user account.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to register account.",
+        ) from None
+
+    verification_token = verification_payload["token"]
+    verification_url = auth_service.build_email_verification_url(verification_token)
+    return AuthRegisterResponse(
+        message="Account created. Verify your email before signing in.",
+        user_id=str(created_user.get("id")),
+        email=str(created_user.get("email", normalized_email)),
+        email_verification_required=auth_service.should_require_email_verification(),
+        verification_url=verification_url,
+        verification_token=verification_token if _should_expose_verification_token() else None,
+    )
+
+
+@app.post("/auth/verify-email")
+def verify_email(payload: EmailVerificationRequest, request: Request):
+    cosmos_service = get_cosmos_service(request)
+    auth_service = get_auth_service(request)
+
+    token = payload.token.strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification token is required.",
+        )
+
+    token_hash = auth_service.hash_verification_token(token)
+    try:
+        user_item = cosmos_service.get_user_by_verification_token_hash(token_hash)
+    except Exception:
+        logger.exception("Failed to resolve user for verification token.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify email.",
+        ) from None
+
+    if user_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification token.",
+        )
+
+    expiry_raw = str(user_item.get("verification_token_expires_at", "")).strip()
+    expiry_time = _parse_iso_datetime(expiry_raw)
+    now = datetime.now(timezone.utc)
+    if expiry_time is None or expiry_time <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification token.",
+        )
+
+    try:
+        updated_user = cosmos_service.update_user(
+            str(user_item.get("id")),
+            {
+                "is_email_verified": True,
+                "verification_token_hash": None,
+                "verification_token_expires_at": None,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to mark email as verified for user id=%s", user_item.get("id"))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify email.",
+        ) from None
+
+    if updated_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify email.",
+        )
+
+    return {
+        "message": "Email verified successfully.",
+        "user_id": str(updated_user.get("id")),
+        "email": str(updated_user.get("email", "")),
+    }
+
+
+@app.post("/auth/login", response_model=AuthTokenResponse)
+def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenResponse:
+    cosmos_service = get_cosmos_service(request)
+    auth_service = get_auth_service(request)
+
+    normalized_email = auth_service.normalize_email(payload.email)
+    if not is_valid_email(normalized_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid email is required.",
+        )
+
+    try:
+        user_item = cosmos_service.get_user_by_email(normalized_email)
+    except Exception:
+        logger.exception("Failed to fetch user during login email=%s", normalized_email)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to authenticate user.",
+        ) from None
+
+    if user_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    password_hash = str(user_item.get("password_hash", ""))
+    if not auth_service.verify_password(payload.password, password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    email_verified = bool(user_item.get("is_email_verified", False))
+    if auth_service.should_require_email_verification() and not email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email verification is required before signing in.",
+        )
+
+    token_payload = auth_service.issue_access_token(user_item)
+    return AuthTokenResponse(
+        access_token=token_payload["access_token"],
+        token_type=token_payload["token_type"],
+        expires_at=token_payload["expires_at"],
+        user_id=str(user_item.get("id")),
+        email=str(user_item.get("email", "")),
+        email_verified=email_verified,
+    )
+
+
+@app.get("/auth/me", response_model=AuthMeResponse)
+def get_current_user_profile(current_user: Dict[str, Any] = Depends(get_current_user)) -> AuthMeResponse:
+    return AuthMeResponse(
+        user_id=str(current_user.get("id", "")),
+        email=str(current_user.get("email", "")),
+        email_verified=bool(current_user.get("is_email_verified", False)),
+    )
+
+
+@app.post("/vaults", response_model=VaultResponse, status_code=status.HTTP_201_CREATED)
+def create_vault(
+    vault: VaultCreate,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> VaultResponse:
+    cosmos_service = get_cosmos_service(request)
+    vault_payload = vault.model_dump(exclude_unset=True)
+    vault_payload["user_id"] = str(current_user.get("id", ""))
+
+    try:
+        created_item = cosmos_service.create_vault(vault_payload)
         return VaultResponse(**created_item)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -171,8 +493,12 @@ def create_vault(vault: VaultCreate, request: Request) -> VaultResponse:
 
 
 @app.get("/vaults", response_model=List[VaultResponse])
-def list_vaults(request: Request, user_id: Optional[str] = None) -> List[VaultResponse]:
+def list_vaults(
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[VaultResponse]:
     cosmos_service = get_cosmos_service(request)
+    user_id = str(current_user.get("id", ""))
 
     try:
         vault_items = cosmos_service.list_vaults(user_id=user_id)
@@ -186,31 +512,35 @@ def list_vaults(request: Request, user_id: Optional[str] = None) -> List[VaultRe
 
 
 @app.get("/vaults/{vault_id}", response_model=VaultResponse)
-def get_vault(vault_id: str, request: Request) -> VaultResponse:
+def get_vault(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> VaultResponse:
     cosmos_service = get_cosmos_service(request)
-
-    try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
-    except Exception:
-        logger.exception("Unhandled error while retrieving vault id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve vault.",
-        ) from None
-
-    if vault_item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vault not found.",
-        )
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     return VaultResponse(**vault_item)
 
 
 @app.patch("/vaults/{vault_id}", response_model=VaultResponse)
-def update_vault(vault_id: str, payload: VaultUpdate, request: Request) -> VaultResponse:
+def update_vault(
+    vault_id: str,
+    payload: VaultUpdate,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> VaultResponse:
     cosmos_service = get_cosmos_service(request)
     update_data = payload.model_dump(exclude_unset=True)
+    get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     try:
         if "recipients" in update_data and update_data["recipients"] is not None:
@@ -236,24 +566,18 @@ def update_vault(vault_id: str, payload: VaultUpdate, request: Request) -> Vault
 
 
 @app.delete("/vaults/{vault_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_vault(vault_id: str, request: Request) -> None:
+def delete_vault(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> None:
     cosmos_service = get_cosmos_service(request)
     blob_service = get_blob_service(request)
-
-    try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
-    except Exception:
-        logger.exception("Unhandled error while reading vault before delete id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to read vault before delete.",
-        ) from None
-
-    if vault_item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vault not found.",
-        )
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     files = vault_item.get("files", [])
     if not isinstance(files, list):
@@ -287,23 +611,17 @@ def delete_vault(vault_id: str, request: Request) -> None:
 
 
 @app.get("/vaults/{vault_id}/recipients")
-def list_vault_recipients(vault_id: str, request: Request):
+def list_vault_recipients(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     cosmos_service = get_cosmos_service(request)
-
-    try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
-    except Exception:
-        logger.exception("Unhandled error while reading recipients. vault_id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list recipients.",
-        ) from None
-
-    if vault_item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vault not found.",
-        )
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     recipients = vault_item.get("recipients", [])
     if not isinstance(recipients, list):
@@ -320,9 +638,15 @@ def add_vault_recipient(
     vault_id: str,
     payload: RecipientCreateRequest,
     request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     cosmos_service = get_cosmos_service(request)
     recipient_email = payload.email.strip().lower()
+    get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     if not is_valid_email(recipient_email):
         raise HTTPException(
@@ -364,9 +688,19 @@ def add_vault_recipient(
 
 
 @app.delete("/vaults/{vault_id}/recipients/{recipient_email:path}")
-def delete_vault_recipient(vault_id: str, recipient_email: str, request: Request):
+def delete_vault_recipient(
+    vault_id: str,
+    recipient_email: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     cosmos_service = get_cosmos_service(request)
     normalized_email = recipient_email.strip().lower()
+    get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     if not is_valid_email(normalized_email):
         raise HTTPException(
@@ -408,23 +742,20 @@ def delete_vault_recipient(vault_id: str, recipient_email: str, request: Request
 
 
 @app.get("/vaults/{vault_id}/files")
-def list_vault_files(vault_id: str, request: Request):
+def list_vault_files(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     cosmos_service = get_cosmos_service(request)
-
-    try:
-        files = cosmos_service.get_vault_files(vault_id)
-    except Exception:
-        logger.exception("Unhandled error while listing vault files. vault_id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to list vault files.",
-        ) from None
-
-    if files is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vault not found.",
-        )
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
+    files = vault_item.get("files", [])
+    if not isinstance(files, list):
+        files = []
 
     return {
         "vault_id": vault_id,
@@ -433,24 +764,19 @@ def list_vault_files(vault_id: str, request: Request):
 
 
 @app.get("/vaults/{vault_id}/files/{file_id}/download")
-def get_vault_file_download_url(vault_id: str, file_id: str, request: Request):
+def get_vault_file_download_url(
+    vault_id: str,
+    file_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
     cosmos_service = get_cosmos_service(request)
     blob_service = get_blob_service(request)
-
-    try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
-    except Exception:
-        logger.exception("Unhandled error while reading vault for download. vault_id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to prepare download URL.",
-        ) from None
-
-    if vault_item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vault not found.",
-        )
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     file_metadata = get_vault_file_metadata(vault_item, file_id)
     if file_metadata is None:
@@ -517,24 +843,19 @@ def get_vault_file_download_url(vault_id: str, file_id: str, request: Request):
 
 
 @app.delete("/vaults/{vault_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_vault_file(vault_id: str, file_id: str, request: Request) -> None:
+def delete_vault_file(
+    vault_id: str,
+    file_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> None:
     cosmos_service = get_cosmos_service(request)
     blob_service = get_blob_service(request)
-
-    try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
-    except Exception:
-        logger.exception("Unhandled error while reading vault before file delete. vault_id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to read vault before deleting file.",
-        ) from None
-
-    if vault_item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vault not found.",
-        )
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     file_metadata = get_vault_file_metadata(vault_item, file_id)
     if file_metadata is None:
@@ -602,6 +923,7 @@ async def upload_vault_file(
     vault_id: str,
     request: Request,
     file: UploadFile = File(...),
+    current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     cosmos_service = get_cosmos_service(request)
     blob_service = get_blob_service(request)
@@ -612,20 +934,11 @@ async def upload_vault_file(
             detail="File name is required.",
         )
 
-    try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
-    except Exception:
-        logger.exception("Failed to read vault before file upload. id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to read vault.",
-        ) from None
-
-    if vault_item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Vault not found.",
-        )
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
 
     file_size = None
     try:

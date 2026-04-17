@@ -27,6 +27,86 @@ class LocalCosmosService:
     def _write_items(self, items: List[Dict[str, Any]]) -> None:
         self._data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
+    @staticmethod
+    def _is_vault_document(item: Dict[str, Any]) -> bool:
+        doc_type = str(item.get("doc_type", "vault")).strip().lower()
+        return doc_type == "vault"
+
+    def create_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
+        items = self._read_items()
+        payload = dict(user_data)
+        payload["id"] = str(payload.get("id") or uuid4())
+        payload["user_id"] = str(payload.get("user_id") or payload["id"])
+        payload["doc_type"] = "user"
+
+        email = str(payload.get("email", "")).strip().lower()
+        if not email:
+            raise ValueError("user_data must include email.")
+        if self.get_user_by_email(email) is not None:
+            raise ValueError("An account with this email already exists.")
+
+        payload["email"] = email
+        items.append(payload)
+        self._write_items(items)
+        return payload
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        normalized_email = email.strip().lower()
+        items = self._read_items()
+        return next(
+            (
+                item
+                for item in items
+                if str(item.get("doc_type", "")).strip().lower() == "user"
+                and str(item.get("email", "")).strip().lower() == normalized_email
+            ),
+            None,
+        )
+
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+        return next(
+            (
+                item
+                for item in items
+                if str(item.get("doc_type", "")).strip().lower() == "user"
+                and str(item.get("id")) == user_id
+            ),
+            None,
+        )
+
+    def get_user_by_verification_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+        return next(
+            (
+                item
+                for item in items
+                if str(item.get("doc_type", "")).strip().lower() == "user"
+                and str(item.get("verification_token_hash", "")) == token_hash
+            ),
+            None,
+        )
+
+    def update_user(self, user_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+
+        for index, item in enumerate(items):
+            if str(item.get("doc_type", "")).strip().lower() != "user":
+                continue
+            if str(item.get("id")) != user_id:
+                continue
+
+            updated_item = dict(item)
+            updated_item.update(update_data)
+            updated_item["id"] = item["id"]
+            updated_item["user_id"] = item["user_id"]
+            updated_item["doc_type"] = "user"
+            items[index] = updated_item
+            self._write_items(items)
+            return updated_item
+
+        return None
+
     def create_vault(self, vault_data: Dict[str, Any]) -> Dict[str, Any]:
         if not vault_data.get("user_id"):
             raise ValueError("vault_data must include user_id.")
@@ -34,6 +114,7 @@ class LocalCosmosService:
         items = self._read_items()
         payload = dict(vault_data)
         payload["id"] = str(payload.get("id") or uuid4())
+        payload["doc_type"] = "vault"
         payload.setdefault("recipients", [])
         payload.setdefault("files", [])
         items.append(payload)
@@ -42,10 +123,17 @@ class LocalCosmosService:
 
     def get_vault_by_id(self, vault_id: str) -> Optional[Dict[str, Any]]:
         items = self._read_items()
-        return next((item for item in items if str(item.get("id")) == vault_id), None)
+        return next(
+            (
+                item
+                for item in items
+                if self._is_vault_document(item) and str(item.get("id")) == vault_id
+            ),
+            None,
+        )
 
     def list_vaults(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        items = self._read_items()
+        items = [item for item in self._read_items() if self._is_vault_document(item)]
         if not user_id:
             return items
         return [item for item in items if item.get("user_id") == user_id]

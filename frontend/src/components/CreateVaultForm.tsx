@@ -1,9 +1,10 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
+import { buildAuthHeaders, isUnauthorizedStatus } from "@/lib/api";
 
 export type Vault = {
     id: string;
@@ -17,21 +18,23 @@ export type Vault = {
 
 type CreateVaultFormProps = {
     apiUrl: string;
+    authToken: string;
     onCreated: (vault: Vault) => void;
+    onUnauthorized?: () => void;
 };
 
-export default function CreateVaultForm({ apiUrl, onCreated }: CreateVaultFormProps) {
+export default function CreateVaultForm({
+    apiUrl,
+    authToken,
+    onCreated,
+    onUnauthorized,
+}: CreateVaultFormProps) {
     const t = useCatTheme();
     const [name, setName] = useState("");
     const [gracePeriodDays, setGracePeriodDays] = useState(30);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
-
-    const defaultUserId = useMemo(
-        () => process.env.NEXT_PUBLIC_DEFAULT_USER_ID?.trim() || "academic-demo-user",
-        []
-    );
 
     const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -40,6 +43,11 @@ export default function CreateVaultForm({ apiUrl, onCreated }: CreateVaultFormPr
 
         if (!apiUrl) {
             setErrorMessage("NEXT_PUBLIC_API_URL is not configured.");
+            return;
+        }
+
+        if (!authToken) {
+            setErrorMessage("You must be signed in to create a vault.");
             return;
         }
 
@@ -53,17 +61,19 @@ export default function CreateVaultForm({ apiUrl, onCreated }: CreateVaultFormPr
         try {
             const response = await fetch(`${apiUrl}/vaults`, {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
+                headers: buildAuthHeaders(authToken, true),
                 body: JSON.stringify({
-                    user_id: defaultUserId,
                     name: normalizedName,
                     grace_period_days: Number(gracePeriodDays),
                     status: "active",
                     recipients: [],
                 }),
             });
+
+            if (isUnauthorizedStatus(response.status)) {
+                onUnauthorized?.();
+                return;
+            }
 
             if (!response.ok) {
                 let detail = "Failed to create vault.";

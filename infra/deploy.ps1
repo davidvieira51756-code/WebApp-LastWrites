@@ -117,6 +117,20 @@ function New-RandomToken {
     -join (1..$Length | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
 }
 
+function New-StrongSecret {
+    param([int]$ByteLength = 48)
+
+    $bytes = New-Object byte[] $ByteLength
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    }
+    finally {
+        $rng.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes)
+}
+
 function Normalize-CompactName {
     param([string]$Value)
 
@@ -327,9 +341,14 @@ $cosmosAccountName = "cdb-$prefixDashed-$token"
 $cosmosDatabaseName = "last-writes-db"
 $cosmosContainerName = "vaults"
 $eventGridTopicName = "eg-$prefixDashed-$token"
+$eventSubscriptionName = "es-grace-$token"
 $keyVaultName = "kv-$prefixDashed-$token"
 $pythonRuntime = "PYTHON:3.11"
 $nodeRuntime = "NODE:20-lts"
+
+if ($eventSubscriptionName.Length -gt 64) {
+    $eventSubscriptionName = $eventSubscriptionName.Substring(0, 64).TrimEnd('-')
+}
 
 $storageAccountName = ("st" + $prefixCompact + $token)
 if ($storageAccountName.Length -gt 24) { $storageAccountName = $storageAccountName.Substring(0, 24) }
@@ -349,7 +368,8 @@ $acrUsername = ""
 $acrPassword = ""
 $backendUrl = ""
 $frontendUrl = ""
-$canRerunFunctionsWorkflow = $true
+$authSecretKey = ""
+$frontendVerifyEmailUrl = ""
 
 $deploymentStarted = $false
 
@@ -372,7 +392,7 @@ try {
     Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "vaults", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "deliveries", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
 
-    Write-Step "Creating Function App (Flex Consumption)"
+    Write-Step "Creating Function App (Consumption)"
     $functionAppExists = $false
     try {
         $existingFunctionApp = Get-AzCliJson -Arguments @("functionapp", "show", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "-o", "json")
@@ -383,7 +403,7 @@ try {
     }
 
     if (-not $functionAppExists) {
-        Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--flexconsumption-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "--functions-version", "4", "-o", "none") | Out-Null
+        Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--consumption-plan-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "--functions-version", "4", "--os-type", "Linux", "-o", "none") | Out-Null
     }
     else {
         Write-Host "Function App '$functionAppName' already exists. Reusing existing app." -ForegroundColor Yellow
@@ -447,12 +467,49 @@ try {
     $frontendHost = Get-AzCliTsv -Arguments @("webapp", "show", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--query", "defaultHostName", "-o", "tsv")
     $backendUrl = "https://$backendHost"
     $frontendUrl = "https://$frontendHost"
+    $frontendVerifyEmailUrl = "$frontendUrl/verify-email"
+    $authSecretKey = New-StrongSecret -ByteLength 48
 
     Write-Step "Applying runtime settings to backend, frontend, and function apps"
-    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "-o", "none") | Out-Null
-    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "AUTH_SECRET_KEY=$authSecretKey", "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl", "AUTH_ACCESS_TOKEN_TTL_MINUTES=120", "AUTH_REQUIRE_EMAIL_VERIFICATION=true", "AUTH_EXPOSE_VERIFICATION_TOKEN=false", "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440", "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000", "SCM_DO_BUILD_DURING_DEPLOYMENT=true", "ENABLE_ORYX_BUILD=true", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "python -m uvicorn main:app --host 0.0.0.0 --port 8000", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "node server.js", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("functionapp", "config", "appsettings", "set", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--settings", "COSMOS_CONNECTION_STRING=$cosmosConnectionString", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "EVENT_GRID_ENDPOINT=$eventGridEndpoint", "EVENT_GRID_KEY=$eventGridKey", "BLOB_CONNECTION_STRING=$blobConnectionString", "-o", "none") | Out-Null
+
+    Write-Step "Ensuring Event Grid subscription to process_events function"
+    $processEventsFunctionExists = $false
+    try {
+        $processEventsFunction = Get-AzCliJson -Arguments @("functionapp", "function", "show", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--function-name", "process_events", "-o", "json")
+        $processEventsFunctionExists = $null -ne $processEventsFunction -and -not [string]::IsNullOrWhiteSpace([string]$processEventsFunction.id)
+    }
+    catch {
+        $processEventsFunctionExists = $false
+    }
+
+    if ($processEventsFunctionExists) {
+        $eventGridTopicId = Get-AzCliTsv -Arguments @("eventgrid", "topic", "show", "--name", $eventGridTopicName, "--resource-group", $ResourceGroupName, "--query", "id", "-o", "tsv")
+        $processEventsFunctionResourceId = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$functionAppName/functions/process_events"
+
+        $eventSubscriptionExists = $false
+        try {
+            $existingEventSubscription = Get-AzCliJson -Arguments @("eventgrid", "event-subscription", "show", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "-o", "json")
+            $eventSubscriptionExists = $null -ne $existingEventSubscription -and -not [string]::IsNullOrWhiteSpace([string]$existingEventSubscription.id)
+        }
+        catch {
+            $eventSubscriptionExists = $false
+        }
+
+        if (-not $eventSubscriptionExists) {
+            Invoke-AzCli -Arguments @("eventgrid", "event-subscription", "create", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "--endpoint-type", "azurefunction", "--endpoint", $processEventsFunctionResourceId, "--included-event-types", "GracePeriodExpired", "-o", "none") | Out-Null
+        }
+        else {
+            Write-Host "Event subscription '$eventSubscriptionName' already exists. Reusing existing subscription." -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Warning "Function 'process_events' was not found in '$functionAppName'. Event subscription '$eventSubscriptionName' was not created. Deploy function code first, then run infra/deploy.ps1 again to attach Event Grid."
+    }
 
     if (-not $SkipLocalFileUpdate) {
         Write-Step "Writing local development config files"
@@ -479,12 +536,19 @@ COSMOS_VAULTS_CONTAINER=$cosmosContainerName
 BLOB_CONNECTION_STRING=$blobConnectionString
 
 FRONTEND_ORIGINS=http://localhost:3000
+FRONTEND_VERIFY_EMAIL_URL=http://localhost:3000/verify-email
+
+AUTH_SECRET_KEY=local-dev-change-me-auth-secret
+AUTH_ACCESS_TOKEN_TTL_MINUTES=120
+AUTH_REQUIRE_EMAIL_VERIFICATION=true
+AUTH_EXPOSE_VERIFICATION_TOKEN=true
+EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440
+AUTH_PASSWORD_PBKDF2_ITERATIONS=260000
 "@
         Set-Content -Path $backendEnvPath -Value $backendEnvContent -Encoding UTF8
 
         $frontendEnvContent = @"
 NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user
 "@
         Set-Content -Path $frontendEnvPath -Value $frontendEnvContent -Encoding UTF8
 
@@ -509,14 +573,7 @@ NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user
 
         $backendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--xml")
         $frontendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--xml")
-        $functionsPublishProfile = ""
-        try {
-            $functionsPublishProfile = Get-AzCliRaw -Arguments @("functionapp", "deployment", "list-publishing-profiles", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--xml")
-        }
-        catch {
-            $canRerunFunctionsWorkflow = $false
-            Write-Warning "Skipping AZURE_FUNCTIONAPP_PUBLISH_PROFILE for '$functionAppName'. Flex Consumption does not support publish profiles and the deploy-functions workflow should be updated to use identity-based deployment."
-        }
+        $functionsPublishProfile = Get-AzCliRaw -Arguments @("functionapp", "deployment", "list-publishing-profiles", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--xml")
 
         Set-OrUpdateGithubSecret -Name "AZURE_BACKEND_WEBAPP_NAME" -Value $backendAppName -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_BACKEND_WEBAPP_PUBLISH_PROFILE" -Value $backendPublishProfile -Repo $GithubRepo
@@ -526,9 +583,7 @@ NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user
         Set-OrUpdateGithubSecret -Name "NEXT_PUBLIC_API_URL" -Value $backendUrl -Repo $GithubRepo
 
         Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_NAME" -Value $functionAppName -Repo $GithubRepo
-        if (-not [string]::IsNullOrWhiteSpace($functionsPublishProfile)) {
-            Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_PUBLISH_PROFILE" -Value $functionsPublishProfile -Repo $GithubRepo
-        }
+        Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_PUBLISH_PROFILE" -Value $functionsPublishProfile -Repo $GithubRepo
 
         Set-OrUpdateGithubSecret -Name "ACR_LOGIN_SERVER" -Value $acrLoginServer -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "ACR_USERNAME" -Value $acrUsername -Repo $GithubRepo
@@ -538,9 +593,6 @@ NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user
     if ($RerunWorkflowRuns) {
         Write-Step "Re-running latest workflow runs"
         $workflows = @("deploy-backend.yml", "deploy-frontend.yml", "deploy-functions.yml", "deploy-worker.yml")
-        if (-not $canRerunFunctionsWorkflow) {
-            $workflows = $workflows | Where-Object { $_ -ne "deploy-functions.yml" }
-        }
 
         foreach ($workflow in $workflows) {
             $runId = Get-GhRaw -Arguments @("run", "list", "--repo", $GithubRepo, "--workflow", $workflow, "--limit", "1", "--json", "databaseId", "-q", ".[0].databaseId")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -14,6 +14,8 @@ import {
   Text,
   useCatTheme,
 } from "@/components/catmagui";
+import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
+import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 
 type VaultDetail = {
   id: string;
@@ -38,14 +40,20 @@ type VaultFilesResponse = {
   files: VaultFile[];
 };
 
-type ErrorPayload = {
-  detail?: string;
-};
-
 type DownloadResponse = {
   download_url?: string;
   expires_at?: string;
 };
+
+type VaultStatus = "active" | "grace_period" | "delivery_initiated" | "delivered" | "disabled";
+
+const VAULT_STATUS_OPTIONS: VaultStatus[] = [
+  "active",
+  "grace_period",
+  "delivery_initiated",
+  "delivered",
+  "disabled",
+];
 
 const EMAIL_REGEX =
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
@@ -55,18 +63,6 @@ function normalizeVaultId(rawVaultId: string | string[] | undefined): string {
     return rawVaultId[0] ?? "";
   }
   return rawVaultId ?? "";
-}
-
-async function getErrorMessage(response: Response, fallbackMessage: string): Promise<string> {
-  try {
-    const payload = (await response.json()) as ErrorPayload;
-    if (payload.detail) {
-      return payload.detail;
-    }
-  } catch {
-    return `${fallbackMessage} HTTP ${response.status}.`;
-  }
-  return fallbackMessage;
 }
 
 function formatBytes(sizeInBytes: number | null | undefined): string {
@@ -89,12 +85,14 @@ function formatBytes(sizeInBytes: number | null | undefined): string {
 
 export default function VaultDetailsPage() {
   const t = useCatTheme();
+  const router = useRouter();
   const params = useParams<{ vault_id?: string | string[] }>();
   const vaultId = useMemo(() => normalizeVaultId(params?.vault_id), [params]);
-  const apiUrl = useMemo(
-    () => (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/$/, ""),
-    []
-  );
+  const apiUrl = useMemo(() => getApiUrl(), []);
+
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [signedInEmail, setSignedInEmail] = useState<string | null>(null);
 
   const [vault, setVault] = useState<VaultDetail | null>(null);
   const [files, setFiles] = useState<VaultFile[]>([]);
@@ -115,6 +113,44 @@ export default function VaultDetailsPage() {
   const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
+  const [isDeletingRecipient, setIsDeletingRecipient] = useState<string | null>(null);
+  const [isDeletingFileId, setIsDeletingFileId] = useState<string | null>(null);
+
+  const [editableName, setEditableName] = useState("");
+  const [editableGracePeriod, setEditableGracePeriod] = useState(30);
+  const [editableStatus, setEditableStatus] = useState<VaultStatus>("active");
+  const [isUpdatingVault, setIsUpdatingVault] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const [isDeletingVault, setIsDeletingVault] = useState(false);
+
+  const authRedirectPath = useMemo(() => {
+    if (!vaultId) {
+      return "/";
+    }
+    return `/vaults/${encodeURIComponent(vaultId)}`;
+  }, [vaultId]);
+
+  const handleUnauthorized = useCallback(() => {
+    clearAuthSession();
+    setAuthToken(null);
+    router.replace(`/auth?next=${encodeURIComponent(authRedirectPath)}`);
+  }, [authRedirectPath, router]);
+
+  useEffect(() => {
+    const token = getAuthToken();
+    if (!token) {
+      handleUnauthorized();
+      setIsCheckingAuth(false);
+      return;
+    }
+
+    setAuthToken(token);
+    setSignedInEmail(getAuthEmail());
+    setIsCheckingAuth(false);
+  }, [handleUnauthorized]);
+
   const fetchVaultData = useCallback(
     async (displayFullLoading: boolean) => {
       if (!apiUrl) {
@@ -131,6 +167,10 @@ export default function VaultDetailsPage() {
         return;
       }
 
+      if (!authToken) {
+        return;
+      }
+
       if (displayFullLoading) {
         setIsLoading(true);
       } else {
@@ -140,16 +180,25 @@ export default function VaultDetailsPage() {
 
       try {
         const [vaultResponse, filesResponse] = await Promise.all([
-          fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`),
-          fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`),
+          fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`, {
+            headers: buildAuthHeaders(authToken, false),
+          }),
+          fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`, {
+            headers: buildAuthHeaders(authToken, false),
+          }),
         ]);
 
+        if (isUnauthorizedStatus(vaultResponse.status) || isUnauthorizedStatus(filesResponse.status)) {
+          handleUnauthorized();
+          return;
+        }
+
         if (!vaultResponse.ok) {
-          const message = await getErrorMessage(vaultResponse, "Failed to fetch vault details.");
+          const message = await getErrorDetail(vaultResponse, "Failed to fetch vault details.");
           throw new Error(message);
         }
         if (!filesResponse.ok) {
-          const message = await getErrorMessage(filesResponse, "Failed to fetch vault files.");
+          const message = await getErrorDetail(filesResponse, "Failed to fetch vault files.");
           throw new Error(message);
         }
 
@@ -157,6 +206,11 @@ export default function VaultDetailsPage() {
         const filesPayload = (await filesResponse.json()) as VaultFilesResponse;
 
         setVault(vaultPayload);
+        setEditableName(vaultPayload.name || "");
+        setEditableGracePeriod(Number(vaultPayload.grace_period_days || 1));
+        if (VAULT_STATUS_OPTIONS.includes(vaultPayload.status as VaultStatus)) {
+          setEditableStatus(vaultPayload.status as VaultStatus);
+        }
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
       } catch (error) {
         const message =
@@ -167,12 +221,20 @@ export default function VaultDetailsPage() {
         setIsRefreshing(false);
       }
     },
-    [apiUrl, vaultId]
+    [apiUrl, authToken, handleUnauthorized, vaultId]
   );
 
   useEffect(() => {
-    void fetchVaultData(true);
-  }, [fetchVaultData]);
+    if (!isCheckingAuth && authToken) {
+      void fetchVaultData(true);
+    }
+  }, [authToken, fetchVaultData, isCheckingAuth]);
+
+  const handleSignOut = useCallback(() => {
+    clearAuthSession();
+    setAuthToken(null);
+    router.replace(`/auth?next=${encodeURIComponent(authRedirectPath)}`);
+  }, [authRedirectPath, router]);
 
   const handleAddRecipient = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -184,7 +246,7 @@ export default function VaultDetailsPage() {
       setRecipientError("Please provide a valid email address.");
       return;
     }
-    if (!apiUrl || !vaultId) {
+    if (!apiUrl || !vaultId || !authToken) {
       setRecipientError("API URL or vault identifier is missing.");
       return;
     }
@@ -193,14 +255,17 @@ export default function VaultDetailsPage() {
     try {
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/recipients`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: buildAuthHeaders(authToken, true),
         body: JSON.stringify({ email }),
       });
 
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
       if (!response.ok) {
-        const message = await getErrorMessage(response, "Failed to add recipient.");
+        const message = await getErrorDetail(response, "Failed to add recipient.");
         throw new Error(message);
       }
 
@@ -216,6 +281,46 @@ export default function VaultDetailsPage() {
     }
   };
 
+  const handleDeleteRecipient = async (email: string) => {
+    setRecipientMessage(null);
+    setRecipientError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setRecipientError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsDeletingRecipient(email);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/recipients/${encodeURIComponent(email)}`,
+        {
+          method: "DELETE",
+          headers: buildAuthHeaders(authToken, false),
+        }
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to delete recipient.");
+        throw new Error(message);
+      }
+
+      setRecipientMessage("Recipient removed successfully.");
+      await fetchVaultData(false);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unexpected error while deleting recipient.";
+      setRecipientError(message);
+    } finally {
+      setIsDeletingRecipient(null);
+    }
+  };
+
   const handleFileUpload = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setUploadMessage(null);
@@ -225,7 +330,7 @@ export default function VaultDetailsPage() {
       setUploadError("Please choose a file before uploading.");
       return;
     }
-    if (!apiUrl || !vaultId) {
+    if (!apiUrl || !vaultId || !authToken) {
       setUploadError("API URL or vault identifier is missing.");
       return;
     }
@@ -237,11 +342,17 @@ export default function VaultDetailsPage() {
 
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`, {
         method: "POST",
+        headers: buildAuthHeaders(authToken, false),
         body: formData,
       });
 
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
       if (!response.ok) {
-        const message = await getErrorMessage(response, "Failed to upload file.");
+        const message = await getErrorDetail(response, "Failed to upload file.");
         throw new Error(message);
       }
 
@@ -259,7 +370,7 @@ export default function VaultDetailsPage() {
 
   const handleDownload = async (fileId: string) => {
     setDownloadError(null);
-    if (!apiUrl || !vaultId) {
+    if (!apiUrl || !vaultId || !authToken) {
       setDownloadError("API URL or vault identifier is missing.");
       return;
     }
@@ -267,11 +378,19 @@ export default function VaultDetailsPage() {
     setDownloadingFileId(fileId);
     try {
       const response = await fetch(
-        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileId)}/download`
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileId)}/download`,
+        {
+          headers: buildAuthHeaders(authToken, false),
+        }
       );
 
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
       if (!response.ok) {
-        const message = await getErrorMessage(response, "Failed to generate download URL.");
+        const message = await getErrorDetail(response, "Failed to generate download URL.");
         throw new Error(message);
       }
 
@@ -290,9 +409,161 @@ export default function VaultDetailsPage() {
     }
   };
 
+  const handleDeleteFile = async (fileId: string) => {
+    setDownloadError(null);
+    if (!apiUrl || !vaultId || !authToken) {
+      setDownloadError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsDeletingFileId(fileId);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileId)}`,
+        {
+          method: "DELETE",
+          headers: buildAuthHeaders(authToken, false),
+        }
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to delete file.");
+        throw new Error(message);
+      }
+
+      await fetchVaultData(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected file delete error.";
+      setDownloadError(message);
+    } finally {
+      setIsDeletingFileId(null);
+    }
+  };
+
+  const handleUpdateVault = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setUpdateMessage(null);
+    setUpdateError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setUpdateError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    const normalizedName = editableName.trim();
+    if (!normalizedName) {
+      setUpdateError("Vault name is required.");
+      return;
+    }
+
+    if (!Number.isFinite(editableGracePeriod) || editableGracePeriod < 1) {
+      setUpdateError("Grace period must be at least 1 day.");
+      return;
+    }
+
+    setIsUpdatingVault(true);
+    try {
+      const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`, {
+        method: "PATCH",
+        headers: buildAuthHeaders(authToken, true),
+        body: JSON.stringify({
+          name: normalizedName,
+          grace_period_days: Number(editableGracePeriod),
+          status: editableStatus,
+        }),
+      });
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to update vault.");
+        throw new Error(message);
+      }
+
+      setUpdateMessage("Vault settings updated.");
+      await fetchVaultData(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected vault update error.";
+      setUpdateError(message);
+    } finally {
+      setIsUpdatingVault(false);
+    }
+  };
+
+  const handleDeleteVault = async () => {
+    setUpdateMessage(null);
+    setUpdateError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setUpdateError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    if (!window.confirm("Delete this vault and all uploaded files?")) {
+      return;
+    }
+
+    setIsDeletingVault(true);
+    try {
+      const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`, {
+        method: "DELETE",
+        headers: buildAuthHeaders(authToken, false),
+      });
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to delete vault.");
+        throw new Error(message);
+      }
+
+      router.replace("/");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected vault delete error.";
+      setUpdateError(message);
+    } finally {
+      setIsDeletingVault(false);
+    }
+  };
+
   const mainBackground = t.isDark
     ? "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.14), transparent 35%), radial-gradient(circle at 80% 8%, rgba(80, 80, 90, 0.32), transparent 30%), linear-gradient(180deg, #050505 0%, #09090B 60%, #050505 100%)"
     : "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.1), transparent 38%), radial-gradient(circle at 84% 10%, rgba(24, 24, 27, 0.06), transparent 35%), linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 55%, #FFFFFF 100%)";
+
+  if (isCheckingAuth) {
+    return (
+      <main
+        style={{
+          minHeight: "100vh",
+          background: mainBackground,
+          color: t.colors.text.primary,
+          padding: `${t.space.xl}px ${t.space.m}px`,
+          fontFamily: "var(--font-geist-sans), sans-serif",
+        }}
+      >
+        <div style={{ margin: "0 auto", width: "100%", maxWidth: 1180 }}>
+          <Card variant="elevated">
+            <Alert variant="info" message="Checking session..." />
+          </Card>
+        </div>
+      </main>
+    );
+  }
+
+  if (!authToken) {
+    return null;
+  }
 
   return (
     <main
@@ -321,6 +592,11 @@ export default function VaultDetailsPage() {
               <Text variant="bodySmall" color="secondary">
                 Vault ID: {vaultId || "Unavailable"}
               </Text>
+              {signedInEmail ? (
+                <Text variant="caption" color="muted">
+                  Signed in as {signedInEmail}
+                </Text>
+              ) : null}
             </div>
 
             <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
@@ -334,6 +610,9 @@ export default function VaultDetailsPage() {
                 variant="SolidPrimary"
               >
                 {isRefreshing ? "Refreshing..." : "Refresh"}
+              </Button>
+              <Button type="button" onClick={handleSignOut} variant="Destructive">
+                Sign Out
               </Button>
             </div>
           </div>
@@ -386,6 +665,82 @@ export default function VaultDetailsPage() {
           >
             <div style={{ display: "grid", gap: t.space.m }}>
               <Card variant="elevated" style={{ gap: t.space.s }}>
+                <Text variant="h3">Vault Settings</Text>
+                <form
+                  onSubmit={handleUpdateVault}
+                  style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
+                >
+                  <Input
+                    id="vault-name"
+                    label="Vault Name"
+                    value={editableName}
+                    onChange={(event) => setEditableName(event.target.value)}
+                    required
+                  />
+
+                  <Input
+                    id="vault-grace"
+                    type="number"
+                    min={1}
+                    max={3650}
+                    label="Grace Period (days)"
+                    value={editableGracePeriod}
+                    onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
+                    required
+                  />
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
+                    <Text variant="label" color="secondary">
+                      Status
+                    </Text>
+                    <select
+                      value={editableStatus}
+                      onChange={(event) => setEditableStatus(event.target.value as VaultStatus)}
+                      style={{
+                        width: "100%",
+                        border: `1px solid ${t.colors.components.input.border}`,
+                        backgroundColor: t.colors.components.input.bg,
+                        color: t.colors.text.primary,
+                        borderRadius: t.radius.full,
+                        padding: `${t.space.s}px ${t.space.m}px`,
+                        fontFamily: "var(--font-geist-sans), sans-serif",
+                        fontSize: t.typography.body.fontSize,
+                        lineHeight: String(t.typography.body.lineHeight),
+                        outline: "none",
+                      }}
+                    >
+                      {VAULT_STATUS_OPTIONS.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <Button
+                    type="submit"
+                    size="full"
+                    variant="SolidPrimary"
+                    disabled={isUpdatingVault}
+                  >
+                    {isUpdatingVault ? "Updating Vault..." : "Save Vault Settings"}
+                  </Button>
+                </form>
+
+                <Button
+                  type="button"
+                  variant="Destructive"
+                  onClick={() => void handleDeleteVault()}
+                  disabled={isDeletingVault}
+                >
+                  {isDeletingVault ? "Deleting Vault..." : "Delete Vault"}
+                </Button>
+
+                {updateError ? <Alert variant="error" message={updateError} /> : null}
+                {updateMessage ? <Alert variant="success" message={updateMessage} /> : null}
+              </Card>
+
+              <Card variant="elevated" style={{ gap: t.space.s }}>
                 <Text variant="h3">Recipients</Text>
                 <Text variant="bodySmall" color="secondary">
                   Add recipients who can receive the vault when delivery is initiated.
@@ -418,8 +773,27 @@ export default function VaultDetailsPage() {
                 <div style={{ display: "grid", gap: t.space.xs }}>
                   {vault?.recipients.length ? (
                     vault.recipients.map((recipient) => (
-                      <Card key={recipient} variant="secondary" style={{ padding: t.space.s }}>
-                        <Text variant="bodySmall">{recipient}</Text>
+                      <Card key={recipient} variant="secondary" style={{ padding: t.space.s, gap: t.space.xs }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: t.space.xs,
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <Text variant="bodySmall">{recipient}</Text>
+                          <Button
+                            type="button"
+                            size="default"
+                            variant="Destructive"
+                            disabled={isDeletingRecipient === recipient}
+                            onClick={() => void handleDeleteRecipient(recipient)}
+                          >
+                            {isDeletingRecipient === recipient ? "Removing..." : "Remove"}
+                          </Button>
+                        </div>
                       </Card>
                     ))
                   ) : (
@@ -507,6 +881,14 @@ export default function VaultDetailsPage() {
                           variant="Primary"
                         >
                           {downloadingFileId === fileItem.id ? "Preparing..." : "Download"}
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={() => void handleDeleteFile(fileItem.id)}
+                          disabled={isDeletingFileId === fileItem.id}
+                          variant="Destructive"
+                        >
+                          {isDeletingFileId === fileItem.id ? "Removing..." : "Delete"}
                         </Button>
                       </div>
 

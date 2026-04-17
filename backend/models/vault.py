@@ -15,7 +15,6 @@ class VaultStatus(str, Enum):
 
 
 class VaultBase(BaseModel):
-    user_id: str = Field(..., min_length=1, max_length=128)
     name: str = Field(..., min_length=1, max_length=200)
     grace_period_days: int = Field(..., ge=1, le=3650)
     status: VaultStatus = VaultStatus.ACTIVE
@@ -23,7 +22,7 @@ class VaultBase(BaseModel):
 
 
 class VaultCreate(VaultBase):
-    pass
+    user_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
 
 
 class VaultUpdate(BaseModel):
@@ -35,6 +34,7 @@ class VaultUpdate(BaseModel):
 
 class Vault(VaultBase):
     id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1, max_length=128)
 
 
 class VaultResponse(Vault):

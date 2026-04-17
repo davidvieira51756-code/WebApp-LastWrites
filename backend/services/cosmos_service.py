@@ -52,10 +52,129 @@ class CosmosService:
             raise RuntimeError("CosmosService is not initialized.")
         return self._container
 
+    @staticmethod
+    def _is_vault_document(item: Dict[str, Any]) -> bool:
+        doc_type = str(item.get("doc_type", "vault")).strip().lower()
+        return doc_type == "vault"
+
+    def create_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
+        container = self._get_container()
+        payload = dict(user_data)
+        payload["id"] = str(payload.get("id") or uuid4())
+        payload["user_id"] = str(payload.get("user_id") or payload["id"])
+        payload["doc_type"] = "user"
+
+        email = str(payload.get("email", "")).strip().lower()
+        if not email:
+            raise ValueError("user_data must include email.")
+        if self.get_user_by_email(email) is not None:
+            raise ValueError("An account with this email already exists.")
+
+        payload["email"] = email
+
+        try:
+            created_item = container.create_item(body=payload)
+            logger.info("Created user id=%s", created_item.get("id"))
+            return created_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB create_item failed for user email=%s", email)
+            raise
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        normalized_email = email.strip().lower()
+        query = (
+            "SELECT * FROM c WHERE c.doc_type = 'user' "
+            "AND LOWER(c.email) = @email"
+        )
+        parameters = [{"name": "@email", "value": normalized_email}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB read failed for user email=%s", normalized_email)
+            raise
+
+        if not items:
+            return None
+        return items[0]
+
+    def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        query = "SELECT * FROM c WHERE c.doc_type = 'user' AND c.id = @id"
+        parameters = [{"name": "@id", "value": user_id}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB read failed for user id=%s", user_id)
+            raise
+
+        if not items:
+            return None
+        return items[0]
+
+    def get_user_by_verification_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        query = (
+            "SELECT * FROM c WHERE c.doc_type = 'user' "
+            "AND c.verification_token_hash = @token_hash"
+        )
+        parameters = [{"name": "@token_hash", "value": token_hash}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB token lookup failed for email verification.")
+            raise
+
+        if not items:
+            return None
+        return items[0]
+
+    def update_user(self, user_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        existing_item = self.get_user_by_id(user_id)
+        if existing_item is None:
+            return None
+
+        merged_item = dict(existing_item)
+        merged_item.update(update_data)
+        merged_item["id"] = existing_item["id"]
+        merged_item["user_id"] = existing_item["user_id"]
+        merged_item["doc_type"] = "user"
+
+        try:
+            updated_item = container.replace_item(item=existing_item, body=merged_item)
+            logger.info("Updated user id=%s", existing_item["id"])
+            return updated_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB update failed for user id=%s", user_id)
+            raise
+
     def create_vault(self, vault_data: Dict[str, Any]) -> Dict[str, Any]:
         container = self._get_container()
         payload = dict(vault_data)
         payload["id"] = payload.get("id") or str(uuid4())
+        payload["doc_type"] = "vault"
 
         if not payload.get("user_id"):
             raise ValueError("vault_data must include user_id.")
@@ -74,7 +193,7 @@ class CosmosService:
 
     def get_vault_by_id(self, vault_id: str) -> Optional[Dict[str, Any]]:
         container = self._get_container()
-        query = "SELECT * FROM c WHERE c.id = @id"
+        query = "SELECT * FROM c WHERE c.id = @id AND c.doc_type = 'vault'"
         parameters = [{"name": "@id", "value": vault_id}]
 
         try:
@@ -94,11 +213,11 @@ class CosmosService:
 
     def list_vaults(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         container = self._get_container()
-        query = "SELECT * FROM c"
+        query = "SELECT * FROM c WHERE c.doc_type = 'vault'"
         parameters = None
 
         if user_id:
-            query = "SELECT * FROM c WHERE c.user_id = @user_id"
+            query = "SELECT * FROM c WHERE c.doc_type = 'vault' AND c.user_id = @user_id"
             parameters = [{"name": "@user_id", "value": user_id}]
 
         try:
@@ -109,7 +228,7 @@ class CosmosService:
                     enable_cross_partition_query=True,
                 )
             )
-            return items
+            return [item for item in items if self._is_vault_document(item)]
         except exceptions.CosmosHttpResponseError:
             logger.exception("Cosmos DB list query failed.")
             raise

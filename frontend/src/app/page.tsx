@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
@@ -11,23 +12,48 @@ import {
     Text,
     useCatTheme,
 } from "@/components/catmagui";
+import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
+import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import CreateVaultForm, { type Vault } from "../components/CreateVaultForm";
 
 export default function DashboardPage() {
     const t = useCatTheme();
-    const apiUrl = useMemo(
-        () => (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, ""),
-        []
-    );
+    const router = useRouter();
+    const apiUrl = useMemo(() => getApiUrl(), []);
 
     const [vaults, setVaults] = useState<Vault[]>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+    const [authToken, setAuthToken] = useState<string | null>(null);
+    const [signedInEmail, setSignedInEmail] = useState<string | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+    const redirectToAuth = useCallback(() => {
+        clearAuthSession();
+        setAuthToken(null);
+        router.replace("/auth?next=/");
+    }, [router]);
+
+    useEffect(() => {
+        const token = getAuthToken();
+        if (!token) {
+            redirectToAuth();
+            setIsCheckingAuth(false);
+            return;
+        }
+
+        setAuthToken(token);
+        setSignedInEmail(getAuthEmail());
+        setIsCheckingAuth(false);
+    }, [redirectToAuth]);
 
     const fetchVaults = useCallback(async () => {
         if (!apiUrl) {
             setErrorMessage("NEXT_PUBLIC_API_URL is not configured.");
             setVaults([]);
+            return;
+        }
+        if (!authToken) {
             return;
         }
 
@@ -36,18 +62,16 @@ export default function DashboardPage() {
         try {
             const response = await fetch(`${apiUrl}/vaults`, {
                 method: "GET",
+                headers: buildAuthHeaders(authToken, false),
             });
 
+            if (isUnauthorizedStatus(response.status)) {
+                redirectToAuth();
+                return;
+            }
+
             if (!response.ok) {
-                let detail = "Failed to fetch vaults.";
-                try {
-                    const errorPayload = (await response.json()) as { detail?: string };
-                    if (errorPayload.detail) {
-                        detail = errorPayload.detail;
-                    }
-                } catch {
-                    detail = `Failed to fetch vaults. HTTP ${response.status}.`;
-                }
+                const detail = await getErrorDetail(response, "Failed to fetch vaults.");
                 throw new Error(detail);
             }
 
@@ -60,11 +84,13 @@ export default function DashboardPage() {
         } finally {
             setIsLoading(false);
         }
-    }, [apiUrl]);
+    }, [apiUrl, authToken, redirectToAuth]);
 
     useEffect(() => {
-        void fetchVaults();
-    }, [fetchVaults]);
+        if (!isCheckingAuth && authToken) {
+            void fetchVaults();
+        }
+    }, [authToken, fetchVaults, isCheckingAuth]);
 
     const handleVaultCreated = useCallback((createdVault: Vault) => {
         setVaults((previousVaults) => [
@@ -73,9 +99,39 @@ export default function DashboardPage() {
         ]);
     }, []);
 
+    const handleSignOut = useCallback(() => {
+        clearAuthSession();
+        setAuthToken(null);
+        router.replace("/auth");
+    }, [router]);
+
     const mainBackground = t.isDark
         ? "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.14), transparent 35%), radial-gradient(circle at 80% 8%, rgba(80, 80, 90, 0.32), transparent 30%), linear-gradient(180deg, #050505 0%, #09090B 60%, #050505 100%)"
         : "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.1), transparent 38%), radial-gradient(circle at 84% 10%, rgba(24, 24, 27, 0.06), transparent 35%), linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 55%, #FFFFFF 100%)";
+
+    if (isCheckingAuth) {
+        return (
+            <main
+                style={{
+                    minHeight: "100vh",
+                    background: mainBackground,
+                    color: t.colors.text.primary,
+                    padding: `${t.space.xl}px ${t.space.m}px`,
+                    fontFamily: "var(--font-geist-sans), sans-serif",
+                }}
+            >
+                <div style={{ margin: "0 auto", width: "100%", maxWidth: 1180 }}>
+                    <Card variant="elevated">
+                        <Alert variant="info" message="Checking session..." />
+                    </Card>
+                </div>
+            </main>
+        );
+    }
+
+    if (!authToken) {
+        return null;
+    }
 
     return (
         <main
@@ -105,11 +161,21 @@ export default function DashboardPage() {
                             Manage digital legacy vaults, monitor grace periods, and keep recipient delivery
                             rules up to date.
                         </Text>
+                        {signedInEmail ? (
+                            <Text variant="caption" color="muted">
+                                Signed in as {signedInEmail}
+                            </Text>
+                        ) : null}
                     </div>
 
-                    <Button type="button" onClick={() => void fetchVaults()} variant="Primary">
-                        Refresh Vaults
-                    </Button>
+                    <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+                        <Button type="button" onClick={() => void fetchVaults()} variant="Primary">
+                            Refresh Vaults
+                        </Button>
+                        <Button type="button" onClick={handleSignOut} variant="Destructive">
+                            Sign Out
+                        </Button>
+                    </div>
                 </header>
 
                 {!apiUrl ? (
@@ -129,7 +195,12 @@ export default function DashboardPage() {
                         alignItems: "start",
                     }}
                 >
-                    <CreateVaultForm apiUrl={apiUrl} onCreated={handleVaultCreated} />
+                    <CreateVaultForm
+                        apiUrl={apiUrl}
+                        authToken={authToken}
+                        onCreated={handleVaultCreated}
+                        onUnauthorized={redirectToAuth}
+                    />
 
                     <Card variant="elevated" style={{ gap: t.space.s }}>
                         <div
