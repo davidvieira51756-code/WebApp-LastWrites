@@ -1,9 +1,19 @@
 "use client";
 
-import Link from "next/link";
 import { useParams } from "next/navigation";
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+
+import {
+  Alert,
+  Badge,
+  Button,
+  ButtonLink,
+  Card,
+  Input,
+  Text,
+  useCatTheme,
+} from "@/components/catmagui";
 
 type VaultDetail = {
   id: string;
@@ -78,6 +88,7 @@ function formatBytes(sizeInBytes: number | null | undefined): string {
 }
 
 export default function VaultDetailsPage() {
+  const t = useCatTheme();
   const params = useParams<{ vault_id?: string | string[] }>();
   const vaultId = useMemo(() => normalizeVaultId(params?.vault_id), [params]);
   const apiUrl = useMemo(
@@ -279,228 +290,248 @@ export default function VaultDetailsPage() {
     }
   };
 
+  const mainBackground = t.isDark
+    ? "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.14), transparent 35%), radial-gradient(circle at 80% 8%, rgba(80, 80, 90, 0.32), transparent 30%), linear-gradient(180deg, #050505 0%, #09090B 60%, #050505 100%)"
+    : "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.1), transparent 38%), radial-gradient(circle at 84% 10%, rgba(24, 24, 27, 0.06), transparent 35%), linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 55%, #FFFFFF 100%)";
+
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(20,184,166,0.18),transparent_40%),radial-gradient(circle_at_85%_15%,rgba(14,165,233,0.15),transparent_35%),linear-gradient(180deg,#f8fafc_0%,#ecfeff_45%,#f8fafc_100%)] px-4 py-10 font-['Space_Grotesk',sans-serif] text-slate-900 sm:px-8 lg:px-12">
-      <div className="mx-auto w-full max-w-6xl space-y-6">
-        <header className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-xl shadow-slate-200/70 backdrop-blur">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="inline-block rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-700">
-                Last Writes Vault
-              </p>
-              <h1 className="mt-3 font-['Fraunces',serif] text-3xl font-semibold text-slate-900 sm:text-4xl">
-                {vault ? vault.name : "Vault Details"}
-              </h1>
-              <p className="mt-2 text-sm text-slate-600">Vault ID: {vaultId || "Unavailable"}</p>
+    <main
+      style={{
+        minHeight: "100vh",
+        background: mainBackground,
+        color: t.colors.text.primary,
+        padding: `${t.space.xl}px ${t.space.m}px`,
+        fontFamily: "var(--font-geist-sans), sans-serif",
+      }}
+    >
+      <div style={{ margin: "0 auto", width: "100%", maxWidth: 1180, display: "grid", gap: t.space.m }}>
+        <Card variant="elevated" style={{ gap: t.space.s }}>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              justifyContent: "space-between",
+              alignItems: "flex-end",
+              gap: t.space.s,
+            }}
+          >
+            <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
+              <Badge label="LAST WRITES VAULT" variant="default" outlineOnly />
+              <Text variant="h2">{vault ? vault.name : "Vault Details"}</Text>
+              <Text variant="bodySmall" color="secondary">
+                Vault ID: {vaultId || "Unavailable"}
+              </Text>
             </div>
 
-            <div className="flex items-center gap-2">
-              <Link
-                href="/"
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-cyan-400 hover:text-cyan-700"
-              >
+            <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+              <ButtonLink href="/" variant="Primary">
                 Back to Dashboard
-              </Link>
-              <button
+              </ButtonLink>
+              <Button
                 type="button"
                 onClick={() => void fetchVaultData(false)}
                 disabled={isLoading || isRefreshing}
-                className="rounded-xl bg-linear-to-r from-teal-600 to-cyan-600 px-4 py-2 text-sm font-semibold text-white transition hover:from-teal-500 hover:to-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
+                variant="SolidPrimary"
               >
                 {isRefreshing ? "Refreshing..." : "Refresh"}
-              </button>
+              </Button>
             </div>
           </div>
 
           {vault ? (
-            <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                <p className="text-slate-500">Status</p>
-                <p className="font-semibold text-slate-800">{vault.status}</p>
-              </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                <p className="text-slate-500">Grace Period</p>
-                <p className="font-semibold text-slate-800">{vault.grace_period_days} days</p>
-              </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                <p className="text-slate-500">Recipients</p>
-                <p className="font-semibold text-slate-800">{vault.recipients.length}</p>
-              </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                gap: t.space.xs,
+              }}
+            >
+              <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
+                <Text variant="caption" color="muted">Status</Text>
+                <Text variant="label">{vault.status}</Text>
+              </Card>
+              <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
+                <Text variant="caption" color="muted">Grace Period</Text>
+                <Text variant="label">{vault.grace_period_days} days</Text>
+              </Card>
+              <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
+                <Text variant="caption" color="muted">Recipients</Text>
+                <Text variant="label">{vault.recipients.length}</Text>
+              </Card>
             </div>
           ) : null}
-        </header>
+        </Card>
 
-        {isLoading ? (
-          <section className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600 shadow-lg">
-            Loading vault details...
-          </section>
-        ) : null}
+        {isLoading ? <Alert variant="info" message="Loading vault details..." /> : null}
 
         {!isLoading && pageError ? (
-          <section className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-700 shadow-lg">
-            <p>{pageError}</p>
-            <button
-              type="button"
-              onClick={() => void fetchVaultData(true)}
-              className="mt-4 rounded-lg border border-rose-300 bg-white px-3 py-2 font-semibold text-rose-700 transition hover:bg-rose-100"
-            >
-              Retry
-            </button>
-          </section>
+          <Card variant="secondary" style={{ gap: t.space.s }}>
+            <Alert variant="error" message={pageError} />
+            <div>
+              <Button type="button" onClick={() => void fetchVaultData(true)} variant="Primary">
+                Retry
+              </Button>
+            </div>
+          </Card>
         ) : null}
 
         {!isLoading && !pageError ? (
-          <section className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
-            <div className="space-y-6">
-              <article className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-xl shadow-slate-200/70 backdrop-blur">
-                <h2 className="font-['Fraunces',serif] text-2xl font-semibold text-slate-900">
-                  Recipients
-                </h2>
-                <p className="mt-2 text-sm text-slate-600">
+          <section
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+              gap: t.space.m,
+              alignItems: "start",
+            }}
+          >
+            <div style={{ display: "grid", gap: t.space.m }}>
+              <Card variant="elevated" style={{ gap: t.space.s }}>
+                <Text variant="h3">Recipients</Text>
+                <Text variant="bodySmall" color="secondary">
                   Add recipients who can receive the vault when delivery is initiated.
-                </p>
+                </Text>
 
-                <form onSubmit={handleAddRecipient} className="mt-5 space-y-3">
-                  <input
+                <form
+                  onSubmit={handleAddRecipient}
+                  style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
+                >
+                  <Input
                     type="email"
                     value={recipientEmail}
                     onChange={(event) => setRecipientEmail(event.target.value)}
                     placeholder="recipient@example.com"
-                    className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 outline-none transition focus:border-teal-500 focus:shadow-[0_0_0_4px_rgba(20,184,166,0.15)]"
                     required
                   />
-                  <button
+                  <Button
                     type="submit"
+                    size="full"
+                    variant="SolidPrimary"
                     disabled={isAddingRecipient}
-                    className="w-full rounded-xl bg-linear-to-r from-teal-600 to-cyan-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:from-teal-500 hover:to-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isAddingRecipient ? "Adding Recipient..." : "Add Recipient"}
-                  </button>
+                  </Button>
                 </form>
 
-                {recipientError ? (
-                  <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                    {recipientError}
-                  </p>
-                ) : null}
-                {recipientMessage ? (
-                  <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-                    {recipientMessage}
-                  </p>
-                ) : null}
+                {recipientError ? <Alert variant="error" message={recipientError} /> : null}
+                {recipientMessage ? <Alert variant="success" message={recipientMessage} /> : null}
 
-                <div className="mt-5 space-y-2">
+                <div style={{ display: "grid", gap: t.space.xs }}>
                   {vault?.recipients.length ? (
                     vault.recipients.map((recipient) => (
-                      <p
-                        key={recipient}
-                        className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700"
-                      >
-                        {recipient}
-                      </p>
+                      <Card key={recipient} variant="secondary" style={{ padding: t.space.s }}>
+                        <Text variant="bodySmall">{recipient}</Text>
+                      </Card>
                     ))
                   ) : (
-                    <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                      No recipients configured yet.
-                    </p>
+                    <Alert variant="info" message="No recipients configured yet." />
                   )}
                 </div>
-              </article>
+              </Card>
 
-              <article className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-xl shadow-slate-200/70 backdrop-blur">
-                <h2 className="font-['Fraunces',serif] text-2xl font-semibold text-slate-900">
-                  Upload File
-                </h2>
-                <p className="mt-2 text-sm text-slate-600">
+              <Card variant="elevated" style={{ gap: t.space.s }}>
+                <Text variant="h3">Upload File</Text>
+                <Text variant="bodySmall" color="secondary">
                   Attach new files to this vault using secure upload.
-                </p>
+                </Text>
 
-                <form onSubmit={handleFileUpload} className="mt-5 space-y-3">
+                <form
+                  onSubmit={handleFileUpload}
+                  style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
+                >
                   <input
                     type="file"
                     onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-                    className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-cyan-100 file:px-3 file:py-1.5 file:font-semibold file:text-cyan-700"
+                    style={{
+                      width: "100%",
+                      border: `1px solid ${t.colors.components.input.border}`,
+                      borderRadius: t.radius.l,
+                      backgroundColor: t.colors.components.input.bg,
+                      color: t.colors.text.secondary,
+                      padding: `${t.space.s}px ${t.space.s}px`,
+                      fontFamily: "var(--font-geist-sans), sans-serif",
+                    }}
                   />
-                  <button
+                  <Button
                     type="submit"
+                    size="full"
+                    variant="SolidPrimary"
                     disabled={isUploadingFile}
-                    className="w-full rounded-xl bg-linear-to-r from-teal-600 to-cyan-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:from-teal-500 hover:to-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {isUploadingFile ? "Uploading..." : "Upload File"}
-                  </button>
+                  </Button>
                 </form>
 
-                {uploadError ? (
-                  <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                    {uploadError}
-                  </p>
-                ) : null}
-                {uploadMessage ? (
-                  <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-                    {uploadMessage}
-                  </p>
-                ) : null}
-              </article>
+                {uploadError ? <Alert variant="error" message={uploadError} /> : null}
+                {uploadMessage ? <Alert variant="success" message={uploadMessage} /> : null}
+              </Card>
             </div>
 
-            <article className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-xl shadow-slate-200/70 backdrop-blur">
-              <div className="mb-4 flex items-center justify-between">
-                <h2 className="font-['Fraunces',serif] text-2xl font-semibold text-slate-900">
-                  Attached Files
-                </h2>
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-                  {files.length} files
-                </span>
+            <Card variant="elevated" style={{ gap: t.space.s }}>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  gap: t.space.xs,
+                }}
+              >
+                <Text variant="h3">Attached Files</Text>
+                <Badge label={`${files.length} files`} size="sm" outlineOnly />
               </div>
 
-              {downloadError ? (
-                <p className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                  {downloadError}
-                </p>
-              ) : null}
+              {downloadError ? <Alert variant="error" message={downloadError} /> : null}
 
               {files.length === 0 ? (
-                <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                  No files uploaded yet.
-                </p>
+                <Alert variant="info" message="No files uploaded yet." />
               ) : (
-                <div className="space-y-3">
+                <div style={{ display: "grid", gap: t.space.s }}>
                   {files.map((fileItem) => (
-                    <div
-                      key={fileItem.id}
-                      className="rounded-xl border border-slate-200 bg-white p-4 transition hover:border-cyan-300"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-semibold text-slate-900">{fileItem.file_name}</p>
-                          <p className="mt-1 text-xs text-slate-500">File ID: {fileItem.id}</p>
+                    <Card key={fileItem.id} variant="secondary" style={{ padding: t.space.m, gap: t.space.s }}>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          justifyContent: "space-between",
+                          alignItems: "flex-start",
+                          gap: t.space.s,
+                        }}
+                      >
+                        <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
+                          <Text variant="label">{fileItem.file_name}</Text>
+                          <Text variant="caption" color="muted">File ID: {fileItem.id}</Text>
                         </div>
-                        <button
+                        <Button
                           type="button"
                           onClick={() => void handleDownload(fileItem.id)}
                           disabled={downloadingFileId === fileItem.id}
-                          className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          variant="Primary"
                         >
                           {downloadingFileId === fileItem.id ? "Preparing..." : "Download"}
-                        </button>
+                        </Button>
                       </div>
 
-                      <div className="mt-3 grid grid-cols-1 gap-2 text-xs text-slate-600 sm:grid-cols-3">
-                        <p>
-                          Size: <span className="font-medium text-slate-800">{formatBytes(fileItem.size_bytes)}</span>
-                        </p>
-                        <p>
-                          Type: <span className="font-medium text-slate-800">{fileItem.content_type || "Unknown"}</span>
-                        </p>
-                        <p>
-                          Uploaded: <span className="font-medium text-slate-800">{fileItem.uploaded_at || "Unknown"}</span>
-                        </p>
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+                          gap: t.space.xs,
+                        }}
+                      >
+                        <Text variant="caption" color="secondary">
+                          Size: {formatBytes(fileItem.size_bytes)}
+                        </Text>
+                        <Text variant="caption" color="secondary">
+                          Type: {fileItem.content_type || "Unknown"}
+                        </Text>
+                        <Text variant="caption" color="secondary">
+                          Uploaded: {fileItem.uploaded_at || "Unknown"}
+                        </Text>
                       </div>
-                    </div>
+                    </Card>
                   ))}
                 </div>
               )}
-            </article>
+            </Card>
           </section>
         ) : null}
       </div>

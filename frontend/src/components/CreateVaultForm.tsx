@@ -3,6 +3,8 @@
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 
+import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
+
 export type Vault = {
     id: string;
     user_id: string;
@@ -19,6 +21,7 @@ type CreateVaultFormProps = {
 };
 
 export default function CreateVaultForm({ apiUrl, onCreated }: CreateVaultFormProps) {
+    const t = useCatTheme();
     const [name, setName] = useState("");
     const [gracePeriodDays, setGracePeriodDays] = useState(30);
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -90,69 +93,64 @@ export default function CreateVaultForm({ apiUrl, onCreated }: CreateVaultFormPr
     };
 
     return (
-        <section className="rounded-2xl border border-slate-200 bg-white/85 p-6 shadow-xl shadow-slate-200/70 backdrop-blur">
-            <h2 className="font-['Fraunces',serif] text-2xl font-semibold text-slate-900">
-                Create New Vault
-            </h2>
-            <p className="mt-2 text-sm text-slate-600">
+        <Card
+            variant="elevated"
+            style={{
+                gap: t.space.m,
+            }}
+        >
+            <Text variant="h3">Create New Vault</Text>
+            <Text variant="bodySmall" color="secondary">
                 Define a secure vault and set the grace period for delivery activation.
-            </p>
+            </Text>
 
-            <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-                <div>
-                    <label htmlFor="vault-name" className="mb-2 block text-sm font-medium text-slate-700">
-                        Vault Name
-                    </label>
-                    <input
-                        id="vault-name"
-                        type="text"
-                        value={name}
-                        onChange={(event) => setName(event.target.value)}
-                        placeholder="Family Legacy Vault"
-                        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 outline-none ring-0 transition focus:border-teal-500 focus:shadow-[0_0_0_4px_rgba(20,184,166,0.15)]"
-                        required
-                    />
-                </div>
+            <form
+                onSubmit={handleSubmit}
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: t.space.s,
+                    marginTop: t.space.s,
+                }}
+            >
+                <Input
+                    id="vault-name"
+                    label="Vault Name"
+                    type="text"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="Family Legacy Vault"
+                    required
+                />
 
-                <div>
-                    <label
-                        htmlFor="grace-period"
-                        className="mb-2 block text-sm font-medium text-slate-700"
-                    >
-                        Grace Period (days)
-                    </label>
-                    <input
-                        id="grace-period"
-                        type="number"
-                        min={1}
-                        max={3650}
-                        value={gracePeriodDays}
-                        onChange={(event) => setGracePeriodDays(Number(event.target.value))}
-                        className="w-full rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-slate-900 outline-none ring-0 transition focus:border-teal-500 focus:shadow-[0_0_0_4px_rgba(20,184,166,0.15)]"
-                        required
-                    />
-                </div>
+                <Input
+                    id="grace-period"
+                    label="Grace Period (days)"
+                    type="number"
+                    min={1}
+                    max={3650}
+                    value={gracePeriodDays}
+                    onChange={(event) => setGracePeriodDays(Number(event.target.value))}
+                    required
+                />
 
-                <button
+                <Button
                     type="submit"
+                    size="full"
+                    variant="SolidPrimary"
                     disabled={isSubmitting}
-                    className="w-full rounded-xl bg-gradient-to-r from-teal-600 to-cyan-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:from-teal-500 hover:to-cyan-500 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                     {isSubmitting ? "Creating Vault..." : "Create Vault"}
-                </button>
+                </Button>
             </form>
 
             {errorMessage ? (
-                <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                    {errorMessage}
-                </p>
+                <Alert message={errorMessage} variant="error" />
             ) : null}
 
             {successMessage ? (
-                <p className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-                    {successMessage}
-                </p>
+                <Alert message={successMessage} variant="success" />
             ) : null}
-        </section>
+        </Card>
     );
 }

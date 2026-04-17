@@ -2,9 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import {
+    Alert,
+    Badge,
+    Button,
+    ButtonLink,
+    Card,
+    Text,
+    useCatTheme,
+} from "@/components/catmagui";
 import CreateVaultForm, { type Vault } from "../components/CreateVaultForm";
 
 export default function DashboardPage() {
+    const t = useCatTheme();
     const apiUrl = useMemo(
         () => (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, ""),
         []
@@ -63,99 +73,147 @@ export default function DashboardPage() {
         ]);
     }, []);
 
+    const mainBackground = t.isDark
+        ? "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.14), transparent 35%), radial-gradient(circle at 80% 8%, rgba(80, 80, 90, 0.32), transparent 30%), linear-gradient(180deg, #050505 0%, #09090B 60%, #050505 100%)"
+        : "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.1), transparent 38%), radial-gradient(circle at 84% 10%, rgba(24, 24, 27, 0.06), transparent 35%), linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 55%, #FFFFFF 100%)";
+
     return (
-        <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(20,184,166,0.18),_transparent_40%),radial-gradient(circle_at_85%_15%,_rgba(14,165,233,0.15),_transparent_35%),linear-gradient(180deg,_#f8fafc_0%,_#ecfeff_45%,_#f8fafc_100%)] px-4 py-10 font-['Space_Grotesk',sans-serif] text-slate-900 sm:px-8 lg:px-12">
-            <div className="mx-auto w-full max-w-6xl">
-                <header className="mb-10 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-                    <div>
-                        <p className="inline-block rounded-full border border-cyan-200 bg-cyan-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-700">
-                            Last Writes
-                        </p>
-                        <h1 className="mt-3 font-['Fraunces',serif] text-4xl font-semibold leading-tight text-slate-900 sm:text-5xl">
-                            Vault Dashboard
-                        </h1>
-                        <p className="mt-2 max-w-2xl text-sm text-slate-600 sm:text-base">
+        <main
+            style={{
+                minHeight: "100vh",
+                background: mainBackground,
+                color: t.colors.text.primary,
+                padding: `${t.space.xl}px ${t.space.m}px`,
+                fontFamily: "var(--font-geist-sans), sans-serif",
+            }}
+        >
+            <div style={{ margin: "0 auto", width: "100%", maxWidth: 1180 }}>
+                <header
+                    style={{
+                        marginBottom: t.space.xl,
+                        display: "flex",
+                        flexWrap: "wrap",
+                        alignItems: "flex-end",
+                        justifyContent: "space-between",
+                        gap: t.space.m,
+                    }}
+                >
+                    <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
+                        <Badge label="LAST WRITES" variant="default" outlineOnly />
+                        <Text variant="h1">Vault Dashboard</Text>
+                        <Text variant="bodySmall" color="secondary" style={{ maxWidth: 700 }}>
                             Manage digital legacy vaults, monitor grace periods, and keep recipient delivery
                             rules up to date.
-                        </p>
+                        </Text>
                     </div>
 
-                    <button
-                        type="button"
-                        onClick={() => void fetchVaults()}
-                        className="rounded-xl border border-slate-300 bg-white/90 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-cyan-400 hover:text-cyan-700"
-                    >
+                    <Button type="button" onClick={() => void fetchVaults()} variant="Primary">
                         Refresh Vaults
-                    </button>
+                    </Button>
                 </header>
 
                 {!apiUrl ? (
-                    <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-                        Configure NEXT_PUBLIC_API_URL in your frontend environment to connect to FastAPI.
-                    </div>
+                    <Alert
+                        variant="warning"
+                        title="Missing API URL"
+                        message="Configure NEXT_PUBLIC_API_URL in your frontend environment to connect to FastAPI."
+                        style={{ marginBottom: t.space.m }}
+                    />
                 ) : null}
 
-                <section className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
+                <section
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+                        gap: t.space.m,
+                        alignItems: "start",
+                    }}
+                >
                     <CreateVaultForm apiUrl={apiUrl} onCreated={handleVaultCreated} />
 
-                    <div className="rounded-2xl border border-slate-200 bg-white/85 p-6 shadow-xl shadow-slate-200/70 backdrop-blur">
-                        <div className="mb-5 flex items-center justify-between">
-                            <h2 className="font-['Fraunces',serif] text-2xl font-semibold text-slate-900">
-                                Existing Vaults
-                            </h2>
-                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-                                {vaults.length} total
-                            </span>
+                    <Card variant="elevated" style={{ gap: t.space.s }}>
+                        <div
+                            style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: t.space.s,
+                            }}
+                        >
+                            <Text variant="h3">Existing Vaults</Text>
+                            <Badge label={`${vaults.length} total`} variant="default" size="sm" outlineOnly />
                         </div>
 
                         {isLoading ? (
-                            <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                                Loading vaults...
-                            </p>
+                            <Alert variant="info" message="Loading vaults..." />
                         ) : null}
 
                         {errorMessage ? (
-                            <p className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
-                                {errorMessage}
-                            </p>
+                            <Alert variant="error" message={errorMessage} />
                         ) : null}
 
                         {!isLoading && !errorMessage && vaults.length === 0 ? (
-                            <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
-                                No vaults found.
-                            </p>
+                            <Alert variant="info" message="No vaults found." />
                         ) : null}
 
-                        <div className="space-y-3">
+                        <div style={{ display: "flex", flexDirection: "column", gap: t.space.s }}>
                             {vaults.map((vault) => (
-                                <article
+                                <Card
                                     key={vault.id}
-                                    className="rounded-xl border border-slate-200 bg-white p-4 transition hover:border-cyan-300"
+                                    variant="secondary"
+                                    style={{
+                                        gap: t.space.xs,
+                                        padding: t.space.m,
+                                    }}
                                 >
-                                    <div className="flex items-start justify-between gap-3">
-                                        <div>
-                                            <h3 className="text-base font-semibold text-slate-900">{vault.name}</h3>
-                                            <p className="mt-1 text-xs uppercase tracking-wide text-slate-500">
+                                    <div
+                                        style={{
+                                            display: "flex",
+                                            justifyContent: "space-between",
+                                            alignItems: "flex-start",
+                                            gap: t.space.s,
+                                            flexWrap: "wrap",
+                                        }}
+                                    >
+                                        <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
+                                            <Text variant="label" weight="semibold">
+                                                {vault.name}
+                                            </Text>
+                                            <Text variant="caption" color="muted">
                                                 Vault ID: {vault.id}
-                                            </p>
+                                            </Text>
                                         </div>
-                                        <span className="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-700">
-                                            {vault.status}
-                                        </span>
+                                        <Badge label={vault.status} variant="success" size="sm" />
                                     </div>
 
-                                    <div className="mt-3 grid grid-cols-2 gap-3 text-sm text-slate-600">
-                                        <p>
-                                            Grace Period: <span className="font-medium text-slate-800">{vault.grace_period_days} days</span>
-                                        </p>
-                                        <p>
-                                            Recipients: <span className="font-medium text-slate-800">{vault.recipients.length}</span>
-                                        </p>
+                                    <div
+                                        style={{
+                                            display: "grid",
+                                            gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                                            gap: t.space.xs,
+                                        }}
+                                    >
+                                        <Text variant="bodySmall" color="secondary">
+                                            Grace Period: {vault.grace_period_days} days
+                                        </Text>
+                                        <Text variant="bodySmall" color="secondary">
+                                            Recipients: {vault.recipients.length}
+                                        </Text>
                                     </div>
-                                </article>
+
+                                    <div style={{ marginTop: t.space.xxs }}>
+                                        <ButtonLink
+                                            href={`/vaults/${encodeURIComponent(vault.id)}`}
+                                            variant="Primary"
+                                            size="default"
+                                        >
+                                            Open Vault
+                                        </ButtonLink>
+                                    </div>
+                                </Card>
                             ))}
                         </div>
-                    </div>
+                    </Card>
                 </section>
             </div>
         </main>
