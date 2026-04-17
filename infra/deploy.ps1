@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Location = "italynorth",
+    [string]$Location = "switzerlandnorth",
     [string]$Prefix = "lastwrites",
     [string]$ResourceGroupName = "",
     [string]$GithubRepo = "",
