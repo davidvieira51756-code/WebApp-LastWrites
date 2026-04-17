@@ -4,7 +4,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import type { FormEvent } from "react";
 import { Suspense, useEffect, useMemo, useState } from "react";
 
-import { Alert, Badge, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
+import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
+import BrandLogo from "@/components/BrandLogo";
 import { getApiUrl, getErrorDetail } from "@/lib/api";
 import { getAuthToken, setAuthSession } from "@/lib/auth";
 
@@ -166,8 +167,9 @@ function AuthPageContent() {
       }}
     >
       <div style={{ margin: "0 auto", width: "100%", maxWidth: 920, display: "grid", gap: t.space.m }}>
+        <BrandLogo marginBottom={t.space.xs} />
+
         <Card variant="elevated" style={{ gap: t.space.s }}>
-          <Badge label="LAST WRITES SECURITY" variant="default" outlineOnly />
           <Text variant="h1">Sign In Or Create Account</Text>
           <Text variant="bodySmall" color="secondary" style={{ maxWidth: 640 }}>
             Protect vault access using email and password authentication. New accounts require

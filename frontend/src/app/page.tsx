@@ -12,6 +12,7 @@ import {
     Text,
     useCatTheme,
 } from "@/components/catmagui";
+import BrandLogo from "@/components/BrandLogo";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import CreateVaultForm, { type Vault } from "../components/CreateVaultForm";
@@ -144,6 +145,8 @@ export default function DashboardPage() {
             }}
         >
             <div style={{ margin: "0 auto", width: "100%", maxWidth: 1180 }}>
+                <BrandLogo marginBottom={0} />
+
                 <header
                     style={{
                         marginBottom: t.space.xl,
@@ -155,7 +158,6 @@ export default function DashboardPage() {
                     }}
                 >
                     <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
-                        <Badge label="LAST WRITES" variant="default" outlineOnly />
                         <Text variant="h1">Vault Dashboard</Text>
                         <Text variant="bodySmall" color="secondary" style={{ maxWidth: 700 }}>
                             Manage digital legacy vaults, monitor grace periods, and keep recipient delivery

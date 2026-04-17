@@ -14,6 +14,7 @@ import {
   Text,
   useCatTheme,
 } from "@/components/catmagui";
+import BrandLogo from "@/components/BrandLogo";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 
@@ -576,6 +577,8 @@ export default function VaultDetailsPage() {
       }}
     >
       <div style={{ margin: "0 auto", width: "100%", maxWidth: 1180, display: "grid", gap: t.space.m }}>
+        <BrandLogo marginBottom={t.space.xxs} />
+
         <Card variant="elevated" style={{ gap: t.space.s }}>
           <div
             style={{
@@ -587,7 +590,6 @@ export default function VaultDetailsPage() {
             }}
           >
             <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
-              <Badge label="LAST WRITES VAULT" variant="default" outlineOnly />
               <Text variant="h2">{vault ? vault.name : "Vault Details"}</Text>
               <Text variant="bodySmall" color="secondary">
                 Vault ID: {vaultId || "Unavailable"}

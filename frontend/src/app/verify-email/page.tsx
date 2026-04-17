@@ -4,7 +4,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import type { FormEvent } from "react";
 import { Suspense, useMemo, useState } from "react";
 
-import { Alert, Badge, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
+import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
+import BrandLogo from "@/components/BrandLogo";
 import { getApiUrl, getErrorDetail } from "@/lib/api";
 
 function VerifyEmailPageContent() {
@@ -75,8 +76,9 @@ function VerifyEmailPageContent() {
       }}
     >
       <div style={{ margin: "0 auto", width: "100%", maxWidth: 760, display: "grid", gap: t.space.m }}>
+        <BrandLogo marginBottom={t.space.xxs} />
+
         <Card variant="elevated" style={{ gap: t.space.s }}>
-          <Badge label="LAST WRITES SECURITY" variant="default" outlineOnly />
           <Text variant="h2">Verify Email Address</Text>
           <Text variant="bodySmall" color="secondary">
             Paste your verification token and confirm your account before signing in.
