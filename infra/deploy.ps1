@@ -145,7 +145,12 @@ function Set-OrUpdateGithubSecret {
         [Parameter(Mandatory = $true)][string]$Repo
     )
 
-    Invoke-GhCli -Arguments @("secret", "set", $Name, "--body", $Value, "--repo", $Repo) | Out-Null
+    $output = $Value | & gh secret set $Name --repo $Repo 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $renderedOutput = ($output | Out-String).Trim()
+        throw "GitHub CLI secret update failed (exit $exitCode): gh secret set $Name --repo $Repo`n$renderedOutput"
+    }
 }
 
 function Ensure-ProviderRegistered {
@@ -264,12 +269,52 @@ $backendEnvPath = Join-Path $projectRoot "backend/.env"
 $frontendEnvPath = Join-Path $projectRoot "frontend/.env.local"
 $functionsSettingsPath = Join-Path $projectRoot "functions/local.settings.json"
 
-$token = New-RandomToken -Length 6
 $prefixCompact = Normalize-CompactName -Value $Prefix
 $prefixDashed = Normalize-DashedName -Value $Prefix
 
+$resourceGroupPrefix = "rg-$prefixDashed-"
 if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
-    $ResourceGroupName = "rg-$prefixDashed-$token"
+    $matchingGroups = Get-AzCliJson -Arguments @("group", "list", "--query", "[?starts_with(name, '$resourceGroupPrefix')].name", "-o", "json")
+    if ($null -eq $matchingGroups) {
+        $matchingGroups = @()
+    }
+    elseif ($matchingGroups -isnot [System.Array]) {
+        $matchingGroups = @($matchingGroups)
+    }
+
+    $matchingGroups = @(
+        $matchingGroups |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+            Sort-Object -Unique
+    )
+
+    if ($matchingGroups.Count -eq 1) {
+        $ResourceGroupName = [string]$matchingGroups[0]
+        Write-Warning "No -ResourceGroupName provided. Reusing existing resource group '$ResourceGroupName'."
+    }
+    else {
+        if ($matchingGroups.Count -gt 1) {
+            Write-Warning "Multiple matching resource groups were found. Creating a new one. Use -ResourceGroupName to explicitly reuse an existing group."
+        }
+        $ResourceGroupName = "$resourceGroupPrefix$(New-RandomToken -Length 6)"
+    }
+}
+
+$resourceGroupPattern = "^rg-$([regex]::Escape($prefixDashed))-(?<suffix>[a-z0-9]+)$"
+$token = ""
+if ($ResourceGroupName.ToLower() -match $resourceGroupPattern) {
+    $token = [string]$Matches["suffix"]
+}
+
+if ([string]::IsNullOrWhiteSpace($token)) {
+    $token = New-RandomToken -Length 6
+}
+
+if ($token.Length -lt 6) {
+    $token = $token.PadRight(6, '0')
+}
+elseif ($token.Length -gt 12) {
+    $token = $token.Substring(0, 12)
 }
 
 $Location = Resolve-DeploymentLocation -RequestedLocation $Location
@@ -304,6 +349,7 @@ $acrUsername = ""
 $acrPassword = ""
 $backendUrl = ""
 $frontendUrl = ""
+$canRerunFunctionsWorkflow = $true
 
 $deploymentStarted = $false
 
@@ -327,7 +373,21 @@ try {
     Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "deliveries", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
 
     Write-Step "Creating Function App (Flex Consumption)"
-    Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--flexconsumption-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "--functions-version", "4", "-o", "none") | Out-Null
+    $functionAppExists = $false
+    try {
+        $existingFunctionApp = Get-AzCliJson -Arguments @("functionapp", "show", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "-o", "json")
+        $functionAppExists = $null -ne $existingFunctionApp -and -not [string]::IsNullOrWhiteSpace([string]$existingFunctionApp.id)
+    }
+    catch {
+        $functionAppExists = $false
+    }
+
+    if (-not $functionAppExists) {
+        Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--flexconsumption-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "--functions-version", "4", "-o", "none") | Out-Null
+    }
+    else {
+        Write-Host "Function App '$functionAppName' already exists. Reusing existing app." -ForegroundColor Yellow
+    }
 
     Write-Step "Enabling basic publishing credentials for SCM deployment"
     foreach ($siteName in @($backendAppName, $frontendAppName, $functionAppName)) {
@@ -350,7 +410,22 @@ try {
     $eventGridKey = Get-AzCliTsv -Arguments @("eventgrid", "topic", "key", "list", "--name", $eventGridTopicName, "--resource-group", $ResourceGroupName, "--query", "key1", "-o", "tsv")
 
     Write-Step "Creating Key Vault and saving connection-string secrets"
-    Invoke-AzCli -Arguments @("keyvault", "create", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "--location", $Location, "--enable-rbac-authorization", "false", "-o", "none") | Out-Null
+    $keyVaultExists = $false
+    try {
+        $existingKeyVault = Get-AzCliJson -Arguments @("keyvault", "show", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "-o", "json")
+        $keyVaultExists = $null -ne $existingKeyVault -and -not [string]::IsNullOrWhiteSpace([string]$existingKeyVault.id)
+    }
+    catch {
+        $keyVaultExists = $false
+    }
+
+    if (-not $keyVaultExists) {
+        Invoke-AzCli -Arguments @("keyvault", "create", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "--location", $Location, "--enable-rbac-authorization", "false", "-o", "none") | Out-Null
+    }
+    else {
+        Write-Host "Key Vault '$keyVaultName' already exists. Reusing existing vault." -ForegroundColor Yellow
+    }
+
     $keyVaultUrl = Get-AzCliTsv -Arguments @("keyvault", "show", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "--query", "properties.vaultUri", "-o", "tsv")
     Invoke-AzCli -Arguments @("keyvault", "secret", "set", "--vault-name", $keyVaultName, "--name", "COSMOS-CONNECTION-STRING", "--value", $cosmosConnectionString, "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("keyvault", "secret", "set", "--vault-name", $keyVaultName, "--name", "BLOB-CONNECTION-STRING", "--value", $blobConnectionString, "-o", "none") | Out-Null
@@ -434,16 +509,26 @@ NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user
 
         $backendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--xml")
         $frontendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--xml")
-        $functionsPublishProfile = Get-AzCliRaw -Arguments @("functionapp", "deployment", "list-publishing-profiles", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--xml")
+        $functionsPublishProfile = ""
+        try {
+            $functionsPublishProfile = Get-AzCliRaw -Arguments @("functionapp", "deployment", "list-publishing-profiles", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--xml")
+        }
+        catch {
+            $canRerunFunctionsWorkflow = $false
+            Write-Warning "Skipping AZURE_FUNCTIONAPP_PUBLISH_PROFILE for '$functionAppName'. Flex Consumption does not support publish profiles and the deploy-functions workflow should be updated to use identity-based deployment."
+        }
 
         Set-OrUpdateGithubSecret -Name "AZURE_BACKEND_WEBAPP_NAME" -Value $backendAppName -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_BACKEND_WEBAPP_PUBLISH_PROFILE" -Value $backendPublishProfile -Repo $GithubRepo
 
         Set-OrUpdateGithubSecret -Name "AZURE_FRONTEND_WEBAPP_NAME" -Value $frontendAppName -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_FRONTEND_WEBAPP_PUBLISH_PROFILE" -Value $frontendPublishProfile -Repo $GithubRepo
+        Set-OrUpdateGithubSecret -Name "NEXT_PUBLIC_API_URL" -Value $backendUrl -Repo $GithubRepo
 
         Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_NAME" -Value $functionAppName -Repo $GithubRepo
-        Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_PUBLISH_PROFILE" -Value $functionsPublishProfile -Repo $GithubRepo
+        if (-not [string]::IsNullOrWhiteSpace($functionsPublishProfile)) {
+            Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_PUBLISH_PROFILE" -Value $functionsPublishProfile -Repo $GithubRepo
+        }
 
         Set-OrUpdateGithubSecret -Name "ACR_LOGIN_SERVER" -Value $acrLoginServer -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "ACR_USERNAME" -Value $acrUsername -Repo $GithubRepo
@@ -452,7 +537,12 @@ NEXT_PUBLIC_DEFAULT_USER_ID=academic-demo-user
 
     if ($RerunWorkflowRuns) {
         Write-Step "Re-running latest workflow runs"
-        foreach ($workflow in @("deploy-backend.yml", "deploy-frontend.yml", "deploy-functions.yml", "deploy-worker.yml")) {
+        $workflows = @("deploy-backend.yml", "deploy-frontend.yml", "deploy-functions.yml", "deploy-worker.yml")
+        if (-not $canRerunFunctionsWorkflow) {
+            $workflows = $workflows | Where-Object { $_ -ne "deploy-functions.yml" }
+        }
+
+        foreach ($workflow in $workflows) {
             $runId = Get-GhRaw -Arguments @("run", "list", "--repo", $GithubRepo, "--workflow", $workflow, "--limit", "1", "--json", "databaseId", "-q", ".[0].databaseId")
             if (-not [string]::IsNullOrWhiteSpace($runId)) {
                 Invoke-GhCli -Arguments @("run", "rerun", $runId, "--repo", $GithubRepo) | Out-Null
