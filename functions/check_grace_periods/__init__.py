@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import azure.functions as func
@@ -35,15 +35,6 @@ def _parse_iso_datetime(value: Any) -> Optional[datetime]:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
     return parsed.astimezone(timezone.utc)
-
-
-def _get_last_activity_at(vault_document: Dict[str, Any]) -> Optional[datetime]:
-    for field_name in ("last_login_at", "last_validation_at", "last_check_in_at"):
-        parsed = _parse_iso_datetime(vault_document.get(field_name))
-        if parsed is not None:
-            return parsed
-
-    return None
 
 
 def _get_vaults_container():
@@ -96,23 +87,22 @@ def _get_event_grid_client() -> EventGridPublisherClient:
     return _event_grid_client
 
 
-def _query_candidate_vaults() -> List[Dict[str, Any]]:
+def _query_expired_grace_period_vaults() -> List[Dict[str, Any]]:
+    """Return vaults currently in grace_period status that have not yet had an event published."""
+
     container = _get_vaults_container()
     query = """
     SELECT * FROM c
-    WHERE c.status = @active_status
-      AND c.grace_period_days > 0
-      AND (
-        IS_DEFINED(c.last_login_at)
-        OR IS_DEFINED(c.last_validation_at)
-        OR IS_DEFINED(c.last_check_in_at)
-      )
+    WHERE c.doc_type = 'vault'
+      AND c.status = @grace_status
+      AND IS_DEFINED(c.grace_period_expires_at)
+      AND NOT IS_NULL(c.grace_period_expires_at)
       AND (
         NOT IS_DEFINED(c.grace_period_event_published_at)
         OR IS_NULL(c.grace_period_event_published_at)
       )
     """
-    parameters = [{"name": "@active_status", "value": "active"}]
+    parameters = [{"name": "@grace_status", "value": "grace_period"}]
 
     try:
         vaults = list(
@@ -122,17 +112,18 @@ def _query_candidate_vaults() -> List[Dict[str, Any]]:
                 enable_cross_partition_query=True,
             )
         )
-        logger.info("Candidate vault query completed. count=%s", len(vaults))
+        logger.info("Grace-period candidate query completed. count=%s", len(vaults))
         return vaults
     except exceptions.CosmosHttpResponseError:
-        logger.exception("Cosmos query failed while searching for expired vault candidates.")
+        logger.exception(
+            "Cosmos query failed while searching for expired grace-period vaults."
+        )
         raise
 
 
 def _mark_event_published(
     vault_document: Dict[str, Any],
     published_at: datetime,
-    expires_at: datetime,
 ) -> None:
     container = _get_vaults_container()
     user_id = vault_document.get("user_id")
@@ -142,8 +133,6 @@ def _mark_event_published(
         raise ValueError(f"Vault missing user_id partition key. vault_id={vault_id}")
 
     patched_document = dict(vault_document)
-    patched_document["status"] = "grace_period"
-    patched_document["grace_period_expires_at"] = expires_at.isoformat()
     patched_document["grace_period_event_published_at"] = published_at.isoformat()
 
     try:
@@ -161,7 +150,6 @@ def _mark_event_published(
 
 def _publish_expiration_event(
     vault_document: Dict[str, Any],
-    last_activity_at: datetime,
     expires_at: datetime,
     detected_at: datetime,
 ) -> None:
@@ -169,6 +157,9 @@ def _publish_expiration_event(
     vault_id = str(vault_document.get("id"))
     user_id = vault_document.get("user_id")
     grace_period_days = int(vault_document.get("grace_period_days", 0))
+    activation_requests = vault_document.get("activation_requests", [])
+    if not isinstance(activation_requests, list):
+        activation_requests = []
 
     event = EventGridEvent(
         subject=f"/vaults/{vault_id}",
@@ -178,9 +169,10 @@ def _publish_expiration_event(
             "vault_id": vault_id,
             "user_id": user_id,
             "grace_period_days": grace_period_days,
-            "last_activity_at": last_activity_at.isoformat(),
             "grace_period_expires_at": expires_at.isoformat(),
             "detected_at": detected_at.isoformat(),
+            "activation_request_count": len(activation_requests),
+            "grace_period_started_at": vault_document.get("grace_period_started_at"),
         },
     )
 
@@ -200,7 +192,7 @@ def main(mytimer: func.TimerRequest) -> None:
         logger.warning("check_grace_periods timer is running later than scheduled.")
 
     try:
-        candidate_vaults = _query_candidate_vaults()
+        candidate_vaults = _query_expired_grace_period_vaults()
     except Exception:
         logger.exception("Timer job failed while querying candidate vaults.")
         return
@@ -213,18 +205,18 @@ def main(mytimer: func.TimerRequest) -> None:
         vault_id = str(vault_document.get("id", "unknown"))
 
         try:
-            last_activity_at = _get_last_activity_at(vault_document)
-            if last_activity_at is None:
+            expires_at = _parse_iso_datetime(
+                vault_document.get("grace_period_expires_at")
+            )
+            if expires_at is None:
                 skipped_count += 1
                 logger.warning(
-                    "Skipping vault due to missing/invalid activity timestamp. vault_id=%s",
+                    "Skipping vault due to missing/invalid grace_period_expires_at. vault_id=%s",
                     vault_id,
                 )
                 continue
 
-            grace_period_days = int(vault_document.get("grace_period_days", 0))
-            expires_at = last_activity_at + timedelta(days=grace_period_days)
-            if expires_at >= now_utc:
+            if expires_at > now_utc:
                 skipped_count += 1
                 logger.debug(
                     "Vault grace period not yet expired. vault_id=%s expires_at=%s",
@@ -235,14 +227,12 @@ def main(mytimer: func.TimerRequest) -> None:
 
             _publish_expiration_event(
                 vault_document=vault_document,
-                last_activity_at=last_activity_at,
                 expires_at=expires_at,
                 detected_at=now_utc,
             )
             _mark_event_published(
                 vault_document=vault_document,
                 published_at=now_utc,
-                expires_at=expires_at,
             )
 
             published_count += 1

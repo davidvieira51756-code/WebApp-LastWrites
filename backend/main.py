@@ -21,7 +21,13 @@ try:
         AuthTokenResponse,
         EmailVerificationRequest,
     )
-    from backend.models.vault import VaultCreate, VaultResponse, VaultUpdate
+    from backend.models.vault import (
+        ActivationRequestCreate,
+        RecipientVaultSummary,
+        VaultCreate,
+        VaultResponse,
+        VaultUpdate,
+    )
     from backend.services.auth_service import AuthService
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
@@ -37,7 +43,13 @@ except ModuleNotFoundError:
         AuthTokenResponse,
         EmailVerificationRequest,
     )
-    from models.vault import VaultCreate, VaultResponse, VaultUpdate
+    from models.vault import (
+        ActivationRequestCreate,
+        RecipientVaultSummary,
+        VaultCreate,
+        VaultResponse,
+        VaultUpdate,
+    )
     from services.auth_service import AuthService
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
@@ -511,6 +523,72 @@ def list_vaults(
         ) from None
 
 
+def _build_recipient_vault_summary(
+    vault_item: Dict[str, Any], recipient_email: str
+) -> RecipientVaultSummary:
+    normalized_email = recipient_email.strip().lower()
+    activation_requests = vault_item.get("activation_requests", [])
+    if not isinstance(activation_requests, list):
+        activation_requests = []
+
+    has_requested = any(
+        isinstance(request_item, dict)
+        and str(request_item.get("recipient_email", "")).strip().lower()
+        == normalized_email
+        for request_item in activation_requests
+    )
+
+    try:
+        threshold_value = max(1, int(vault_item.get("activation_threshold", 1)))
+    except (TypeError, ValueError):
+        threshold_value = 1
+
+    try:
+        grace_period_days_value = max(0, int(vault_item.get("grace_period_days", 0)))
+    except (TypeError, ValueError):
+        grace_period_days_value = 0
+
+    return RecipientVaultSummary(
+        id=str(vault_item.get("id", "")),
+        name=str(vault_item.get("name", "")),
+        status=str(vault_item.get("status", "active")),
+        grace_period_days=grace_period_days_value,
+        activation_threshold=threshold_value,
+        activation_requests_count=len(activation_requests),
+        has_requested_activation=has_requested,
+        grace_period_expires_at=vault_item.get("grace_period_expires_at"),
+    )
+
+
+@app.get("/vaults/incoming", response_model=List[RecipientVaultSummary])
+def list_incoming_vaults(
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[RecipientVaultSummary]:
+    cosmos_service = get_cosmos_service(request)
+    recipient_email = str(current_user.get("email", "")).strip().lower()
+
+    if not recipient_email:
+        return []
+
+    try:
+        vault_items = cosmos_service.list_vaults_for_recipient(recipient_email)
+    except Exception:
+        logger.exception(
+            "Unhandled error while listing incoming vaults for recipient=%s",
+            recipient_email,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list incoming vaults.",
+        ) from None
+
+    return [
+        _build_recipient_vault_summary(vault_item, recipient_email)
+        for vault_item in vault_items
+    ]
+
+
 @app.get("/vaults/{vault_id}", response_model=VaultResponse)
 def get_vault(
     vault_id: str,
@@ -608,6 +686,208 @@ def delete_vault(
         )
 
     return None
+
+
+@app.post("/vaults/{vault_id}/check-in", response_model=VaultResponse)
+def check_in_vault(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> VaultResponse:
+    cosmos_service = get_cosmos_service(request)
+    get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
+
+    try:
+        updated_vault = cosmos_service.check_in_vault(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while checking in vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check in vault.",
+        ) from None
+
+    if updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return VaultResponse(**updated_vault)
+
+
+@app.get(
+    "/vaults/{vault_id}/activation-summary",
+    response_model=RecipientVaultSummary,
+)
+def get_vault_activation_summary(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> RecipientVaultSummary:
+    cosmos_service = get_cosmos_service(request)
+    recipient_email = str(current_user.get("email", "")).strip().lower()
+
+    try:
+        vault_item = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception(
+            "Unhandled error while reading vault for activation summary id=%s",
+            vault_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve vault.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    recipients = vault_item.get("recipients", [])
+    if not isinstance(recipients, list):
+        recipients = []
+
+    is_recipient = any(
+        isinstance(candidate, str)
+        and candidate.strip().lower() == recipient_email
+        for candidate in recipients
+    )
+
+    if not is_recipient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return _build_recipient_vault_summary(vault_item, recipient_email)
+
+
+@app.post(
+    "/vaults/{vault_id}/activation-requests",
+    response_model=RecipientVaultSummary,
+    status_code=status.HTTP_201_CREATED,
+)
+def submit_activation_request(
+    vault_id: str,
+    payload: ActivationRequestCreate,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> RecipientVaultSummary:
+    cosmos_service = get_cosmos_service(request)
+    recipient_email = str(current_user.get("email", "")).strip().lower()
+
+    if not recipient_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A verified email is required.",
+        )
+
+    try:
+        updated_vault, outcome = cosmos_service.add_activation_request(
+            vault_id=vault_id,
+            recipient_email=recipient_email,
+            reason=payload.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception(
+            "Unhandled error while submitting activation request. vault_id=%s",
+            vault_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to submit activation request.",
+        ) from None
+
+    if outcome == "not_found" or updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    if outcome == "terminal":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This vault is no longer accepting activation requests.",
+        )
+
+    return _build_recipient_vault_summary(updated_vault, recipient_email)
+
+
+@app.delete(
+    "/vaults/{vault_id}/activation-requests",
+    response_model=RecipientVaultSummary,
+)
+def withdraw_activation_request(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> RecipientVaultSummary:
+    cosmos_service = get_cosmos_service(request)
+    recipient_email = str(current_user.get("email", "")).strip().lower()
+
+    try:
+        existing_vault = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while reading vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve vault.",
+        ) from None
+
+    if existing_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    recipients = existing_vault.get("recipients", [])
+    if not isinstance(recipients, list):
+        recipients = []
+
+    is_recipient = any(
+        isinstance(candidate, str)
+        and candidate.strip().lower() == recipient_email
+        for candidate in recipients
+    )
+    if not is_recipient:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    try:
+        updated_vault = cosmos_service.remove_activation_request(
+            vault_id=vault_id,
+            recipient_email=recipient_email,
+        )
+    except Exception:
+        logger.exception(
+            "Unhandled error while withdrawing activation request. vault_id=%s",
+            vault_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to withdraw activation request.",
+        ) from None
+
+    if updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return _build_recipient_vault_summary(updated_vault, recipient_email)
 
 
 @app.get("/vaults/{vault_id}/recipients")

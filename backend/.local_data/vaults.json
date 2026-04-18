@@ -1,0 +1,52 @@
+[
+  {
+    "email": "j.vieira@ipcbcampus.pt",
+    "password_hash": "pbkdf2_sha256$260000$ab7cd572a654d61dd2230a1141aaa245$BzYTuFgqPRUbcYTybZGb00UXysPLCcKon855X8uPTYY",
+    "is_email_verified": true,
+    "verification_token_hash": null,
+    "verification_token_expires_at": null,
+    "id": "b807c359-7459-4236-b1b3-b475f66c99f1",
+    "user_id": "b807c359-7459-4236-b1b3-b475f66c99f1",
+    "doc_type": "user"
+  },
+  {
+    "name": "vault",
+    "grace_period_days": 1,
+    "status": "active",
+    "recipients": [
+      "davidvieira51756@gmail.com",
+      "hexertkalenji@gmail.com"
+    ],
+    "activation_threshold": 1,
+    "user_id": "b807c359-7459-4236-b1b3-b475f66c99f1",
+    "id": "b473baad-3040-4e4a-a1e0-b39b6ba71070",
+    "doc_type": "vault",
+    "files": [
+      {
+        "id": "0e33c577-4495-4110-b340-ce927fe44c63",
+        "file_name": "Enunciado do miniprojeto.pdf",
+        "blob_name": "f2073363af4d4eecbb8dac20cb4e39f1-Enunciado do miniprojeto.pdf",
+        "container_name": "vault-b473baad-3040-4e4a-a1e0-b39b6ba71070",
+        "blob_url": "C:\\Users\\david\\Desktop\\EngenhariaInformatica\\EngInformatica-2Ano\\2Semestre\\es\\WebApp-LastWrites\\backend\\.local_data\\blobs\\vault-b473baad-3040-4e4a-a1e0-b39b6ba71070\\f2073363af4d4eecbb8dac20cb4e39f1-Enunciado do miniprojeto.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 96627,
+        "uploaded_at": "2026-04-18T17:13:04.927060+00:00"
+      }
+    ],
+    "activation_requests": [],
+    "grace_period_started_at": null,
+    "grace_period_expires_at": null,
+    "grace_period_event_published_at": null,
+    "last_check_in_at": "2026-04-18T17:48:18.929015+00:00"
+  },
+  {
+    "email": "davidvieira51756@gmail.com",
+    "password_hash": "pbkdf2_sha256$260000$55ce2dbc08a2591eb85a345537fc13cf$tbwTvwk72Xy8qIrXrxioRnCy6BaATyoZ22Cuj34umIY",
+    "is_email_verified": true,
+    "verification_token_hash": null,
+    "verification_token_expires_at": null,
+    "id": "4c9849a3-c708-4570-a0a7-f50543df8635",
+    "user_id": "4c9849a3-c708-4570-a0a7-f50543df8635",
+    "doc_type": "user"
+  }
+]

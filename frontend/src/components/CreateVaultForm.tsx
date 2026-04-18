@@ -6,6 +6,12 @@ import { useState } from "react";
 import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
 import { buildAuthHeaders, isUnauthorizedStatus } from "@/lib/api";
 
+export type ActivationRequestItem = {
+    recipient_email: string;
+    requested_at: string;
+    reason?: string | null;
+};
+
 export type Vault = {
     id: string;
     user_id: string;
@@ -14,6 +20,11 @@ export type Vault = {
     status: string;
     recipients: string[];
     files?: Array<Record<string, unknown>>;
+    activation_threshold?: number;
+    activation_requests?: ActivationRequestItem[];
+    grace_period_started_at?: string | null;
+    grace_period_expires_at?: string | null;
+    last_check_in_at?: string | null;
 };
 
 type CreateVaultFormProps = {
@@ -32,6 +43,7 @@ export default function CreateVaultForm({
     const t = useCatTheme();
     const [name, setName] = useState("");
     const [gracePeriodDays, setGracePeriodDays] = useState(30);
+    const [activationThreshold, setActivationThreshold] = useState(1);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -57,6 +69,8 @@ export default function CreateVaultForm({
             return;
         }
 
+        const normalizedThreshold = Math.max(1, Math.floor(Number(activationThreshold) || 1));
+
         setIsSubmitting(true);
         try {
             const response = await fetch(`${apiUrl}/vaults`, {
@@ -67,6 +81,7 @@ export default function CreateVaultForm({
                     grace_period_days: Number(gracePeriodDays),
                     status: "active",
                     recipients: [],
+                    activation_threshold: normalizedThreshold,
                 }),
             });
 
@@ -92,6 +107,7 @@ export default function CreateVaultForm({
             onCreated(createdVault);
             setName("");
             setGracePeriodDays(30);
+            setActivationThreshold(1);
             setSuccessMessage("Vault created successfully.");
         } catch (error) {
             const message =
@@ -111,7 +127,8 @@ export default function CreateVaultForm({
         >
             <Text variant="h3">Create New Vault</Text>
             <Text variant="bodySmall" color="secondary">
-                Define a secure vault and set the grace period for delivery activation.
+                Define a secure vault, set the grace period, and choose how many recipients must
+                request activation before the grace-period timer starts.
             </Text>
 
             <form
@@ -141,6 +158,17 @@ export default function CreateVaultForm({
                     max={3650}
                     value={gracePeriodDays}
                     onChange={(event) => setGracePeriodDays(Number(event.target.value))}
+                    required
+                />
+
+                <Input
+                    id="activation-threshold"
+                    label="Activation Threshold (recipient votes)"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={activationThreshold}
+                    onChange={(event) => setActivationThreshold(Number(event.target.value))}
                     required
                 />
 

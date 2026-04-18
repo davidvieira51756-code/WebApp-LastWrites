@@ -1,9 +1,62 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
+
+
+VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "disabled"}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    current_status = str(vault_document.get("status", "active")).strip().lower()
+    if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
+        return vault_document
+
+    activation_requests = vault_document.get("activation_requests", [])
+    if not isinstance(activation_requests, list):
+        activation_requests = []
+
+    requests_count = len(activation_requests)
+    try:
+        threshold = max(1, int(vault_document.get("activation_threshold", 1)))
+    except (TypeError, ValueError):
+        threshold = 1
+
+    try:
+        grace_period_days = max(0, int(vault_document.get("grace_period_days", 0)))
+    except (TypeError, ValueError):
+        grace_period_days = 0
+
+    if requests_count == 0:
+        vault_document["status"] = "active"
+        vault_document["grace_period_started_at"] = None
+        vault_document["grace_period_expires_at"] = None
+        vault_document["grace_period_event_published_at"] = None
+        return vault_document
+
+    if requests_count < threshold:
+        vault_document["status"] = "pending_activation"
+        vault_document["grace_period_started_at"] = None
+        vault_document["grace_period_expires_at"] = None
+        vault_document["grace_period_event_published_at"] = None
+        return vault_document
+
+    if current_status != "grace_period":
+        started_at = datetime.now(timezone.utc)
+        expires_at = started_at + timedelta(days=grace_period_days)
+        vault_document["status"] = "grace_period"
+        vault_document["grace_period_started_at"] = started_at.isoformat()
+        vault_document["grace_period_expires_at"] = expires_at.isoformat()
+        vault_document["grace_period_event_published_at"] = None
+
+    return vault_document
 
 
 class LocalCosmosService:
@@ -247,3 +300,145 @@ class LocalCosmosService:
 
         self._write_items(remaining)
         return True
+
+    def list_vaults_for_recipient(self, recipient_email: str) -> List[Dict[str, Any]]:
+        normalized_email = recipient_email.strip().lower()
+        items = [item for item in self._read_items() if self._is_vault_document(item)]
+        matching: List[Dict[str, Any]] = []
+        for item in items:
+            recipients = item.get("recipients", [])
+            if not isinstance(recipients, list):
+                continue
+            for recipient in recipients:
+                if (
+                    isinstance(recipient, str)
+                    and recipient.strip().lower() == normalized_email
+                ):
+                    matching.append(item)
+                    break
+        return matching
+
+    def add_activation_request(
+        self,
+        vault_id: str,
+        recipient_email: str,
+        reason: Optional[str] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        items = self._read_items()
+        normalized_email = recipient_email.strip().lower()
+
+        for index, item in enumerate(items):
+            if not self._is_vault_document(item):
+                continue
+            if str(item.get("id")) != vault_id:
+                continue
+
+            recipients = item.get("recipients", [])
+            if not isinstance(recipients, list):
+                recipients = []
+
+            recipient_is_known = any(
+                isinstance(recipient, str)
+                and recipient.strip().lower() == normalized_email
+                for recipient in recipients
+            )
+            if not recipient_is_known:
+                raise ValueError("Only configured recipients can request activation.")
+
+            current_status = str(item.get("status", "active")).strip().lower()
+            if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
+                return item, "terminal"
+
+            activation_requests = item.get("activation_requests", [])
+            if not isinstance(activation_requests, list):
+                activation_requests = []
+
+            already_requested = any(
+                isinstance(request_item, dict)
+                and str(request_item.get("recipient_email", "")).strip().lower()
+                == normalized_email
+                for request_item in activation_requests
+            )
+            if already_requested:
+                return item, "duplicate"
+
+            activation_requests.append(
+                {
+                    "recipient_email": normalized_email,
+                    "requested_at": _now_iso(),
+                    "reason": reason.strip()
+                    if isinstance(reason, str) and reason.strip()
+                    else None,
+                }
+            )
+
+            updated_item = dict(item)
+            updated_item["activation_requests"] = activation_requests
+            _recompute_activation_state(updated_item)
+            items[index] = updated_item
+            self._write_items(items)
+            return updated_item, "added"
+
+        return None, "not_found"
+
+    def remove_activation_request(
+        self,
+        vault_id: str,
+        recipient_email: str,
+    ) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+        normalized_email = recipient_email.strip().lower()
+
+        for index, item in enumerate(items):
+            if not self._is_vault_document(item):
+                continue
+            if str(item.get("id")) != vault_id:
+                continue
+
+            activation_requests = item.get("activation_requests", [])
+            if not isinstance(activation_requests, list):
+                activation_requests = []
+
+            filtered_requests = [
+                request_item
+                for request_item in activation_requests
+                if not (
+                    isinstance(request_item, dict)
+                    and str(request_item.get("recipient_email", "")).strip().lower()
+                    == normalized_email
+                )
+            ]
+
+            if len(filtered_requests) == len(activation_requests):
+                return item
+
+            updated_item = dict(item)
+            updated_item["activation_requests"] = filtered_requests
+            _recompute_activation_state(updated_item)
+            items[index] = updated_item
+            self._write_items(items)
+            return updated_item
+
+        return None
+
+    def check_in_vault(self, vault_id: str) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+
+        for index, item in enumerate(items):
+            if not self._is_vault_document(item):
+                continue
+            if str(item.get("id")) != vault_id:
+                continue
+
+            updated_item = dict(item)
+            updated_item["activation_requests"] = []
+            updated_item["grace_period_started_at"] = None
+            updated_item["grace_period_expires_at"] = None
+            updated_item["grace_period_event_published_at"] = None
+            updated_item["status"] = "active"
+            updated_item["last_check_in_at"] = _now_iso()
+            items[index] = updated_item
+            self._write_items(items)
+            return updated_item
+
+        return None

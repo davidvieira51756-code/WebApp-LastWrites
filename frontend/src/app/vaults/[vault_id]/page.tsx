@@ -18,6 +18,12 @@ import BrandLogo from "@/components/BrandLogo";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 
+type ActivationRequestItem = {
+  recipient_email: string;
+  requested_at: string;
+  reason?: string | null;
+};
+
 type VaultDetail = {
   id: string;
   user_id: string;
@@ -25,6 +31,11 @@ type VaultDetail = {
   grace_period_days: number;
   status: string;
   recipients: string[];
+  activation_threshold?: number;
+  activation_requests?: ActivationRequestItem[];
+  grace_period_started_at?: string | null;
+  grace_period_expires_at?: string | null;
+  last_check_in_at?: string | null;
 };
 
 type VaultFile = {
@@ -46,10 +57,17 @@ type DownloadResponse = {
   expires_at?: string;
 };
 
-type VaultStatus = "active" | "grace_period" | "delivery_initiated" | "delivered" | "disabled";
+type VaultStatus =
+  | "active"
+  | "pending_activation"
+  | "grace_period"
+  | "delivery_initiated"
+  | "delivered"
+  | "disabled";
 
 const VAULT_STATUS_OPTIONS: VaultStatus[] = [
   "active",
+  "pending_activation",
   "grace_period",
   "delivery_initiated",
   "delivered",
@@ -82,6 +100,49 @@ function formatBytes(sizeInBytes: number | null | undefined): string {
     unitIndex += 1;
   }
   return `${size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function statusBadgeVariant(
+  status: string,
+): "default" | "success" | "warning" | "error" {
+  const normalized = status.toLowerCase();
+  if (normalized === "active") return "success";
+  if (normalized === "pending_activation") return "warning";
+  if (normalized === "grace_period") return "warning";
+  if (normalized === "delivery_initiated" || normalized === "delivered") return "error";
+  if (normalized === "disabled") return "default";
+  return "default";
+}
+
+function formatStatusLabel(status: string): string {
+  return status.replace(/_/g, " ");
+}
+
+function formatIsoDate(value: string | null | undefined): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString();
+}
+
+function describeCountdown(expiresAt: string | null | undefined): string {
+  if (!expiresAt) return "";
+  const target = new Date(expiresAt).getTime();
+  if (Number.isNaN(target)) return "";
+  const now = Date.now();
+  const diffMs = target - now;
+  if (diffMs <= 0) return "Grace period already expired.";
+
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+
+  if (days > 0) return `${days}d ${hours}h remaining`;
+  if (hours > 0) return `${hours}h ${minutes}m remaining`;
+  return `${minutes}m remaining`;
 }
 
 export default function VaultDetailsPage() {
@@ -119,10 +180,15 @@ export default function VaultDetailsPage() {
 
   const [editableName, setEditableName] = useState("");
   const [editableGracePeriod, setEditableGracePeriod] = useState(30);
+  const [editableThreshold, setEditableThreshold] = useState(1);
   const [editableStatus, setEditableStatus] = useState<VaultStatus>("active");
   const [isUpdatingVault, setIsUpdatingVault] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+
+  const [isCheckingIn, setIsCheckingIn] = useState(false);
+  const [checkInMessage, setCheckInMessage] = useState<string | null>(null);
+  const [checkInError, setCheckInError] = useState<string | null>(null);
 
   const [isDeletingVault, setIsDeletingVault] = useState(false);
 
@@ -209,6 +275,7 @@ export default function VaultDetailsPage() {
         setVault(vaultPayload);
         setEditableName(vaultPayload.name || "");
         setEditableGracePeriod(Number(vaultPayload.grace_period_days || 1));
+        setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
         if (VAULT_STATUS_OPTIONS.includes(vaultPayload.status as VaultStatus)) {
           setEditableStatus(vaultPayload.status as VaultStatus);
         }
@@ -467,6 +534,11 @@ export default function VaultDetailsPage() {
       return;
     }
 
+    if (!Number.isFinite(editableThreshold) || editableThreshold < 1) {
+      setUpdateError("Activation threshold must be at least 1.");
+      return;
+    }
+
     setIsUpdatingVault(true);
     try {
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`, {
@@ -476,6 +548,7 @@ export default function VaultDetailsPage() {
           name: normalizedName,
           grace_period_days: Number(editableGracePeriod),
           status: editableStatus,
+          activation_threshold: Math.floor(Number(editableThreshold)),
         }),
       });
 
@@ -496,6 +569,45 @@ export default function VaultDetailsPage() {
       setUpdateError(message);
     } finally {
       setIsUpdatingVault(false);
+    }
+  };
+
+  const handleCheckIn = async () => {
+    setCheckInMessage(null);
+    setCheckInError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setCheckInError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsCheckingIn(true);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/check-in`,
+        {
+          method: "POST",
+          headers: buildAuthHeaders(authToken, true),
+        }
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to check in.");
+        throw new Error(message);
+      }
+
+      setCheckInMessage("Check-in recorded. Activation requests were cleared.");
+      await fetchVaultData(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected check-in error.";
+      setCheckInError(message);
+    } finally {
+      setIsCheckingIn(false);
     }
   };
 
@@ -537,6 +649,13 @@ export default function VaultDetailsPage() {
       setIsDeletingVault(false);
     }
   };
+
+  const activationRequests = vault?.activation_requests ?? [];
+  const activationThreshold = vault?.activation_threshold ?? 1;
+  const activationCount = activationRequests.length;
+  const normalizedStatus = (vault?.status || "active").toLowerCase();
+  const isPendingOrGrace =
+    normalizedStatus === "pending_activation" || normalizedStatus === "grace_period";
 
   const mainBackground = t.isDark
     ? "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.14), transparent 35%), radial-gradient(circle at 80% 8%, rgba(80, 80, 90, 0.32), transparent 30%), linear-gradient(180deg, #050505 0%, #09090B 60%, #050505 100%)"
@@ -629,7 +748,11 @@ export default function VaultDetailsPage() {
             >
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Status</Text>
-                <Text variant="label">{vault.status}</Text>
+                <Badge
+                  label={formatStatusLabel(vault.status)}
+                  variant={statusBadgeVariant(vault.status)}
+                  size="sm"
+                />
               </Card>
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Grace Period</Text>
@@ -639,7 +762,70 @@ export default function VaultDetailsPage() {
                 <Text variant="caption" color="muted">Recipients</Text>
                 <Text variant="label">{vault.recipients.length}</Text>
               </Card>
+              <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
+                <Text variant="caption" color="muted">Activation Votes</Text>
+                <Text variant="label">
+                  {activationCount}/{activationThreshold}
+                </Text>
+              </Card>
             </div>
+          ) : null}
+
+          {vault && isPendingOrGrace ? (
+            <Card
+              variant="secondary"
+              style={{
+                padding: t.space.m,
+                gap: t.space.xs,
+                border: `1px solid ${t.colors.status.warning ?? "rgba(255,165,0,0.4)"}`,
+              }}
+            >
+              <Text variant="label" weight="semibold">
+                {normalizedStatus === "pending_activation"
+                  ? "Recipients are requesting activation"
+                  : "Grace period in progress"}
+              </Text>
+
+              {normalizedStatus === "pending_activation" ? (
+                <Text variant="bodySmall" color="secondary">
+                  {activationCount} of {activationThreshold} required recipients have requested
+                  activation. Use Check-In below to confirm you are still active and reset the
+                  request counters.
+                </Text>
+              ) : (
+                <>
+                  <Text variant="bodySmall" color="secondary">
+                    Threshold reached. Grace period started at {formatIsoDate(vault.grace_period_started_at)}.
+                  </Text>
+                  <Text variant="bodySmall" color="secondary">
+                    Grace period ends at {formatIsoDate(vault.grace_period_expires_at)} ({describeCountdown(vault.grace_period_expires_at)}).
+                  </Text>
+                  <Text variant="bodySmall" color="secondary">
+                    Check in before it expires to cancel delivery.
+                  </Text>
+                </>
+              )}
+
+              <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap", marginTop: t.space.xs }}>
+                <Button
+                  type="button"
+                  variant="SolidPrimary"
+                  onClick={() => void handleCheckIn()}
+                  disabled={isCheckingIn}
+                >
+                  {isCheckingIn ? "Checking in..." : "I'm still here — Check In"}
+                </Button>
+              </div>
+
+              {checkInError ? <Alert variant="error" message={checkInError} /> : null}
+              {checkInMessage ? <Alert variant="success" message={checkInMessage} /> : null}
+            </Card>
+          ) : null}
+
+          {vault && !isPendingOrGrace && vault.last_check_in_at ? (
+            <Text variant="caption" color="muted">
+              Last check-in: {formatIsoDate(vault.last_check_in_at)}
+            </Text>
           ) : null}
         </Card>
 
@@ -691,6 +877,17 @@ export default function VaultDetailsPage() {
                     required
                   />
 
+                  <Input
+                    id="vault-threshold"
+                    type="number"
+                    min={1}
+                    max={100}
+                    label="Activation Threshold (recipient votes)"
+                    value={editableThreshold}
+                    onChange={(event) => setEditableThreshold(Number(event.target.value))}
+                    required
+                  />
+
                   <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
                     <Text variant="label" color="secondary">
                       Status
@@ -713,7 +910,7 @@ export default function VaultDetailsPage() {
                     >
                       {VAULT_STATUS_OPTIONS.map((option) => (
                         <option key={option} value={option}>
-                          {option}
+                          {formatStatusLabel(option)}
                         </option>
                       ))}
                     </select>
@@ -740,6 +937,58 @@ export default function VaultDetailsPage() {
 
                 {updateError ? <Alert variant="error" message={updateError} /> : null}
                 {updateMessage ? <Alert variant="success" message={updateMessage} /> : null}
+              </Card>
+
+              <Card variant="elevated" style={{ gap: t.space.s }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: t.space.xs,
+                  }}
+                >
+                  <Text variant="h3">Activation Requests</Text>
+                  <Badge
+                    label={`${activationCount}/${activationThreshold}`}
+                    variant={
+                      activationCount >= activationThreshold
+                        ? "warning"
+                        : activationCount > 0
+                          ? "warning"
+                          : "default"
+                    }
+                    size="sm"
+                    outlineOnly
+                  />
+                </div>
+                <Text variant="bodySmall" color="secondary">
+                  Recipients who have asked to start the delivery process.
+                </Text>
+
+                {activationRequests.length === 0 ? (
+                  <Alert variant="info" message="No activation requests yet." />
+                ) : (
+                  <div style={{ display: "grid", gap: t.space.xs }}>
+                    {activationRequests.map((request) => (
+                      <Card
+                        key={`${request.recipient_email}-${request.requested_at}`}
+                        variant="secondary"
+                        style={{ padding: t.space.s, gap: t.space.xxs }}
+                      >
+                        <Text variant="label">{request.recipient_email}</Text>
+                        <Text variant="caption" color="muted">
+                          Requested at {formatIsoDate(request.requested_at)}
+                        </Text>
+                        {request.reason ? (
+                          <Text variant="bodySmall" color="secondary">
+                            Reason: {request.reason}
+                          </Text>
+                        ) : null}
+                      </Card>
+                    ))}
+                  </div>
+                )}
               </Card>
 
               <Card variant="elevated" style={{ gap: t.space.s }}>

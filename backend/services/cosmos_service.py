@@ -2,12 +2,79 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from azure.cosmos import CosmosClient, PartitionKey, exceptions
 
 logger = logging.getLogger(__name__)
+
+
+VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "disabled"}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    """Given a vault document, recompute status / grace period based on activation requests.
+
+    Rules:
+    - If current status is terminal (delivery_initiated, delivered, disabled), do not mutate.
+    - If requests count >= threshold and status not already grace_period, transition to grace_period
+      and set grace_period_started_at / grace_period_expires_at.
+    - If requests count > 0 and < threshold, status becomes pending_activation and any grace period
+      markers are cleared.
+    - If requests count == 0, status returns to active and grace period markers are cleared.
+    """
+
+    current_status = str(vault_document.get("status", "active")).strip().lower()
+    if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
+        return vault_document
+
+    activation_requests = vault_document.get("activation_requests", [])
+    if not isinstance(activation_requests, list):
+        activation_requests = []
+
+    requests_count = len(activation_requests)
+    threshold_raw = vault_document.get("activation_threshold", 1)
+    try:
+        threshold = max(1, int(threshold_raw))
+    except (TypeError, ValueError):
+        threshold = 1
+
+    grace_period_days_raw = vault_document.get("grace_period_days", 0)
+    try:
+        grace_period_days = max(0, int(grace_period_days_raw))
+    except (TypeError, ValueError):
+        grace_period_days = 0
+
+    if requests_count == 0:
+        vault_document["status"] = "active"
+        vault_document["grace_period_started_at"] = None
+        vault_document["grace_period_expires_at"] = None
+        vault_document["grace_period_event_published_at"] = None
+        return vault_document
+
+    if requests_count < threshold:
+        vault_document["status"] = "pending_activation"
+        vault_document["grace_period_started_at"] = None
+        vault_document["grace_period_expires_at"] = None
+        vault_document["grace_period_event_published_at"] = None
+        return vault_document
+
+    # Threshold reached or exceeded.
+    if current_status != "grace_period":
+        started_at = datetime.now(timezone.utc)
+        expires_at = started_at + timedelta(days=grace_period_days)
+        vault_document["status"] = "grace_period"
+        vault_document["grace_period_started_at"] = started_at.isoformat()
+        vault_document["grace_period_expires_at"] = expires_at.isoformat()
+        vault_document["grace_period_event_published_at"] = None
+
+    return vault_document
 
 
 class CosmosService:
@@ -424,4 +491,178 @@ class CosmosService:
             return True
         except exceptions.CosmosHttpResponseError:
             logger.exception("Cosmos DB delete failed for vault id=%s", vault_id)
+            raise
+
+    def list_vaults_for_recipient(self, recipient_email: str) -> List[Dict[str, Any]]:
+        container = self._get_container()
+        normalized_email = recipient_email.strip().lower()
+        query = (
+            "SELECT * FROM c WHERE c.doc_type = 'vault' "
+            "AND ARRAY_CONTAINS(c.recipients, @email, false)"
+        )
+        parameters = [{"name": "@email", "value": normalized_email}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+            return [item for item in items if self._is_vault_document(item)]
+        except exceptions.CosmosHttpResponseError:
+            logger.exception(
+                "Cosmos DB list-for-recipient query failed for email=%s",
+                normalized_email,
+            )
+            raise
+
+    def add_activation_request(
+        self,
+        vault_id: str,
+        recipient_email: str,
+        reason: Optional[str] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Record an activation request from a recipient.
+
+        Returns (updated_vault, outcome) where outcome is one of:
+          - "added": request inserted
+          - "duplicate": same recipient had already requested
+          - "terminal": vault is in a terminal status and cannot accept new requests
+        """
+
+        container = self._get_container()
+        existing_item = self.get_vault_by_id(vault_id)
+        if existing_item is None:
+            return None, "not_found"
+
+        normalized_email = recipient_email.strip().lower()
+        recipients = existing_item.get("recipients", [])
+        if not isinstance(recipients, list):
+            recipients = []
+
+        recipient_is_known = any(
+            isinstance(recipient, str)
+            and recipient.strip().lower() == normalized_email
+            for recipient in recipients
+        )
+        if not recipient_is_known:
+            raise ValueError("Only configured recipients can request activation.")
+
+        current_status = str(existing_item.get("status", "active")).strip().lower()
+        if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
+            return existing_item, "terminal"
+
+        activation_requests = existing_item.get("activation_requests", [])
+        if not isinstance(activation_requests, list):
+            activation_requests = []
+
+        already_requested = any(
+            isinstance(request_item, dict)
+            and str(request_item.get("recipient_email", "")).strip().lower()
+            == normalized_email
+            for request_item in activation_requests
+        )
+        if already_requested:
+            return existing_item, "duplicate"
+
+        activation_requests.append(
+            {
+                "recipient_email": normalized_email,
+                "requested_at": _now_iso(),
+                "reason": reason.strip() if isinstance(reason, str) and reason.strip() else None,
+            }
+        )
+
+        updated_item = dict(existing_item)
+        updated_item["activation_requests"] = activation_requests
+        _recompute_activation_state(updated_item)
+
+        try:
+            saved_item = container.replace_item(item=existing_item, body=updated_item)
+            logger.info(
+                "Activation request recorded. vault_id=%s recipient=%s new_status=%s",
+                vault_id,
+                normalized_email,
+                saved_item.get("status"),
+            )
+            return saved_item, "added"
+        except exceptions.CosmosHttpResponseError:
+            logger.exception(
+                "Cosmos DB activation request update failed vault_id=%s",
+                vault_id,
+            )
+            raise
+
+    def remove_activation_request(
+        self,
+        vault_id: str,
+        recipient_email: str,
+    ) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        existing_item = self.get_vault_by_id(vault_id)
+        if existing_item is None:
+            return None
+
+        normalized_email = recipient_email.strip().lower()
+        activation_requests = existing_item.get("activation_requests", [])
+        if not isinstance(activation_requests, list):
+            activation_requests = []
+
+        filtered_requests = [
+            request_item
+            for request_item in activation_requests
+            if not (
+                isinstance(request_item, dict)
+                and str(request_item.get("recipient_email", "")).strip().lower()
+                == normalized_email
+            )
+        ]
+
+        if len(filtered_requests) == len(activation_requests):
+            return existing_item
+
+        updated_item = dict(existing_item)
+        updated_item["activation_requests"] = filtered_requests
+        _recompute_activation_state(updated_item)
+
+        try:
+            saved_item = container.replace_item(item=existing_item, body=updated_item)
+            logger.info(
+                "Activation request withdrawn. vault_id=%s recipient=%s new_status=%s",
+                vault_id,
+                normalized_email,
+                saved_item.get("status"),
+            )
+            return saved_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception(
+                "Cosmos DB activation withdrawal failed vault_id=%s",
+                vault_id,
+            )
+            raise
+
+    def check_in_vault(self, vault_id: str) -> Optional[Dict[str, Any]]:
+        """Owner explicitly signals they are still alive. Clears requests and grace period."""
+
+        container = self._get_container()
+        existing_item = self.get_vault_by_id(vault_id)
+        if existing_item is None:
+            return None
+
+        updated_item = dict(existing_item)
+        updated_item["activation_requests"] = []
+        updated_item["grace_period_started_at"] = None
+        updated_item["grace_period_expires_at"] = None
+        updated_item["grace_period_event_published_at"] = None
+        updated_item["status"] = "active"
+        updated_item["last_check_in_at"] = _now_iso()
+
+        try:
+            saved_item = container.replace_item(item=existing_item, body=updated_item)
+            logger.info("Vault check-in recorded. vault_id=%s", vault_id)
+            return saved_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB check-in update failed vault_id=%s", vault_id)
             raise
