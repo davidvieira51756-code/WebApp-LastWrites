@@ -14,6 +14,7 @@ permissions:
 
 env:
   IMAGE_NAME: lastwrites-worker
+  JOB_CONTAINER_NAME: delivery-worker
 
 jobs:
   build-and-push:
@@ -53,3 +54,37 @@ jobs:
 
           docker push "${IMAGE_URI}:latest"
           docker push "${IMAGE_URI}:${SHORT_SHA}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          # Add this GitHub Secret in repository settings:
+          # AZURE_CREDENTIALS -> Service principal JSON with access to the Container Apps job resource group.
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Install Container Apps CLI support
+        run: |
+          az extension add --name containerapp --upgrade --only-show-errors
+
+      - name: Update Container Apps job image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          RESOURCE_GROUP: ${{ secrets.AZURE_CONTAINERAPPS_RESOURCE_GROUP }}
+          JOB_NAME: ${{ secrets.AZURE_CONTAINERAPPS_JOB_NAME }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="${ACR_LOGIN_SERVER}/${IMAGE_NAME}:latest"
+
+          az containerapp job registry set \
+            --name "${JOB_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --server "${ACR_LOGIN_SERVER}" \
+            --identity system \
+            --only-show-errors
+
+          az containerapp job update \
+            --name "${JOB_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --container-name "${JOB_CONTAINER_NAME}" \
+            --image "${IMAGE_URI}" \
+            --only-show-errors

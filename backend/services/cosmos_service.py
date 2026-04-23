@@ -242,6 +242,10 @@ class CosmosService:
         payload = dict(vault_data)
         payload["id"] = payload.get("id") or str(uuid4())
         payload["doc_type"] = "vault"
+        payload.setdefault("recipients", [])
+        payload.setdefault("files", [])
+        payload.setdefault("activation_requests", [])
+        payload.setdefault("owner_message", None)
 
         if not payload.get("user_id"):
             raise ValueError("vault_data must include user_id.")
@@ -651,11 +655,16 @@ class CosmosService:
         if existing_item is None:
             return None
 
+        current_status = str(existing_item.get("status", "active")).strip().lower()
+        if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
+            raise ValueError("This vault can no longer be checked in.")
+
         updated_item = dict(existing_item)
         updated_item["activation_requests"] = []
         updated_item["grace_period_started_at"] = None
         updated_item["grace_period_expires_at"] = None
         updated_item["grace_period_event_published_at"] = None
+        updated_item["delivery_error"] = None
         updated_item["status"] = "active"
         updated_item["last_check_in_at"] = _now_iso()
 

@@ -48,5 +48,67 @@
     "id": "4c9849a3-c708-4570-a0a7-f50543df8635",
     "user_id": "4c9849a3-c708-4570-a0a7-f50543df8635",
     "doc_type": "user"
+  },
+  {
+    "name": "exemplo",
+    "owner_message": "Matem-se pelo dinheiro burros.",
+    "grace_period_days": 3,
+    "recipients": [
+      "j.vieira@ipcbcampus.pt"
+    ],
+    "activation_threshold": 1,
+    "id": "31417622-ca17-4c12-a3fe-b49fcdad0128",
+    "user_id": "4c9849a3-c708-4570-a0a7-f50543df8635",
+    "status": "delivered",
+    "key_name": "vault-key-31417622-ca17-4c12-a3fe-b49fcdad0128",
+    "key_kid": "local://vault-keys/vault-key-31417622-ca17-4c12-a3fe-b49fcdad0128/versions/local",
+    "key_version": "local",
+    "public_jwk": {
+      "kty": "RSA",
+      "n": "kYlfP44X1uApmo8YStFpRzNfA-IfKzcV-bW-U5Frz4Kk5o2kR30ikvGHrUPpKLHz1JWC02XyW64CmK2l4IUW99m_ZMWSdAjBF2mGEcGXmEyUacNkAPM0XK2XTJ0Bk3zqsOe4mlxm--hl8cRTxg2tWk_KRpniSead8II7nIN1kZ4yIhntdLxF5F0vHUxSVgH2XrKQMaSbccCaa1Bz_KfWdOV12Uh8v0g_FIe8MrmK-z8ydI1cQfiU9xhNpdoOMBn7no2qKFNKsxHytFkgSv_-E6S3dwlg6O1erSUoROLiDhrbvBFdWu-eorIWHjAox1vuNjHM7GTV6XwV1AK1twq6TQ",
+      "e": "AQAB"
+    },
+    "doc_type": "vault",
+    "files": [
+      {
+        "id": "1e0a7c8e-65c3-4f8d-ab9c-3b015e18a02a",
+        "file_name": "Enunciado do miniprojeto.pdf",
+        "blob_name": "483f56baa0aa4d2db5679a2c62591810.blob",
+        "container_name": "vault-31417622-ca17-4c12-a3fe-b49fcdad0128",
+        "blob_url": "C:\\Users\\david\\Desktop\\EngenhariaInformatica\\EngInformatica-2Ano\\2Semestre\\es\\WebApp-LastWrites\\backend\\.local_data\\blobs\\vault-31417622-ca17-4c12-a3fe-b49fcdad0128\\483f56baa0aa4d2db5679a2c62591810.blob",
+        "content_type": "application/pdf",
+        "blob_content_type": "application/octet-stream",
+        "size_bytes": 96627,
+        "uploaded_at": "2026-04-23T12:50:52.371998+00:00",
+        "encrypted": true,
+        "algorithm": "AES-256-GCM",
+        "wrapped_key": "kX8KP1nfvF5APrcH4gFSGpyHMUoP3Nfgh--LQxv7R2-0E9XUCaDzXqPsrlIDpeKHcrXaYz5Eccg1lI_u9v7YOoCiD_0ZysSoTUpqyKx-AKE2cN8FOKnq1K-zqfNIfrnuhn33OEmUQFZsK6PcbqMXJYIGddtIqseDU9w7uzGbOWu9fwSyWtPMh2fAmyM3ByYkO_KTDpVigEQPYu2bQDE4UQz2bwDjy4cSDaLKWRdAdl6y1N-50I3opiUm2QpOCcHXYST_UjQklKYVHIG_R2S1Ov88uK18WhY-moPf3Dd2qcj3Sa4FCcRFBjlwioiCWCDqAiOzIE7vAFHaI6LF6AFalQ",
+        "iv": "B5fXOdUDtsZGI0Mx",
+        "tag": "Y3wyvXXAfNWhTnWaP2vFqw",
+        "plaintext_sha256": "f58fdf35a41e0071d69219740cd35cfec8b25e4745f7a839195a84ee85677789",
+        "ciphertext_sha256": "9234502a134fa37d17f7ebc5ea032a8a2b9b5163417db149d3f49a543eae7063",
+        "ciphertext_size_bytes": 96627,
+        "key_kid": "local://vault-keys/vault-key-31417622-ca17-4c12-a3fe-b49fcdad0128/versions/local",
+        "key_version": "local"
+      }
+    ],
+    "activation_requests": [
+      {
+        "recipient_email": "j.vieira@ipcbcampus.pt",
+        "requested_at": "2026-04-23T12:50:30.593222+00:00",
+        "reason": "apetece-me"
+      }
+    ],
+    "grace_period_started_at": "2026-04-23T12:50:30.593222+00:00",
+    "grace_period_expires_at": "2026-04-26T12:50:30.593222+00:00",
+    "grace_period_event_published_at": null,
+    "delivery_container_name": "deliveries",
+    "delivery_blob_name": "31417622-ca17-4c12-a3fe-b49fcdad0128/20260423T125332Z-delivery.zip",
+    "delivery_file_name": "31417622-ca17-4c12-a3fe-b49fcdad0128-delivery.zip",
+    "delivery_size_bytes": 87599,
+    "delivery_checksum_sha256": "e72c197a9ca8730334bed41ebe00f01f45b927df9e26d3a455a0299aa26428ec",
+    "delivery_error": null,
+    "delivered_at": "2026-04-23T12:53:32.616466+00:00",
+    "delivery_job_execution_name": null
   }
 ]

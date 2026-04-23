@@ -26,6 +26,8 @@ type IncomingVaultSummary = {
     activation_requests_count: number;
     has_requested_activation: boolean;
     grace_period_expires_at?: string | null;
+    delivered_at?: string | null;
+    delivery_available?: boolean;
 };
 
 function statusBadgeVariant(
@@ -372,6 +374,11 @@ export default function DashboardPage() {
                                             <Text variant="bodySmall" color="secondary">
                                                 Activation votes: {requestCount}/{threshold}
                                             </Text>
+                                            {vault.delivery_blob_name ? (
+                                                <Text variant="bodySmall" color="secondary">
+                                                    Delivery ZIP ready
+                                                </Text>
+                                            ) : null}
                                         </div>
 
                                         <div style={{ marginTop: t.space.xxs }}>
@@ -467,6 +474,11 @@ export default function DashboardPage() {
                                         <Text variant="bodySmall" color="secondary">
                                             Grace Period: {incoming.grace_period_days} days
                                         </Text>
+                                        {incoming.delivery_available ? (
+                                            <Text variant="bodySmall" color="secondary">
+                                                Delivery package ready
+                                            </Text>
+                                        ) : null}
                                         {incoming.has_requested_activation ? (
                                             <Text variant="bodySmall" color="secondary">
                                                 You have requested activation

@@ -27,6 +27,8 @@ type RecipientVaultSummary = {
   activation_requests_count: number;
   has_requested_activation: boolean;
   grace_period_expires_at?: string | null;
+  delivered_at?: string | null;
+  delivery_available?: boolean;
 };
 
 function normalizeVaultId(rawVaultId: string | string[] | undefined): string {
@@ -61,6 +63,36 @@ function formatIsoDate(value: string | null | undefined): string {
   return parsed.toLocaleString();
 }
 
+function getDownloadFileName(response: Response, fallbackName: string): string {
+  const contentDisposition = response.headers.get("content-disposition") || "";
+  const encodedMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1]);
+    } catch {
+      return encodedMatch[1];
+    }
+  }
+
+  const plainMatch = contentDisposition.match(/filename=\"([^\"]+)\"/i);
+  if (plainMatch?.[1]) {
+    return plainMatch[1];
+  }
+
+  return fallbackName;
+}
+
+function triggerBrowserDownload(blob: Blob, fileName: string): void {
+  const objectUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(objectUrl);
+}
+
 export default function RecipientActivationPage() {
   const t = useCatTheme();
   const router = useRouter();
@@ -79,6 +111,7 @@ export default function RecipientActivationPage() {
   const [reason, setReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isWithdrawing, setIsWithdrawing] = useState(false);
+  const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -253,6 +286,49 @@ export default function RecipientActivationPage() {
     }
   };
 
+  const handleDownloadPackage = async () => {
+    setActionMessage(null);
+    setActionError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setActionError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsDownloadingPackage(true);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-package`,
+        {
+          method: "GET",
+          headers: buildAuthHeaders(authToken, false),
+        },
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to download the delivery package.");
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      triggerBrowserDownload(
+        blob,
+        getDownloadFileName(response, `${vaultId}-delivery.zip`),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unexpected error while downloading the package.";
+      setActionError(message);
+    } finally {
+      setIsDownloadingPackage(false);
+    }
+  };
+
   const mainBackground = t.isDark
     ? "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.14), transparent 35%), radial-gradient(circle at 80% 8%, rgba(80, 80, 90, 0.32), transparent 30%), linear-gradient(180deg, #050505 0%, #09090B 60%, #050505 100%)"
     : "radial-gradient(circle at 15% 10%, rgba(216, 27, 96, 0.1), transparent 38%), radial-gradient(circle at 84% 10%, rgba(24, 24, 27, 0.06), transparent 35%), linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 55%, #FFFFFF 100%)";
@@ -375,6 +451,14 @@ export default function RecipientActivationPage() {
                   <Text variant="label">{formatIsoDate(summary.grace_period_expires_at)}</Text>
                 </Card>
               ) : null}
+              {summary.delivery_available ? (
+                <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
+                  <Text variant="caption" color="muted">Delivery</Text>
+                  <Text variant="label">
+                    {summary.delivered_at ? `Ready since ${formatIsoDate(summary.delivered_at)}` : "Ready"}
+                  </Text>
+                </Card>
+              ) : null}
             </div>
           ) : null}
         </Card>
@@ -402,10 +486,32 @@ export default function RecipientActivationPage() {
               check in before it ends, the vault will be delivered.
             </Text>
 
+            {summary.delivery_available ? (
+              <Card variant="secondary" style={{ padding: t.space.m, gap: t.space.xs }}>
+                <Text variant="label">The delivery package is ready.</Text>
+                <Text variant="bodySmall" color="secondary">
+                  The vault has already been processed into a final ZIP package. You can download
+                  it directly from here.
+                </Text>
+                <Button
+                  type="button"
+                  variant="SolidPrimary"
+                  onClick={() => void handleDownloadPackage()}
+                  disabled={isDownloadingPackage}
+                >
+                  {isDownloadingPackage ? "Downloading..." : "Download delivery ZIP"}
+                </Button>
+              </Card>
+            ) : null}
+
             {isTerminal ? (
               <Alert
                 variant="info"
-                message="This vault is no longer accepting activation requests."
+                message={
+                  summary.delivery_available
+                    ? "This vault has already been delivered."
+                    : "This vault is no longer accepting activation requests."
+                }
               />
             ) : null}
 

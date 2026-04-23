@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import PurePath
 from typing import Any, BinaryIO, Dict, Optional
 from uuid import uuid4
@@ -75,10 +76,11 @@ class BlobService:
         file_name: str,
         content_type: Optional[str] = None,
         file_size: Optional[int] = None,
+        blob_content_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         container_name = self._container_name_for_vault(vault_id)
         safe_file_name = PurePath(file_name).name if file_name else "upload.bin"
-        blob_name = f"{uuid4().hex}-{safe_file_name}"
+        blob_name = f"{uuid4().hex}.blob"
 
         container_client = self._blob_service_client.get_container_client(container_name)
         try:
@@ -96,8 +98,11 @@ class BlobService:
             logger.debug("File stream does not support seek; proceeding with current cursor.")
 
         upload_kwargs: Dict[str, Any] = {}
-        if content_type:
-            upload_kwargs["content_settings"] = ContentSettings(content_type=content_type)
+        effective_blob_content_type = blob_content_type or content_type
+        if effective_blob_content_type:
+            upload_kwargs["content_settings"] = ContentSettings(
+                content_type=effective_blob_content_type
+            )
         if file_size is not None and file_size >= 0:
             upload_kwargs["length"] = file_size
 
@@ -119,6 +124,7 @@ class BlobService:
             "container_name": container_name,
             "blob_url": blob_client.url,
             "content_type": content_type,
+            "blob_content_type": effective_blob_content_type,
             "size_bytes": file_size,
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -129,6 +135,24 @@ class BlobService:
             container_name,
         )
         return metadata
+
+    def upload_bytes(
+        self,
+        vault_id: str,
+        payload: bytes,
+        *,
+        file_name: str,
+        content_type: Optional[str] = None,
+        blob_content_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.upload_file(
+            vault_id=vault_id,
+            file_stream=BytesIO(payload),
+            file_name=file_name,
+            content_type=content_type,
+            file_size=len(payload),
+            blob_content_type=blob_content_type,
+        )
 
     def delete_blob(self, container_name: str, blob_name: str) -> None:
         blob_client = self._blob_service_client.get_blob_client(
@@ -213,3 +237,22 @@ class BlobService:
             "url": f"{blob_client.url}?{sas_token}",
             "expires_at": expires_at.isoformat(),
         }
+
+    def download_blob_bytes(self, container_name: str, blob_name: str) -> bytes:
+        blob_client = self._blob_service_client.get_blob_client(
+            container=container_name,
+            blob=blob_name,
+        )
+        try:
+            return blob_client.download_blob().readall()
+        except ResourceNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Blob not found. container={container_name} blob={blob_name}"
+            ) from exc
+        except AzureError:
+            logger.exception(
+                "Failed to download blob bytes. container=%s blob=%s",
+                container_name,
+                blob_name,
+            )
+            raise

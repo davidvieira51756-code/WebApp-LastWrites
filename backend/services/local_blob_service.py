@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path, PurePath
 from typing import Any, BinaryIO, Dict, Optional
 from uuid import uuid4
@@ -13,7 +14,8 @@ class LocalBlobService:
 
     def __init__(self, root_dir: Optional[str] = None) -> None:
         default_root = Path(__file__).resolve().parents[1] / ".local_data" / "blobs"
-        self._root_dir = Path(root_dir) if root_dir else default_root
+        configured_root = root_dir or os.getenv("LOCAL_BLOB_ROOT_DIR")
+        self._root_dir = Path(configured_root) if configured_root else default_root
 
     def initialize(self) -> None:
         self._root_dir.mkdir(parents=True, exist_ok=True)
@@ -36,8 +38,12 @@ class LocalBlobService:
         return container_name
 
     def _resolve_blob_path(self, container_name: str, blob_name: str) -> Path:
-        safe_blob_name = PurePath(blob_name).name
-        return self._root_dir / container_name / safe_blob_name
+        blob_parts = [
+            part
+            for part in PurePath(blob_name).parts
+            if part not in ("", ".", "..")
+        ]
+        return self._root_dir / container_name / Path(*blob_parts)
 
     def upload_file(
         self,
@@ -46,11 +52,12 @@ class LocalBlobService:
         file_name: str,
         content_type: Optional[str] = None,
         file_size: Optional[int] = None,
+        blob_content_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         self.initialize()
         container_name = self._container_name_for_vault(vault_id)
         safe_file_name = PurePath(file_name).name if file_name else "upload.bin"
-        blob_name = f"{uuid4().hex}-{safe_file_name}"
+        blob_name = f"{uuid4().hex}.blob"
 
         target_dir = self._root_dir / container_name
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -78,9 +85,28 @@ class LocalBlobService:
             "container_name": container_name,
             "blob_url": str(target_path),
             "content_type": content_type,
+            "blob_content_type": blob_content_type or content_type,
             "size_bytes": file_size,
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
         }
+
+    def upload_bytes(
+        self,
+        vault_id: str,
+        payload: bytes,
+        *,
+        file_name: str,
+        content_type: Optional[str] = None,
+        blob_content_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.upload_file(
+            vault_id=vault_id,
+            file_stream=BytesIO(payload),
+            file_name=file_name,
+            content_type=content_type,
+            file_size=len(payload),
+            blob_content_type=blob_content_type,
+        )
 
     def delete_blob(self, container_name: str, blob_name: str) -> None:
         target_path = self._resolve_blob_path(container_name, blob_name)
@@ -115,3 +141,6 @@ class LocalBlobService:
                 f"Blob not found. container={container_name} blob={blob_name}"
             )
         return path
+
+    def download_blob_bytes(self, container_name: str, blob_name: str) -> bytes:
+        return self.get_local_file_path(container_name, blob_name).read_bytes()

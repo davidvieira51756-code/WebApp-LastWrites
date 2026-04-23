@@ -5,10 +5,12 @@ import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
@@ -31,9 +33,11 @@ try:
     from backend.services.auth_service import AuthService
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
+    from backend.services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
     from backend.services.keyvault_service import KeyVaultService
     from backend.services.local_blob_service import LocalBlobService
     from backend.services.local_cosmos_service import LocalCosmosService
+    from backend.services.vault_key_service import AzureVaultKeyService, LocalVaultKeyService
 except ModuleNotFoundError:
     from models.auth import (
         AuthLoginRequest,
@@ -53,9 +57,11 @@ except ModuleNotFoundError:
     from services.auth_service import AuthService
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
+    from services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
     from services.keyvault_service import KeyVaultService
     from services.local_blob_service import LocalBlobService
     from services.local_cosmos_service import LocalCosmosService
+    from services.vault_key_service import AzureVaultKeyService, LocalVaultKeyService
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
@@ -152,6 +158,16 @@ def get_auth_service(request: Request) -> AuthService:
     return auth_service
 
 
+def get_vault_key_service(request: Request):
+    vault_key_service = getattr(request.app.state, "vault_key_service", None)
+    if vault_key_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vault key service is not initialized.",
+        )
+    return vault_key_service
+
+
 def _is_truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -177,6 +193,80 @@ def _parse_iso_datetime(value: str) -> Optional[datetime]:
     if parsed_value.tzinfo is None:
         return parsed_value.replace(tzinfo=timezone.utc)
     return parsed_value.astimezone(timezone.utc)
+
+
+def _build_attachment_headers(file_name: str) -> Dict[str, str]:
+    normalized_name = file_name.strip() or "download.bin"
+    fallback_name = normalized_name.encode("ascii", errors="ignore").decode("ascii") or "download.bin"
+    fallback_name = fallback_name.replace('"', "")
+    encoded_name = quote(normalized_name)
+    return {
+        "Content-Disposition": (
+            f'attachment; filename="{fallback_name}"; filename*=UTF-8\'\'{encoded_name}'
+        )
+    }
+
+
+def _is_vault_recipient(vault_item: Dict[str, Any], recipient_email: str) -> bool:
+    recipients = vault_item.get("recipients", [])
+    if not isinstance(recipients, list):
+        return False
+
+    normalized_email = recipient_email.strip().lower()
+    return any(
+        isinstance(candidate, str) and candidate.strip().lower() == normalized_email
+        for candidate in recipients
+    )
+
+
+def ensure_vault_key_metadata(
+    cosmos_service: CosmosService,
+    vault_key_service,
+    vault_item: Dict[str, Any],
+) -> Dict[str, Any]:
+    existing_key_kid = str(vault_item.get("key_kid", "")).strip()
+    public_jwk = vault_item.get("public_jwk")
+    if existing_key_kid and isinstance(public_jwk, dict) and public_jwk.get("n") and public_jwk.get("e"):
+        return vault_item
+
+    key_metadata = vault_key_service.ensure_vault_key(str(vault_item.get("id", "")))
+    updated_vault = cosmos_service.update_vault(str(vault_item.get("id", "")), key_metadata)
+    if updated_vault is None:
+        merged_vault = dict(vault_item)
+        merged_vault.update(key_metadata)
+        return merged_vault
+    return updated_vault
+
+
+def _download_vault_file_bytes(
+    blob_service: BlobService,
+    vault_key_service,
+    file_metadata: Dict[str, Any],
+) -> bytes:
+    container_name = str(file_metadata.get("container_name", "")).strip()
+    blob_name = str(file_metadata.get("blob_name", "")).strip()
+    if not container_name or not blob_name:
+        raise ValueError("File metadata is missing blob location details.")
+
+    blob_bytes = blob_service.download_blob_bytes(container_name=container_name, blob_name=blob_name)
+    if not bool(file_metadata.get("encrypted", False)):
+        return blob_bytes
+
+    wrapped_key = str(file_metadata.get("wrapped_key", "")).strip()
+    iv = str(file_metadata.get("iv", "")).strip()
+    tag = str(file_metadata.get("tag", "")).strip()
+    key_kid = str(file_metadata.get("key_kid", "")).strip()
+    if not wrapped_key or not iv or not tag or not key_kid:
+        raise ValueError("Encrypted file metadata is incomplete.")
+
+    aes_key = vault_key_service.unwrap_file_key(key_kid=key_kid, wrapped_key=wrapped_key)
+    plaintext = decrypt_file_bytes(blob_bytes, aes_key=aes_key, iv=iv, tag=tag)
+
+    expected_checksum = str(file_metadata.get("plaintext_sha256", "")).strip()
+    if expected_checksum and sha256_hexdigest(plaintext) != expected_checksum:
+        raise ValueError("File integrity verification failed after decryption.")
+
+    return plaintext
 
 
 def get_current_user(
@@ -272,6 +362,7 @@ def startup_event() -> None:
             blob_service = LocalBlobService()
             blob_service.initialize()
             auth_service = AuthService()
+            vault_key_service = LocalVaultKeyService()
             app.state.keyvault_service = None
             logger.info("Application startup completed in LOCAL_DEV_MODE.")
         else:
@@ -287,6 +378,15 @@ def startup_event() -> None:
                 connection_string=secure_settings["blob_connection_string"]
             )
             auth_service = AuthService()
+            key_vault_url = os.getenv("KEY_VAULT_URL", "").strip()
+            if key_vault_url:
+                vault_key_service = AzureVaultKeyService(key_vault_url=key_vault_url)
+            else:
+                logger.warning(
+                    "KEY_VAULT_URL is not configured. Falling back to LocalVaultKeyService. "
+                    "This mode is for development only."
+                )
+                vault_key_service = LocalVaultKeyService()
 
             app.state.keyvault_service = keyvault_service
             logger.info("Application startup completed.")
@@ -294,6 +394,7 @@ def startup_event() -> None:
         app.state.cosmos_service = cosmos_service
         app.state.blob_service = blob_service
         app.state.auth_service = auth_service
+        app.state.vault_key_service = vault_key_service
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise
@@ -488,10 +589,21 @@ def create_vault(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> VaultResponse:
     cosmos_service = get_cosmos_service(request)
+    vault_key_service = get_vault_key_service(request)
     vault_payload = vault.model_dump(exclude_unset=True)
+    vault_id = str(uuid4())
+    vault_payload["id"] = vault_id
     vault_payload["user_id"] = str(current_user.get("id", ""))
+    vault_payload["status"] = "active"
+    vault_payload["owner_message"] = (
+        str(vault_payload.get("owner_message", "")).strip() or None
+    )
 
     try:
+        recipients = vault_payload.get("recipients", [])
+        if recipients is not None:
+            vault_payload["recipients"] = normalize_recipients(recipients)
+        vault_payload.update(vault_key_service.ensure_vault_key(vault_id))
         created_item = cosmos_service.create_vault(vault_payload)
         return VaultResponse(**created_item)
     except ValueError as exc:
@@ -557,6 +669,8 @@ def _build_recipient_vault_summary(
         activation_requests_count=len(activation_requests),
         has_requested_activation=has_requested,
         grace_period_expires_at=vault_item.get("grace_period_expires_at"),
+        delivered_at=vault_item.get("delivered_at"),
+        delivery_available=bool(vault_item.get("delivery_blob_name")),
     )
 
 
@@ -621,8 +735,14 @@ def update_vault(
     )
 
     try:
+        if "status" in update_data and update_data["status"] is not None:
+            raise ValueError(
+                "Vault status is managed by the delivery pipeline and cannot be updated manually."
+            )
         if "recipients" in update_data and update_data["recipients"] is not None:
             update_data["recipients"] = normalize_recipients(update_data["recipients"])
+        if "owner_message" in update_data:
+            update_data["owner_message"] = str(update_data.get("owner_message", "")).strip() or None
 
         updated_vault = cosmos_service.update_vault(vault_id, update_data)
     except ValueError as exc:
@@ -671,6 +791,14 @@ def delete_vault(
             if container_name and blob_name:
                 blob_service.delete_blob(container_name=container_name, blob_name=blob_name)
 
+        delivery_container_name = vault_item.get("delivery_container_name")
+        delivery_blob_name = vault_item.get("delivery_blob_name")
+        if delivery_container_name and delivery_blob_name:
+            blob_service.delete_blob(
+                container_name=str(delivery_container_name),
+                blob_name=str(delivery_blob_name),
+            )
+
         deleted = cosmos_service.delete_vault(vault_id)
     except Exception:
         logger.exception("Unhandled error while deleting vault id=%s", vault_id)
@@ -703,6 +831,8 @@ def check_in_vault(
 
     try:
         updated_vault = cosmos_service.check_in_vault(vault_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception:
         logger.exception("Unhandled error while checking in vault id=%s", vault_id)
         raise HTTPException(
@@ -749,23 +879,74 @@ def get_vault_activation_summary(
             detail="Vault not found.",
         )
 
-    recipients = vault_item.get("recipients", [])
-    if not isinstance(recipients, list):
-        recipients = []
-
-    is_recipient = any(
-        isinstance(candidate, str)
-        and candidate.strip().lower() == recipient_email
-        for candidate in recipients
-    )
-
-    if not is_recipient:
+    if not _is_vault_recipient(vault_item, recipient_email):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Vault not found.",
         )
 
     return _build_recipient_vault_summary(vault_item, recipient_email)
+
+
+@app.get("/vaults/{vault_id}/delivery-package")
+def download_delivery_package(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    blob_service = get_blob_service(request)
+
+    try:
+        vault_item = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while reading delivery package for vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve delivery package.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
+
+    current_user_id = str(current_user.get("id", "")).strip()
+    current_email = str(current_user.get("email", "")).strip().lower()
+    is_owner = str(vault_item.get("user_id", "")).strip() == current_user_id
+    is_recipient = _is_vault_recipient(vault_item, current_email)
+    if not is_owner and not is_recipient:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
+
+    delivery_container_name = str(vault_item.get("delivery_container_name", "")).strip()
+    delivery_blob_name = str(vault_item.get("delivery_blob_name", "")).strip()
+    if not delivery_container_name or not delivery_blob_name:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The delivery package is not available yet.",
+        )
+
+    try:
+        payload = blob_service.download_blob_bytes(
+            container_name=delivery_container_name,
+            blob_name=delivery_blob_name,
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The delivery package could not be found.",
+        ) from None
+    except Exception:
+        logger.exception("Failed to download delivery package for vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to download delivery package.",
+        ) from None
+
+    file_name = str(vault_item.get("delivery_file_name", "")).strip() or f"{vault_id}-delivery.zip"
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers=_build_attachment_headers(file_name),
+    )
 
 
 @app.post(
@@ -1044,7 +1225,7 @@ def list_vault_files(
 
 
 @app.get("/vaults/{vault_id}/files/{file_id}/download")
-def get_vault_file_download_url(
+def download_vault_file(
     vault_id: str,
     file_id: str,
     request: Request,
@@ -1052,6 +1233,7 @@ def get_vault_file_download_url(
 ):
     cosmos_service = get_cosmos_service(request)
     blob_service = get_blob_service(request)
+    vault_key_service = get_vault_key_service(request)
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
         vault_id=vault_id,
@@ -1074,18 +1256,10 @@ def get_vault_file_download_url(
         )
 
     try:
-        expires_in_minutes = int(os.getenv("FILE_DOWNLOAD_SAS_EXPIRY_MINUTES", "15"))
-    except ValueError:
-        logger.warning(
-            "Invalid FILE_DOWNLOAD_SAS_EXPIRY_MINUTES value, defaulting to 15 minutes."
-        )
-        expires_in_minutes = 15
-
-    try:
-        sas_payload = blob_service.generate_read_sas_url(
-            container_name=container_name,
-            blob_name=blob_name,
-            expires_in_minutes=expires_in_minutes,
+        payload = _download_vault_file_bytes(
+            blob_service=blob_service,
+            vault_key_service=vault_key_service,
+            file_metadata=file_metadata,
         )
     except FileNotFoundError:
         raise HTTPException(
@@ -1099,27 +1273,22 @@ def get_vault_file_download_url(
         ) from exc
     except Exception:
         logger.exception(
-            "Unhandled error while generating SAS URL. vault_id=%s file_id=%s",
+            "Unhandled error while preparing file download. vault_id=%s file_id=%s",
             vault_id,
             file_id,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to generate download URL.",
+            detail="Failed to download file.",
         ) from None
 
-    download_url = sas_payload["url"]
-    if getattr(blob_service, "is_local", False) and download_url.startswith("/"):
-        base_url = str(request.base_url).rstrip("/")
-        download_url = f"{base_url}{download_url}"
-
-    return {
-        "vault_id": vault_id,
-        "file_id": file_id,
-        "file_name": file_metadata.get("file_name"),
-        "download_url": download_url,
-        "expires_at": sas_payload["expires_at"],
-    }
+    file_name = str(file_metadata.get("file_name", "")).strip() or f"{file_id}.bin"
+    media_type = str(file_metadata.get("content_type", "")).strip() or "application/octet-stream"
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers=_build_attachment_headers(file_name),
+    )
 
 
 @app.delete("/vaults/{vault_id}/files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -1207,6 +1376,7 @@ async def upload_vault_file(
 ):
     cosmos_service = get_cosmos_service(request)
     blob_service = get_blob_service(request)
+    vault_key_service = get_vault_key_service(request)
 
     if not file.filename:
         raise HTTPException(
@@ -1220,23 +1390,35 @@ async def upload_vault_file(
         user_id=str(current_user.get("id", "")),
     )
 
-    file_size = None
-    try:
-        file.file.seek(0, os.SEEK_END)
-        file_size = file.file.tell()
-        file.file.seek(0)
-    except Exception:
-        logger.debug("Could not determine file size for uploaded file.")
-
     uploaded_file_metadata = None
     try:
-        uploaded_file_metadata = blob_service.upload_file(
+        vault_item = ensure_vault_key_metadata(
+            cosmos_service=cosmos_service,
+            vault_key_service=vault_key_service,
+            vault_item=vault_item,
+        )
+
+        plaintext_bytes = await file.read()
+        encryption_payload = encrypt_file_bytes(
+            plaintext_bytes,
+            vault_item.get("public_jwk", {}),
+        )
+
+        uploaded_blob_metadata = blob_service.upload_bytes(
             vault_id=vault_id,
-            file_stream=file.file,
+            payload=encryption_payload["ciphertext"],
             file_name=file.filename,
             content_type=file.content_type,
-            file_size=file_size,
+            blob_content_type="application/octet-stream",
         )
+        uploaded_file_metadata = dict(uploaded_blob_metadata)
+        uploaded_file_metadata.update(encryption_payload["metadata"])
+        uploaded_file_metadata["content_type"] = file.content_type
+        uploaded_file_metadata["blob_content_type"] = "application/octet-stream"
+        uploaded_file_metadata["size_bytes"] = len(plaintext_bytes)
+        uploaded_file_metadata["ciphertext_size_bytes"] = len(encryption_payload["ciphertext"])
+        uploaded_file_metadata["key_kid"] = str(vault_item.get("key_kid", "")).strip()
+        uploaded_file_metadata["key_version"] = str(vault_item.get("key_version", "")).strip()
 
         existing_files = vault_item.get("files", [])
         if not isinstance(existing_files, list):

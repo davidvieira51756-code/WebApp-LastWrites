@@ -39,4 +39,6 @@ jobs:
           # Add this GitHub Secret in repository settings:
           # AZURE_FUNCTIONAPP_PUBLISH_PROFILE -> Publish profile XML for the Function App.
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+          sku: flexconsumption
+          remote-build: true
           package: functions

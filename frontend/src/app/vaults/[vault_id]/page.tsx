@@ -28,6 +28,7 @@ type VaultDetail = {
   id: string;
   user_id: string;
   name: string;
+  owner_message?: string | null;
   grace_period_days: number;
   status: string;
   recipients: string[];
@@ -36,6 +37,11 @@ type VaultDetail = {
   grace_period_started_at?: string | null;
   grace_period_expires_at?: string | null;
   last_check_in_at?: string | null;
+  delivery_blob_name?: string | null;
+  delivery_container_name?: string | null;
+  delivery_file_name?: string | null;
+  delivered_at?: string | null;
+  delivery_error?: string | null;
 };
 
 type VaultFile = {
@@ -44,35 +50,16 @@ type VaultFile = {
   blob_name?: string;
   content_type?: string | null;
   size_bytes?: number | null;
+  ciphertext_size_bytes?: number | null;
   uploaded_at?: string;
+  encrypted?: boolean;
+  algorithm?: string | null;
 };
 
 type VaultFilesResponse = {
   vault_id: string;
   files: VaultFile[];
 };
-
-type DownloadResponse = {
-  download_url?: string;
-  expires_at?: string;
-};
-
-type VaultStatus =
-  | "active"
-  | "pending_activation"
-  | "grace_period"
-  | "delivery_initiated"
-  | "delivered"
-  | "disabled";
-
-const VAULT_STATUS_OPTIONS: VaultStatus[] = [
-  "active",
-  "pending_activation",
-  "grace_period",
-  "delivery_initiated",
-  "delivered",
-  "disabled",
-];
 
 const EMAIL_REGEX =
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
@@ -127,6 +114,36 @@ function formatIsoDate(value: string | null | undefined): string {
   return parsed.toLocaleString();
 }
 
+function getDownloadFileName(response: Response, fallbackName: string): string {
+  const contentDisposition = response.headers.get("content-disposition") || "";
+  const encodedMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1]);
+    } catch {
+      return encodedMatch[1];
+    }
+  }
+
+  const plainMatch = contentDisposition.match(/filename=\"([^\"]+)\"/i);
+  if (plainMatch?.[1]) {
+    return plainMatch[1];
+  }
+
+  return fallbackName;
+}
+
+function triggerBrowserDownload(blob: Blob, fileName: string): void {
+  const objectUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(objectUrl);
+}
+
 function describeCountdown(expiresAt: string | null | undefined): string {
   if (!expiresAt) return "";
   const target = new Date(expiresAt).getTime();
@@ -179,9 +196,9 @@ export default function VaultDetailsPage() {
   const [isDeletingFileId, setIsDeletingFileId] = useState<string | null>(null);
 
   const [editableName, setEditableName] = useState("");
+  const [editableOwnerMessage, setEditableOwnerMessage] = useState("");
   const [editableGracePeriod, setEditableGracePeriod] = useState(30);
   const [editableThreshold, setEditableThreshold] = useState(1);
-  const [editableStatus, setEditableStatus] = useState<VaultStatus>("active");
   const [isUpdatingVault, setIsUpdatingVault] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
@@ -191,6 +208,7 @@ export default function VaultDetailsPage() {
   const [checkInError, setCheckInError] = useState<string | null>(null);
 
   const [isDeletingVault, setIsDeletingVault] = useState(false);
+  const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
 
   const authRedirectPath = useMemo(() => {
     if (!vaultId) {
@@ -274,11 +292,9 @@ export default function VaultDetailsPage() {
 
         setVault(vaultPayload);
         setEditableName(vaultPayload.name || "");
+        setEditableOwnerMessage(vaultPayload.owner_message || "");
         setEditableGracePeriod(Number(vaultPayload.grace_period_days || 1));
         setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
-        if (VAULT_STATUS_OPTIONS.includes(vaultPayload.status as VaultStatus)) {
-          setEditableStatus(vaultPayload.status as VaultStatus);
-        }
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
       } catch (error) {
         const message =
@@ -458,22 +474,64 @@ export default function VaultDetailsPage() {
       }
 
       if (!response.ok) {
-        const message = await getErrorDetail(response, "Failed to generate download URL.");
+        const message = await getErrorDetail(response, "Failed to download file.");
         throw new Error(message);
       }
 
-      const payload = (await response.json()) as DownloadResponse;
-      if (!payload.download_url) {
-        throw new Error("Download URL was not returned by the API.");
-      }
-
-      window.open(payload.download_url, "_blank", "noopener,noreferrer");
+      const matchingFile = files.find((fileItem) => fileItem.id === fileId);
+      const blob = await response.blob();
+      triggerBrowserDownload(
+        blob,
+        getDownloadFileName(response, matchingFile?.file_name || `${fileId}.bin`),
+      );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Unexpected error while preparing download.";
+        error instanceof Error ? error.message : "Unexpected error while downloading file.";
       setDownloadError(message);
     } finally {
       setDownloadingFileId(null);
+    }
+  };
+
+  const handleDownloadDeliveryPackage = async () => {
+    setDownloadError(null);
+    if (!apiUrl || !vaultId || !authToken) {
+      setDownloadError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsDownloadingPackage(true);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-package`,
+        {
+          headers: buildAuthHeaders(authToken, false),
+        },
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to download delivery package.");
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      triggerBrowserDownload(
+        blob,
+        getDownloadFileName(response, vault?.delivery_file_name || `${vaultId}-delivery.zip`),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unexpected error while downloading the delivery package.";
+      setDownloadError(message);
+    } finally {
+      setIsDownloadingPackage(false);
     }
   };
 
@@ -546,8 +604,8 @@ export default function VaultDetailsPage() {
         headers: buildAuthHeaders(authToken, true),
         body: JSON.stringify({
           name: normalizedName,
+          owner_message: editableOwnerMessage.trim() || null,
           grace_period_days: Number(editableGracePeriod),
-          status: editableStatus,
           activation_threshold: Math.floor(Number(editableThreshold)),
         }),
       });
@@ -768,6 +826,16 @@ export default function VaultDetailsPage() {
                   {activationCount}/{activationThreshold}
                 </Text>
               </Card>
+              <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
+                <Text variant="caption" color="muted">Delivery Package</Text>
+                <Text variant="label">
+                  {vault.delivery_blob_name
+                    ? "Ready"
+                    : normalizedStatus === "delivery_initiated"
+                      ? "Building"
+                      : "Not ready"}
+                </Text>
+              </Card>
             </div>
           ) : null}
 
@@ -813,7 +881,7 @@ export default function VaultDetailsPage() {
                   onClick={() => void handleCheckIn()}
                   disabled={isCheckingIn}
                 >
-                  {isCheckingIn ? "Checking in..." : "I'm still here — Check In"}
+                  {isCheckingIn ? "Checking in..." : "I'm still here - Check In"}
                 </Button>
               </div>
 
@@ -878,6 +946,16 @@ export default function VaultDetailsPage() {
                   />
 
                   <Input
+                    id="vault-owner-message"
+                    label="Message For Recipients"
+                    value={editableOwnerMessage}
+                    onChange={(event) => setEditableOwnerMessage(event.target.value)}
+                    placeholder="This message appears on the generated cover PDF."
+                    maxLength={4000}
+                    multiline
+                  />
+
+                  <Input
                     id="vault-threshold"
                     type="number"
                     min={1}
@@ -888,33 +966,10 @@ export default function VaultDetailsPage() {
                     required
                   />
 
-                  <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
-                    <Text variant="label" color="secondary">
-                      Status
-                    </Text>
-                    <select
-                      value={editableStatus}
-                      onChange={(event) => setEditableStatus(event.target.value as VaultStatus)}
-                      style={{
-                        width: "100%",
-                        border: `1px solid ${t.colors.components.input.border}`,
-                        backgroundColor: t.colors.components.input.bg,
-                        color: t.colors.text.primary,
-                        borderRadius: t.radius.full,
-                        padding: `${t.space.s}px ${t.space.m}px`,
-                        fontFamily: "var(--font-geist-sans), sans-serif",
-                        fontSize: t.typography.body.fontSize,
-                        lineHeight: String(t.typography.body.lineHeight),
-                        outline: "none",
-                      }}
-                    >
-                      {VAULT_STATUS_OPTIONS.map((option) => (
-                        <option key={option} value={option}>
-                          {formatStatusLabel(option)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  <Text variant="bodySmall" color="secondary">
+                    Vault status is managed automatically by activation requests, grace periods,
+                    and the delivery pipeline.
+                  </Text>
 
                   <Button
                     type="submit"
@@ -937,6 +992,49 @@ export default function VaultDetailsPage() {
 
                 {updateError ? <Alert variant="error" message={updateError} /> : null}
                 {updateMessage ? <Alert variant="success" message={updateMessage} /> : null}
+              </Card>
+
+              <Card variant="elevated" style={{ gap: t.space.s }}>
+                <Text variant="h3">Delivery Package</Text>
+                <Text variant="bodySmall" color="secondary">
+                  When the grace period expires, the worker decrypts the vault files, generates a
+                  cover PDF, and publishes one ZIP package for delivery.
+                </Text>
+
+                {vault?.delivery_error ? (
+                  <Alert variant="error" message={`Last delivery error: ${vault.delivery_error}`} />
+                ) : null}
+
+                {vault?.delivery_blob_name ? (
+                  <>
+                    <Alert
+                      variant="success"
+                      message={
+                        vault.delivered_at
+                          ? `Delivery package ready since ${formatIsoDate(vault.delivered_at)}.`
+                          : "Delivery package ready."
+                      }
+                    />
+                    <Button
+                      type="button"
+                      variant="SolidPrimary"
+                      onClick={() => void handleDownloadDeliveryPackage()}
+                      disabled={isDownloadingPackage}
+                    >
+                      {isDownloadingPackage ? "Downloading..." : "Download Delivery ZIP"}
+                    </Button>
+                  </>
+                ) : normalizedStatus === "delivery_initiated" ? (
+                  <Alert
+                    variant="info"
+                    message="The delivery job has started. Refresh this page in a moment to check whether the final ZIP is ready."
+                  />
+                ) : (
+                  <Alert
+                    variant="info"
+                    message="No final delivery package exists yet. It only appears after the grace period expires and the delivery job completes."
+                  />
+                )}
               </Card>
 
               <Card variant="elevated" style={{ gap: t.space.s }}>
@@ -1154,10 +1252,16 @@ export default function VaultDetailsPage() {
                           Size: {formatBytes(fileItem.size_bytes)}
                         </Text>
                         <Text variant="caption" color="secondary">
+                          Stored: {formatBytes(fileItem.ciphertext_size_bytes)}
+                        </Text>
+                        <Text variant="caption" color="secondary">
                           Type: {fileItem.content_type || "Unknown"}
                         </Text>
                         <Text variant="caption" color="secondary">
                           Uploaded: {fileItem.uploaded_at || "Unknown"}
+                        </Text>
+                        <Text variant="caption" color="secondary">
+                          Encryption: {fileItem.encrypted ? fileItem.algorithm || "Encrypted" : "Legacy plaintext"}
                         </Text>
                       </div>
                     </Card>

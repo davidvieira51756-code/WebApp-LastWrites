@@ -16,6 +16,7 @@ export type Vault = {
     id: string;
     user_id: string;
     name: string;
+    owner_message?: string | null;
     grace_period_days: number;
     status: string;
     recipients: string[];
@@ -25,6 +26,11 @@ export type Vault = {
     grace_period_started_at?: string | null;
     grace_period_expires_at?: string | null;
     last_check_in_at?: string | null;
+    delivery_blob_name?: string | null;
+    delivery_container_name?: string | null;
+    delivery_file_name?: string | null;
+    delivered_at?: string | null;
+    delivery_error?: string | null;
 };
 
 type CreateVaultFormProps = {
@@ -42,6 +48,7 @@ export default function CreateVaultForm({
 }: CreateVaultFormProps) {
     const t = useCatTheme();
     const [name, setName] = useState("");
+    const [ownerMessage, setOwnerMessage] = useState("");
     const [gracePeriodDays, setGracePeriodDays] = useState(30);
     const [activationThreshold, setActivationThreshold] = useState(1);
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -78,8 +85,8 @@ export default function CreateVaultForm({
                 headers: buildAuthHeaders(authToken, true),
                 body: JSON.stringify({
                     name: normalizedName,
+                    owner_message: ownerMessage.trim() || null,
                     grace_period_days: Number(gracePeriodDays),
-                    status: "active",
                     recipients: [],
                     activation_threshold: normalizedThreshold,
                 }),
@@ -106,6 +113,7 @@ export default function CreateVaultForm({
             const createdVault = (await response.json()) as Vault;
             onCreated(createdVault);
             setName("");
+            setOwnerMessage("");
             setGracePeriodDays(30);
             setActivationThreshold(1);
             setSuccessMessage("Vault created successfully.");
@@ -159,6 +167,15 @@ export default function CreateVaultForm({
                     value={gracePeriodDays}
                     onChange={(event) => setGracePeriodDays(Number(event.target.value))}
                     required
+                />
+
+                <Input
+                    id="owner-message"
+                    label="Message For Recipients"
+                    value={ownerMessage}
+                    onChange={(event) => setOwnerMessage(event.target.value)}
+                    placeholder="Write the message that should appear on the delivery cover page."
+                    multiline
                 />
 
                 <Input

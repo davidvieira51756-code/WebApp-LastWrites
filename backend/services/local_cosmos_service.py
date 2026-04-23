@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -62,7 +63,8 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
 class LocalCosmosService:
     def __init__(self, data_file: Optional[str] = None) -> None:
         default_path = Path(__file__).resolve().parents[1] / ".local_data" / "vaults.json"
-        self._data_file = Path(data_file) if data_file else default_path
+        configured_path = data_file or os.getenv("LOCAL_COSMOS_DATA_FILE")
+        self._data_file = Path(configured_path) if configured_path else default_path
 
     def initialize(self) -> None:
         self._data_file.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +172,8 @@ class LocalCosmosService:
         payload["doc_type"] = "vault"
         payload.setdefault("recipients", [])
         payload.setdefault("files", [])
+        payload.setdefault("activation_requests", [])
+        payload.setdefault("owner_message", None)
         items.append(payload)
         self._write_items(items)
         return payload
@@ -430,11 +434,16 @@ class LocalCosmosService:
             if str(item.get("id")) != vault_id:
                 continue
 
+            current_status = str(item.get("status", "active")).strip().lower()
+            if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
+                raise ValueError("This vault can no longer be checked in.")
+
             updated_item = dict(item)
             updated_item["activation_requests"] = []
             updated_item["grace_period_started_at"] = None
             updated_item["grace_period_expires_at"] = None
             updated_item["grace_period_event_published_at"] = None
+            updated_item["delivery_error"] = None
             updated_item["status"] = "active"
             updated_item["last_check_in_at"] = _now_iso()
             items[index] = updated_item

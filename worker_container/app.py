@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 import os
 import re
@@ -7,12 +10,22 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from azure.core.exceptions import AzureError, ResourceExistsError
+from azure.cosmos import CosmosClient, exceptions
+from azure.identity import DefaultAzureCredential
+from azure.keyvault.keys.crypto import CryptographyClient, EncryptionAlgorithm
 from azure.storage.blob import BlobServiceClient, ContentSettings
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -21,11 +34,67 @@ logging.basicConfig(
 logger = logging.getLogger("last_writes_worker")
 
 
+def _env_to_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _get_required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
         raise RuntimeError(f"Environment variable {name} is required.")
     return value
+
+
+def _is_local_dev_mode() -> bool:
+    return _env_to_bool(os.getenv("LOCAL_DEV_MODE", "false"))
+
+
+def _b64url_decode(raw: str) -> bytes:
+    padding_length = (-len(raw)) % 4
+    return base64.urlsafe_b64decode(f"{raw}{'=' * padding_length}".encode("ascii"))
+
+
+def _sha256_hexdigest(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _default_local_data_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "backend" / ".local_data"
+
+
+def _get_local_blob_root() -> Path:
+    return Path(os.getenv("LOCAL_BLOB_ROOT_DIR", str(_default_local_data_dir() / "blobs")))
+
+
+def _get_local_cosmos_file() -> Path:
+    return Path(os.getenv("LOCAL_COSMOS_DATA_FILE", str(_default_local_data_dir() / "vaults.json")))
+
+
+def _get_local_keys_dir() -> Path:
+    return Path(os.getenv("LOCAL_VAULT_KEYS_DIR", str(_default_local_data_dir() / "vault_keys")))
+
+
+def _safe_file_name(file_name: str) -> str:
+    safe_name = Path(file_name).name.strip()
+    return safe_name or f"file-{uuid4().hex}.bin"
+
+
+def _resolve_unique_path(base_dir: Path, file_name: str) -> Path:
+    safe_name = _safe_file_name(file_name)
+    stem = Path(safe_name).stem
+    suffix = Path(safe_name).suffix
+    candidate = base_dir / safe_name
+    counter = 1
+
+    while candidate.exists():
+        candidate = base_dir / f"{stem}-{counter}{suffix}"
+        counter += 1
+
+    return candidate
 
 
 def _container_name_for_vault(vault_id: str) -> str:
@@ -45,123 +114,300 @@ def _container_name_for_vault(vault_id: str) -> str:
     return base_name
 
 
-def _safe_local_path(base_dir: Path, blob_name: str) -> Path:
-    sanitized_parts = [part for part in Path(blob_name).parts if part not in {"", ".", ".."}]
-    if not sanitized_parts:
-        sanitized_parts = [f"blob-{uuid4().hex}"]
-
-    target_path = (base_dir / Path(*sanitized_parts)).resolve()
-    base_dir_resolved = base_dir.resolve()
-    if not str(target_path).startswith(str(base_dir_resolved)):
-        raise ValueError(f"Unsafe blob path detected: {blob_name}")
-
-    return target_path
+def _load_local_items() -> List[Dict[str, Any]]:
+    data_file = _get_local_cosmos_file()
+    if not data_file.exists():
+        return []
+    raw = data_file.read_text(encoding="utf-8").strip() or "[]"
+    items = json.loads(raw)
+    return [item for item in items if isinstance(item, dict)]
 
 
-def _download_vault_files(
-    blob_service_client: BlobServiceClient,
-    source_container_name: str,
-    download_dir: Path,
-) -> List[Path]:
-    container_client = blob_service_client.get_container_client(source_container_name)
-    logger.info("Listing blobs from source container=%s", source_container_name)
+def _save_local_items(items: List[Dict[str, Any]]) -> None:
+    data_file = _get_local_cosmos_file()
+    data_file.parent.mkdir(parents=True, exist_ok=True)
+    data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
-    try:
-        blob_items = list(container_client.list_blobs())
-    except AzureError:
-        logger.exception(
-            "Failed to list blobs from source container=%s",
-            source_container_name,
+
+def _get_local_vault(vault_id: str) -> Optional[Dict[str, Any]]:
+    items = _load_local_items()
+    return next(
+        (
+            item
+            for item in items
+            if str(item.get("doc_type", "")).strip().lower() == "vault"
+            and str(item.get("id", "")) == vault_id
+        ),
+        None,
+    )
+
+
+def _update_local_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    items = _load_local_items()
+    for index, item in enumerate(items):
+        if str(item.get("doc_type", "")).strip().lower() != "vault":
+            continue
+        if str(item.get("id", "")) != vault_id:
+            continue
+
+        updated_item = dict(item)
+        updated_item.update(update_data)
+        items[index] = updated_item
+        _save_local_items(items)
+        return updated_item
+    return None
+
+
+_cosmos_client: Optional[CosmosClient] = None
+_vaults_container = None
+
+
+def _get_azure_cosmos_container():
+    global _cosmos_client
+    global _vaults_container
+
+    if _vaults_container is not None:
+        return _vaults_container
+
+    connection_string = _get_required_env("COSMOS_CONNECTION_STRING")
+    database_name = os.getenv("COSMOS_DATABASE_NAME", "last-writes-db")
+    container_name = os.getenv("COSMOS_VAULTS_CONTAINER", "vaults")
+
+    _cosmos_client = CosmosClient.from_connection_string(connection_string)
+    database_client = _cosmos_client.get_database_client(database_name)
+    _vaults_container = database_client.get_container_client(container_name)
+    return _vaults_container
+
+
+def _get_azure_vault(vault_id: str) -> Optional[Dict[str, Any]]:
+    container = _get_azure_cosmos_container()
+    query = "SELECT * FROM c WHERE c.id = @vault_id AND c.doc_type = 'vault'"
+    parameters = [{"name": "@vault_id", "value": vault_id}]
+    items = list(
+        container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
         )
-        raise
-
-    if not blob_items:
-        raise RuntimeError(f"No files found in source container {source_container_name}.")
-
-    downloaded_files: List[Path] = []
-    for blob_item in blob_items:
-        blob_name = blob_item.name
-        target_path = _safe_local_path(download_dir, blob_name)
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        logger.info(
-            "Downloading blob name=%s size_bytes=%s",
-            blob_name,
-            getattr(blob_item, "size", "unknown"),
-        )
-        try:
-            downloader = container_client.download_blob(blob_name)
-            with target_path.open("wb") as output_file:
-                downloader.readinto(output_file)
-        except AzureError:
-            logger.exception("Failed to download blob name=%s", blob_name)
-            raise
-
-        downloaded_files.append(target_path)
-
-    logger.info("Downloaded %s blobs from container=%s", len(downloaded_files), source_container_name)
-    return downloaded_files
+    )
+    return items[0] if items else None
 
 
-def _build_zip_archive(downloaded_files: List[Path], base_dir: Path, output_zip: Path) -> None:
-    logger.info("Creating ZIP archive at %s", output_zip)
-    try:
-        with ZipFile(output_zip, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zip_file:
-            for file_path in downloaded_files:
-                archive_name = file_path.relative_to(base_dir).as_posix()
-                logger.info("Adding file to ZIP archive path=%s archive_name=%s", file_path, archive_name)
-                zip_file.write(file_path, arcname=archive_name)
-    except Exception:
-        logger.exception("Failed to create ZIP archive at %s", output_zip)
-        raise
+def _update_azure_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    container = _get_azure_cosmos_container()
+    existing_item = _get_azure_vault(vault_id)
+    if existing_item is None:
+        return None
 
-    logger.info("ZIP archive created successfully size_bytes=%s", output_zip.stat().st_size)
+    merged_item = dict(existing_item)
+    merged_item.update(update_data)
+    return container.replace_item(item=existing_item, body=merged_item)
 
 
-def _upload_delivery_zip(
-    blob_service_client: BlobServiceClient,
-    deliveries_container_name: str,
-    vault_id: str,
-    zip_path: Path,
-) -> Dict[str, str]:
+def _load_vault(vault_id: str) -> Optional[Dict[str, Any]]:
+    if _is_local_dev_mode():
+        return _get_local_vault(vault_id)
+    return _get_azure_vault(vault_id)
+
+
+def _update_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if _is_local_dev_mode():
+        return _update_local_vault(vault_id, update_data)
+    return _update_azure_vault(vault_id, update_data)
+
+
+def _download_blob_bytes(container_name: str, blob_name: str) -> bytes:
+    if _is_local_dev_mode():
+        root_dir = _get_local_blob_root()
+        target_path = (root_dir / container_name / Path(blob_name).name).resolve()
+        if not target_path.exists():
+            raise FileNotFoundError(
+                f"Blob not found. container={container_name} blob={blob_name}"
+            )
+        return target_path.read_bytes()
+
+    connection_string = _get_required_env("BLOB_CONNECTION_STRING")
+    blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+    blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
+    return blob_client.download_blob().readall()
+
+
+def _upload_delivery_zip(vault_id: str, zip_path: Path) -> Dict[str, Any]:
+    deliveries_container_name = os.getenv("DELIVERIES_CONTAINER", "deliveries")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    blob_name = f"{vault_id}/{timestamp}-delivery.zip"
+    delivery_file_name = f"{vault_id}-delivery.zip"
+
+    if _is_local_dev_mode():
+        root_dir = _get_local_blob_root()
+        target_dir = root_dir / deliveries_container_name / vault_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / f"{timestamp}-delivery.zip"
+        target_path.write_bytes(zip_path.read_bytes())
+        return {
+            "container_name": deliveries_container_name,
+            "blob_name": f"{vault_id}/{target_path.name}",
+            "file_name": delivery_file_name,
+            "size_bytes": target_path.stat().st_size,
+            "checksum_sha256": _sha256_hexdigest(target_path.read_bytes()),
+            "blob_url": str(target_path),
+        }
+
+    connection_string = _get_required_env("BLOB_CONNECTION_STRING")
+    blob_service_client = BlobServiceClient.from_connection_string(connection_string)
     container_client = blob_service_client.get_container_client(deliveries_container_name)
     try:
         container_client.create_container()
-        logger.info("Created deliveries container=%s", deliveries_container_name)
     except ResourceExistsError:
-        logger.info("Deliveries container already exists=%s", deliveries_container_name)
+        pass
     except AzureError:
         logger.exception("Failed to create deliveries container=%s", deliveries_container_name)
         raise
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    blob_name = f"{vault_id}/{timestamp}-delivery.zip"
     blob_client = container_client.get_blob_client(blob=blob_name)
+    with zip_path.open("rb") as zip_stream:
+        blob_client.upload_blob(
+            zip_stream,
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/zip"),
+            metadata={"vault_id": vault_id, "generated_by": "worker_container"},
+        )
 
-    logger.info(
-        "Uploading delivery ZIP container=%s blob=%s size_bytes=%s",
-        deliveries_container_name,
-        blob_name,
-        zip_path.stat().st_size,
-    )
-    try:
-        with zip_path.open("rb") as zip_stream:
-            blob_client.upload_blob(
-                zip_stream,
-                overwrite=True,
-                content_settings=ContentSettings(content_type="application/zip"),
-                metadata={"vault_id": vault_id, "generated_by": "worker_container"},
-            )
-    except AzureError:
-        logger.exception("Failed to upload delivery ZIP blob=%s", blob_name)
-        raise
-
-    logger.info("Delivery ZIP uploaded successfully blob_url=%s", blob_client.url)
+    zip_bytes = zip_path.read_bytes()
     return {
-        "container": deliveries_container_name,
+        "container_name": deliveries_container_name,
         "blob_name": blob_name,
+        "file_name": delivery_file_name,
+        "size_bytes": zip_path.stat().st_size,
+        "checksum_sha256": _sha256_hexdigest(zip_bytes),
         "blob_url": blob_client.url,
     }
+
+
+def _unwrap_file_key(*, key_kid: str, wrapped_key: str) -> bytes:
+    if _is_local_dev_mode():
+        key_name = key_kid.split("/")[3] if key_kid.startswith("local://") else key_kid.rsplit("/", 2)[-2]
+        private_key_path = _get_local_keys_dir() / f"{key_name}.pem"
+        if not private_key_path.exists():
+            raise FileNotFoundError(f"Local private key file not found for key_name={key_name}.")
+
+        private_key = serialization.load_pem_private_key(
+            private_key_path.read_bytes(),
+            password=None,
+        )
+        return private_key.decrypt(
+            _b64url_decode(wrapped_key),
+            asym_padding.OAEP(
+                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+
+    key_vault_url = _get_required_env("KEY_VAULT_URL")
+    credential = DefaultAzureCredential()
+    crypto_client = CryptographyClient(key_kid, credential=credential)
+    decrypted = crypto_client.decrypt(
+        EncryptionAlgorithm.rsa_oaep_256,
+        _b64url_decode(wrapped_key),
+    )
+    return bytes(decrypted.plaintext)
+
+
+def _decrypt_vault_file(file_metadata: Dict[str, Any]) -> bytes:
+    container_name = str(file_metadata.get("container_name", "")).strip()
+    blob_name = str(file_metadata.get("blob_name", "")).strip()
+    if not container_name or not blob_name:
+        raise ValueError("File metadata is missing blob location details.")
+
+    blob_bytes = _download_blob_bytes(container_name=container_name, blob_name=blob_name)
+    if not bool(file_metadata.get("encrypted", False)):
+        return blob_bytes
+
+    wrapped_key = str(file_metadata.get("wrapped_key", "")).strip()
+    iv = str(file_metadata.get("iv", "")).strip()
+    tag = str(file_metadata.get("tag", "")).strip()
+    key_kid = str(file_metadata.get("key_kid", "")).strip()
+    if not wrapped_key or not iv or not tag or not key_kid:
+        raise ValueError("Encrypted file metadata is incomplete.")
+
+    aes_key = _unwrap_file_key(key_kid=key_kid, wrapped_key=wrapped_key)
+    plaintext = AESGCM(aes_key).decrypt(
+        _b64url_decode(iv),
+        blob_bytes + _b64url_decode(tag),
+        None,
+    )
+
+    expected_checksum = str(file_metadata.get("plaintext_sha256", "")).strip()
+    if expected_checksum and _sha256_hexdigest(plaintext) != expected_checksum:
+        raise ValueError("Plaintext checksum verification failed during worker decryption.")
+
+    return plaintext
+
+
+def _generate_cover_pdf(vault_document: Dict[str, Any], file_items: List[Dict[str, Any]], output_path: Path) -> None:
+    styles = getSampleStyleSheet()
+    story: List[Any] = []
+
+    story.append(Paragraph("Last Writes Delivery Package", styles["Title"]))
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(f"Vault: {vault_document.get('name', 'Unnamed Vault')}", styles["Heading2"]))
+    story.append(Paragraph(f"Vault ID: {vault_document.get('id', 'unknown')}", styles["BodyText"]))
+    story.append(Paragraph(f"Generated at: {_now_iso()}", styles["BodyText"]))
+    story.append(Spacer(1, 12))
+
+    owner_message = str(vault_document.get("owner_message", "")).strip()
+    story.append(Paragraph("Owner Message", styles["Heading3"]))
+    story.append(
+        Paragraph(
+            owner_message if owner_message else "No personal message was provided by the vault owner.",
+            styles["BodyText"],
+        )
+    )
+    story.append(Spacer(1, 12))
+
+    recipients = vault_document.get("recipients", [])
+    recipient_text = ", ".join(str(recipient).strip() for recipient in recipients if str(recipient).strip())
+    story.append(Paragraph("Recipients", styles["Heading3"]))
+    story.append(
+        Paragraph(recipient_text if recipient_text else "No recipients were listed.", styles["BodyText"])
+    )
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("Included Files", styles["Heading3"]))
+    table_rows: List[List[str]] = [["File Name", "Type", "Original Size"]]
+    for file_item in file_items:
+        table_rows.append(
+            [
+                str(file_item.get("file_name", "Unnamed file")),
+                str(file_item.get("content_type", "Unknown") or "Unknown"),
+                str(file_item.get("size_bytes", "Unknown")),
+            ]
+        )
+
+    table = Table(table_rows, repeatRows=1, colWidths=[280, 140, 100])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#18181B")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D4D4D8")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F4F4F5")]),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    story.append(table)
+
+    document = SimpleDocTemplate(str(output_path), pagesize=A4)
+    document.build(story)
+
+
+def _build_zip_archive(cover_pdf_path: Path, extracted_files: List[Path], output_zip: Path) -> None:
+    with ZipFile(output_zip, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zip_file:
+        zip_file.write(cover_pdf_path, arcname="00-cover.pdf")
+        for file_path in extracted_files:
+            zip_file.write(file_path, arcname=file_path.name)
 
 
 def run() -> int:
@@ -169,58 +415,88 @@ def run() -> int:
 
     try:
         vault_id = _get_required_env("VAULT_ID").strip()
-        connection_string = _get_required_env("BLOB_CONNECTION_STRING")
-        source_container_name = os.getenv("VAULT_CONTAINER_NAME") or _container_name_for_vault(vault_id)
-        deliveries_container_name = os.getenv("DELIVERIES_CONTAINER", "deliveries")
     except Exception:
         logger.exception("Invalid worker configuration.")
         return 1
 
-    logger.info(
-        "Worker configuration loaded vault_id=%s source_container=%s deliveries_container=%s",
-        vault_id,
-        source_container_name,
-        deliveries_container_name,
-    )
-
-    try:
-        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-    except Exception:
-        logger.exception("Failed to initialize BlobServiceClient.")
+    execution_name = os.getenv("CONTAINERAPP_JOB_EXECUTION_NAME", "").strip() or None
+    vault_document = _load_vault(vault_id)
+    if vault_document is None:
+        logger.error("Vault was not found. vault_id=%s", vault_id)
         return 1
+
+    if (
+        str(vault_document.get("status", "")).strip().lower() == "delivered"
+        and str(vault_document.get("delivery_blob_name", "")).strip()
+    ):
+        logger.info("Vault already delivered. Nothing to do. vault_id=%s", vault_id)
+        return 0
+
+    files = vault_document.get("files", [])
+    if not isinstance(files, list):
+        files = []
 
     try:
         with tempfile.TemporaryDirectory(prefix=f"last-writes-{vault_id[:12]}-") as temp_dir:
             temp_root = Path(temp_dir)
-            download_dir = temp_root / "vault_files"
-            download_dir.mkdir(parents=True, exist_ok=True)
+            extracted_dir = temp_root / "decrypted_files"
+            extracted_dir.mkdir(parents=True, exist_ok=True)
+            cover_pdf_path = temp_root / "cover.pdf"
             output_zip = temp_root / f"{vault_id}-delivery.zip"
 
-            downloaded_files = _download_vault_files(
-                blob_service_client=blob_service_client,
-                source_container_name=source_container_name,
-                download_dir=download_dir,
-            )
+            extracted_files: List[Path] = []
+            for file_item in files:
+                if not isinstance(file_item, dict):
+                    continue
+
+                plaintext = _decrypt_vault_file(file_item)
+                target_path = _resolve_unique_path(extracted_dir, str(file_item.get("file_name", "")))
+                target_path.write_bytes(plaintext)
+                extracted_files.append(target_path)
+
+            _generate_cover_pdf(vault_document=vault_document, file_items=files, output_path=cover_pdf_path)
             _build_zip_archive(
-                downloaded_files=downloaded_files,
-                base_dir=download_dir,
+                cover_pdf_path=cover_pdf_path,
+                extracted_files=extracted_files,
                 output_zip=output_zip,
             )
-            uploaded_zip = _upload_delivery_zip(
-                blob_service_client=blob_service_client,
-                deliveries_container_name=deliveries_container_name,
-                vault_id=vault_id,
-                zip_path=output_zip,
+
+            upload_result = _upload_delivery_zip(vault_id=vault_id, zip_path=output_zip)
+            updated_vault = _update_vault(
+                vault_id,
+                {
+                    "status": "delivered",
+                    "delivery_container_name": upload_result["container_name"],
+                    "delivery_blob_name": upload_result["blob_name"],
+                    "delivery_file_name": upload_result["file_name"],
+                    "delivery_size_bytes": upload_result["size_bytes"],
+                    "delivery_checksum_sha256": upload_result["checksum_sha256"],
+                    "delivery_error": None,
+                    "delivered_at": _now_iso(),
+                    "delivery_job_execution_name": execution_name,
+                },
             )
+            if updated_vault is None:
+                raise RuntimeError("Vault metadata could not be updated after delivery ZIP upload.")
 
             logger.info(
-                "Worker completed successfully. vault_id=%s uploaded_blob=%s",
+                "Worker completed successfully. vault_id=%s delivery_blob=%s",
                 vault_id,
-                uploaded_zip["blob_name"],
+                upload_result["blob_name"],
             )
             return 0
-    except Exception:
+    except Exception as exc:
         logger.exception("Worker execution failed for vault_id=%s", vault_id)
+        try:
+            _update_vault(
+                vault_id,
+                {
+                    "delivery_error": str(exc),
+                    "delivery_job_execution_name": execution_name,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to persist worker delivery error for vault_id=%s", vault_id)
         return 1
 
 
