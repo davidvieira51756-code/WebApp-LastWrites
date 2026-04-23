@@ -30,15 +30,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r functions/requirements.txt
 
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          # Add this GitHub Secret in repository settings:
+          # AZURE_CREDENTIALS -> Service principal JSON with access to the resource group.
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
       - name: Deploy to Azure Function App
         uses: Azure/functions-action@v1
         with:
           # Add this GitHub Secret in repository settings:
           # AZURE_FUNCTIONAPP_NAME -> Name of your Azure Function App.
           app-name: ${{ secrets.AZURE_FUNCTIONAPP_NAME }}
-          # Add this GitHub Secret in repository settings:
-          # AZURE_FUNCTIONAPP_PUBLISH_PROFILE -> Publish profile XML for the Function App.
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
           sku: flexconsumption
           remote-build: true
           package: functions

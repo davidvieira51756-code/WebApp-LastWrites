@@ -220,6 +220,68 @@ function Ensure-ProviderRegistered {
     }
 }
 
+function Get-OrCreate-GithubAzureCredentials {
+    param(
+        [Parameter(Mandatory = $true)][string]$DisplayName,
+        [Parameter(Mandatory = $true)][string]$Scope,
+        [Parameter(Mandatory = $true)][string]$SubscriptionId,
+        [Parameter(Mandatory = $true)][string]$TenantId
+    )
+
+    $existingAppId = Get-AzCliTsv -Arguments @(
+        "ad", "sp", "list",
+        "--display-name", $DisplayName,
+        "--query", "[0].appId",
+        "-o", "tsv"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($existingAppId)) {
+        return Get-AzCliRaw -Arguments @(
+            "ad", "sp", "create-for-rbac",
+            "--name", $DisplayName,
+            "--role", "Contributor",
+            "--scopes", $Scope,
+            "--json-auth", "true",
+            "-o", "json"
+        )
+    }
+
+    $clientSecret = Get-AzCliTsv -Arguments @(
+        "ad", "app", "credential", "reset",
+        "--id", $existingAppId,
+        "--query", "password",
+        "-o", "tsv"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($clientSecret)) {
+        throw "Failed to reset client secret for existing GitHub deployment app '$DisplayName'."
+    }
+
+    $servicePrincipalObjectId = Get-AzCliTsv -Arguments @(
+        "ad", "sp", "show",
+        "--id", $existingAppId,
+        "--query", "id",
+        "-o", "tsv"
+    )
+
+    Ensure-RoleAssignment -PrincipalId $servicePrincipalObjectId -RoleName "Contributor" -Scope $Scope
+
+    $credentials = [ordered]@{
+        clientId                    = $existingAppId
+        clientSecret                = $clientSecret
+        subscriptionId              = $SubscriptionId
+        tenantId                    = $TenantId
+        activeDirectoryEndpointUrl  = "https://login.microsoftonline.com"
+        resourceManagerEndpointUrl  = "https://management.azure.com/"
+        activeDirectoryGraphResourceId = "https://graph.windows.net/"
+        sqlManagementEndpointUrl    = "https://management.core.windows.net:8443/"
+        galleryEndpointUrl          = "https://gallery.azure.com/"
+        managementEndpointUrl       = "https://management.core.windows.net/"
+    }
+
+    return ($credentials | ConvertTo-Json -Compress)
+}
+
 function Test-IsGuid {
     param(
         [Parameter(Mandatory = $true)][string]$Value
@@ -471,6 +533,7 @@ function Resolve-FlexConsumptionLocation {
 Ensure-Command -Name "az"
 $account = Get-AzCliJson -Arguments @("account", "show", "-o", "json")
 $subscriptionId = [string]$account.id
+$tenantId = [string]$account.tenantId
 
 Write-Step "Ensuring required Azure resource providers are registered"
 foreach ($namespace in @(
@@ -492,6 +555,11 @@ if ($SetGithubSecrets -or $RerunWorkflowRuns) {
 
 if (($SetGithubSecrets -or $RerunWorkflowRuns) -and [string]::IsNullOrWhiteSpace($GithubRepo)) {
     throw "-GithubRepo is required when using -SetGithubSecrets or -RerunWorkflowRuns. Example: owner/repo"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($GithubRepo) -and -not $SetGithubSecrets) {
+    $SetGithubSecrets = $true
+    Write-Warning "-GithubRepo was provided without -SetGithubSecrets. Enabling GitHub secret updates automatically."
 }
 
 $projectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -948,6 +1016,11 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
         Set-OrUpdateGithubSecret -Name "ACR_PASSWORD" -Value $acrPassword -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_CONTAINERAPPS_RESOURCE_GROUP" -Value $ResourceGroupName -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_CONTAINERAPPS_JOB_NAME" -Value $containerAppsJobName -Repo $GithubRepo
+
+        $githubDeploymentPrincipalName = "gh-$prefixDashed-$token"
+        $githubDeploymentScope = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName"
+        $azureCredentialsJson = Get-OrCreate-GithubAzureCredentials -DisplayName $githubDeploymentPrincipalName -Scope $githubDeploymentScope -SubscriptionId $subscriptionId -TenantId $tenantId
+        Set-OrUpdateGithubSecret -Name "AZURE_CREDENTIALS" -Value $azureCredentialsJson -Repo $GithubRepo
     }
 
     if ($RerunWorkflowRuns) {
