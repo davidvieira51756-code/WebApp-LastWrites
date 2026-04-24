@@ -33,7 +33,7 @@ jobs:
       - name: Build backend deployment package
         run: |
           cd backend
-          zip -r ../backend-release.zip . -x "__pycache__/*" "*.pyc"
+          zip -r ../backend-release.zip . -x "__pycache__/*" "*.pyc" ".local_data/*" ".local_data/**"
 
       - name: Deploy backend to Azure Web App
         uses: azure/webapps-deploy@v3

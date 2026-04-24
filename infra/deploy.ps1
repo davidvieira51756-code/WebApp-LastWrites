@@ -959,12 +959,22 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
             if (-not [string]::IsNullOrWhiteSpace($runId)) {
                 Invoke-GhCli -Arguments @("run", "rerun", $runId, "--repo", $GithubRepo) | Out-Null
             }
+            else {
+                Write-Warning "No previous run was found for '$workflow'. Dispatching a new workflow run instead."
+                Invoke-GhCli -Arguments @("workflow", "run", $workflow, "--repo", $GithubRepo, "--ref", "main") | Out-Null
+            }
         }
+    }
+    else {
+        Write-Warning "Infrastructure is ready, but application code deployment was not triggered. The URLs can show 'Application Error' until the GitHub Actions deploy workflows publish the backend and frontend packages. To update GitHub secrets and trigger deployment, rerun with: -GithubRepo owner/repo -SetGithubSecrets -RerunWorkflowRuns"
     }
 
     $resourceGroupPortalUrl = "https://portal.azure.com/#resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/overview"
 
-    Write-Host "`nDeployment complete." -ForegroundColor Green
+    Write-Host "`nInfrastructure deployment complete." -ForegroundColor Green
+    if ($RerunWorkflowRuns) {
+        Write-Host "GitHub Actions deployment workflows were queued. The URLs may take a few minutes to become healthy." -ForegroundColor Yellow
+    }
     Write-Host "Resource Group: $ResourceGroupName"
     Write-Host "Backend URL:   $backendUrl"
     Write-Host "Frontend URL:  $frontendUrl"
