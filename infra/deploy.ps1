@@ -2,13 +2,12 @@
 param(
     [string]$Location = "italynorth",
     [string]$Prefix = "lastwrites",
-    [string]$ResourceGroupName = "",
+    [string]$ResourceGroupName = "rg-lastwrites-5101021",
     [string]$GithubRepo = "",
     [switch]$SetGithubSecrets,
     [switch]$RerunWorkflowRuns,
     [switch]$SkipLocalFileUpdate,
-    [switch]$CleanupOnFailure,
-    [switch]$RecreateFunctionApp
+    [switch]$CleanupOnFailure
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,19 +18,8 @@ function Write-Step {
     Write-Host "`n==> $Message" -ForegroundColor Cyan
 }
 
-function Write-Ok {
-    param([string]$Message)
-    Write-Host $Message -ForegroundColor Green
-}
-
-function Write-Info {
-    param([string]$Message)
-    Write-Host $Message -ForegroundColor Yellow
-}
-
 function Ensure-Command {
     param([string]$Name)
-
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Required command '$Name' was not found in PATH."
     }
@@ -43,9 +31,9 @@ function Invoke-AzCli {
         [string[]]$Arguments
     )
 
+    # Force Azure CLI to suppress warnings and avoid PowerShell treating stderr warnings as terminating failures.
     $effectiveArguments = @($Arguments + @("--only-show-errors"))
     $previousErrorActionPreference = $ErrorActionPreference
-
     try {
         $ErrorActionPreference = "Continue"
         $output = & az @effectiveArguments 2>&1
@@ -64,7 +52,10 @@ function Invoke-AzCli {
 }
 
 function Normalize-AzCliOutput {
-    param([Parameter(Mandatory = $true)][object]$Output)
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Output
+    )
 
     $rawText = ($Output | Out-String)
     $normalizedLines = @(
@@ -81,14 +72,20 @@ function Normalize-AzCliOutput {
 }
 
 function Get-AzCliRaw {
-    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
 
     $output = Invoke-AzCli -Arguments $Arguments
     return Normalize-AzCliOutput -Output $output
 }
 
 function Get-AzCliTsv {
-    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
 
     $raw = Get-AzCliRaw -Arguments $Arguments
     if ([string]::IsNullOrWhiteSpace($raw)) {
@@ -99,7 +96,6 @@ function Get-AzCliTsv {
         $raw -split "(`r`n|`n|`r)" |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     )
-
     if ($lines.Count -eq 0) {
         return ""
     }
@@ -108,7 +104,10 @@ function Get-AzCliTsv {
 }
 
 function Get-AzCliJson {
-    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
 
     $raw = Get-AzCliRaw -Arguments $Arguments
     if ([string]::IsNullOrWhiteSpace($raw)) {
@@ -119,11 +118,13 @@ function Get-AzCliJson {
 }
 
 function Invoke-GhCli {
-    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
 
     $output = & gh @Arguments 2>&1
     $exitCode = $LASTEXITCODE
-
     if ($exitCode -ne 0) {
         $renderedOutput = ($output | Out-String).Trim()
         throw "GitHub CLI command failed (exit $exitCode): gh $($Arguments -join ' ')`n$renderedOutput"
@@ -133,26 +134,13 @@ function Invoke-GhCli {
 }
 
 function Get-GhRaw {
-    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
 
     $output = Invoke-GhCli -Arguments $Arguments
     return ($output | Out-String).Trim()
-}
-
-function Set-OrUpdateGithubSecret {
-    param(
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value,
-        [Parameter(Mandatory = $true)][string]$Repo
-    )
-
-    $output = $Value | & gh secret set $Name --repo $Repo 2>&1
-    $exitCode = $LASTEXITCODE
-
-    if ($exitCode -ne 0) {
-        $renderedOutput = ($output | Out-String).Trim()
-        throw "GitHub CLI secret update failed (exit $exitCode): gh secret set $Name --repo $Repo`n$renderedOutput"
-    }
 }
 
 function New-RandomToken {
@@ -167,14 +155,12 @@ function New-StrongSecret {
 
     $bytes = New-Object byte[] $ByteLength
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-
     try {
         $rng.GetBytes($bytes)
     }
     finally {
         $rng.Dispose()
     }
-
     return [Convert]::ToBase64String($bytes)
 }
 
@@ -182,11 +168,9 @@ function Normalize-CompactName {
     param([string]$Value)
 
     $normalized = ($Value.ToLower() -replace "[^a-z0-9]", "")
-
     if ([string]::IsNullOrWhiteSpace($normalized)) {
         return "lw"
     }
-
     return $normalized
 }
 
@@ -195,59 +179,59 @@ function Normalize-DashedName {
 
     $normalized = ($Value.ToLower() -replace "[^a-z0-9-]", "-")
     $normalized = ($normalized -replace "-+", "-").Trim("-")
-
     if ([string]::IsNullOrWhiteSpace($normalized)) {
         return "lw"
     }
-
     return $normalized
 }
 
-function Test-IsGuid {
-    param([Parameter(Mandatory = $true)][string]$Value)
+function Set-OrUpdateGithubSecret {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Repo
+    )
 
-    return $Value -match "^[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}$"
+    $output = $Value | & gh secret set $Name --repo $Repo 2>&1
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $renderedOutput = ($output | Out-String).Trim()
+        throw "GitHub CLI secret update failed (exit $exitCode): gh secret set $Name --repo $Repo`n$renderedOutput"
+    }
 }
 
 function Ensure-ProviderRegistered {
-    param([Parameter(Mandatory = $true)][string]$Namespace)
-
-    $currentState = Get-AzCliTsv -Arguments @(
-        "provider", "show",
-        "--namespace", $Namespace,
-        "--query", "registrationState",
-        "-o", "tsv"
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Namespace
     )
 
+    $currentState = Get-AzCliTsv -Arguments @("provider", "show", "--namespace", $Namespace, "--query", "registrationState", "-o", "tsv")
     if ($currentState -eq "Registered") {
         return
     }
 
-    Write-Info "Registering Azure provider '$Namespace' (current state: $currentState)"
+    Write-Host "Registering Azure provider '$Namespace' (current state: $currentState)" -ForegroundColor Yellow
+    Invoke-AzCli -Arguments @("provider", "register", "--namespace", $Namespace, "--wait", "-o", "none") | Out-Null
 
-    Invoke-AzCli -Arguments @(
-        "provider", "register",
-        "--namespace", $Namespace,
-        "--wait",
-        "-o", "none"
-    ) | Out-Null
-
-    $finalState = Get-AzCliTsv -Arguments @(
-        "provider", "show",
-        "--namespace", $Namespace,
-        "--query", "registrationState",
-        "-o", "tsv"
-    )
-
+    $finalState = Get-AzCliTsv -Arguments @("provider", "show", "--namespace", $Namespace, "--query", "registrationState", "-o", "tsv")
     if ($finalState -ne "Registered") {
         throw "Provider '$Namespace' registration state is '$finalState' after registration attempt."
     }
 }
 
+function Test-IsGuid {
+    param(
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    return $Value -match "^[0-9a-fA-F]{8}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{4}\-[0-9a-fA-F]{12}$"
+}
+
 function Ensure-RoleAssignment {
     param(
         [Parameter(Mandatory = $true)][string]$PrincipalId,
-        [Parameter(Mandatory = $true)][string]$Role,
+        [Parameter(Mandatory = $true)][string]$RoleName,
         [Parameter(Mandatory = $true)][string]$Scope
     )
 
@@ -258,7 +242,7 @@ function Ensure-RoleAssignment {
     $existingAssignments = Get-AzCliJson -Arguments @(
         "role", "assignment", "list",
         "--assignee-object-id", $PrincipalId,
-        "--role", $Role,
+        "--role", $RoleName,
         "--scope", $Scope,
         "-o", "json"
     )
@@ -267,7 +251,6 @@ function Ensure-RoleAssignment {
         if ($existingAssignments -is [System.Array] -and $existingAssignments.Count -gt 0) {
             return
         }
-
         if ($existingAssignments -isnot [System.Array] -and -not [string]::IsNullOrWhiteSpace([string]$existingAssignments.id)) {
             return
         }
@@ -277,13 +260,12 @@ function Ensure-RoleAssignment {
         "role", "assignment", "create",
         "--assignee-object-id", $PrincipalId,
         "--assignee-principal-type", "ServicePrincipal",
-        "--role", $Role,
+        "--role", $RoleName,
         "--scope", $Scope,
         "-o", "none"
     )
 
     $maxAttempts = 12
-
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         try {
             Invoke-AzCli -Arguments $createArguments | Out-Null
@@ -291,51 +273,14 @@ function Ensure-RoleAssignment {
         }
         catch {
             $message = $_.Exception.Message
-            $isRetryable = $message -match "PrincipalNotFound|does not exist in the directory|Cannot find user or service principal|Insufficient privileges"
-
+            $isRetryable = $message -match "PrincipalNotFound|does not exist in the directory|Cannot find user or service principal"
             if (-not $isRetryable -or $attempt -eq $maxAttempts) {
                 throw
             }
 
-            Write-Warning "Role assignment for principal '$PrincipalId' is not ready yet. Retrying in 10 seconds ($attempt/$maxAttempts)."
+            Write-Warning "Role assignment for principal '$PrincipalId' is not available in Entra ID yet. Retrying in 10 seconds ($attempt/$maxAttempts)."
             Start-Sleep -Seconds 10
         }
-    }
-}
-
-function Ensure-RoleAssignmentWithFallback {
-    param(
-        [Parameter(Mandatory = $true)][string]$PrincipalId,
-        [Parameter(Mandatory = $true)][string[]]$Roles,
-        [Parameter(Mandatory = $true)][string]$Scope
-    )
-
-    $errors = @()
-
-    foreach ($role in $Roles) {
-        try {
-            Ensure-RoleAssignment -PrincipalId $PrincipalId -Role $role -Scope $Scope
-            return
-        }
-        catch {
-            $errors += "$role => $($_.Exception.Message)"
-        }
-    }
-
-    throw "Could not assign any acceptable role at scope '$Scope'. Errors:`n$($errors -join "`n")"
-}
-
-function Test-AzResourceExists {
-    param(
-        [Parameter(Mandatory = $true)][string[]]$ShowArguments
-    )
-
-    try {
-        $existing = Get-AzCliJson -Arguments $ShowArguments
-        return $null -ne $existing
-    }
-    catch {
-        return $false
     }
 }
 
@@ -346,36 +291,23 @@ function Resolve-ContainerAppJobPrincipalId {
     )
 
     $maxAttempts = 12
-
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        $principalId = ""
-
-        try {
-            $principalId = Get-AzCliTsv -Arguments @(
-                "containerapp", "job", "identity", "show",
-                "--name", $JobName,
-                "--resource-group", $ResourceGroupName,
-                "--query", "principalId",
-                "-o", "tsv"
-            )
-        }
-        catch {
-            $principalId = ""
-        }
+        $principalId = Get-AzCliTsv -Arguments @(
+            "containerapp", "job", "identity", "show",
+            "--name", $JobName,
+            "--resource-group", $ResourceGroupName,
+            "--query", "principalId",
+            "-o", "tsv"
+        )
 
         if (-not (Test-IsGuid -Value $principalId)) {
-            try {
-                $principalId = Get-AzCliTsv -Arguments @(
-                    "containerapp", "job", "show",
-                    "--name", $JobName,
-                    "--resource-group", $ResourceGroupName,
-                    "--query", "identity.principalId",
-                    "-o", "tsv"
-                )
-            }
-            catch {
-                $principalId = ""
-            }
+            $principalId = Get-AzCliTsv -Arguments @(
+                "containerapp", "job", "show",
+                "--name", $JobName,
+                "--resource-group", $ResourceGroupName,
+                "--query", "identity.principalId",
+                "-o", "tsv"
+            )
         }
 
         if (Test-IsGuid -Value $principalId) {
@@ -414,11 +346,7 @@ function Test-AcrTagExists {
 
 function Get-PolicyAllowedLocations {
     try {
-        $assignments = Get-AzCliJson -Arguments @(
-            "policy", "assignment", "list",
-            "--disable-scope-strict-match",
-            "-o", "json"
-        )
+        $assignments = Get-AzCliJson -Arguments @("policy", "assignment", "list", "--disable-scope-strict-match", "-o", "json")
     }
     catch {
         Write-Warning "Could not read policy assignments to detect allowed locations. Using requested location as-is."
@@ -434,10 +362,8 @@ function Get-PolicyAllowedLocations {
     }
 
     $collected = @()
-
     foreach ($assignment in $assignments) {
         $parameters = $assignment.properties.parameters
-
         if ($null -eq $parameters) {
             continue
         }
@@ -445,7 +371,6 @@ function Get-PolicyAllowedLocations {
         foreach ($parameterName in @("listOfAllowedLocations", "allowedLocations")) {
             if ($parameters.PSObject.Properties.Name -contains $parameterName) {
                 $value = $parameters.$parameterName.value
-
                 if ($value -is [System.Array]) {
                     $collected += $value
                 }
@@ -465,7 +390,10 @@ function Get-PolicyAllowedLocations {
 }
 
 function Resolve-DeploymentLocation {
-    param([Parameter(Mandatory = $true)][string]$RequestedLocation)
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedLocation
+    )
 
     $requestedNormalized = $RequestedLocation.ToLower()
     $allowedLocations = Get-PolicyAllowedLocations
@@ -478,26 +406,26 @@ function Resolve-DeploymentLocation {
         return $requestedNormalized
     }
 
-    throw "Location '$RequestedLocation' is not allowed by the current Azure Policy. Allowed locations detected: $($allowedLocations -join ', ')"
+    $fallback = $allowedLocations[0]
+    Write-Warning "Location '$RequestedLocation' is not in policy-allowed locations. Falling back to '$fallback'."
+    return $fallback
 }
 
-function Assert-FlexConsumptionLocation {
-    param([Parameter(Mandatory = $true)][string]$RequestedLocation)
+function Resolve-FlexConsumptionLocation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedLocation
+    )
 
     try {
-        $flexLocations = Get-AzCliJson -Arguments @(
-            "functionapp", "list-flexconsumption-locations",
-            "--runtime", "python",
-            "-o", "json"
-        )
+        $flexLocations = Get-AzCliJson -Arguments @("functionapp", "list-flexconsumption-locations", "-o", "json")
     }
     catch {
-        Write-Warning "Could not verify Flex Consumption supported regions. Continuing with requested location '$RequestedLocation'."
+        Write-Warning "Could not determine Flex Consumption supported regions. Using requested location '$RequestedLocation' as-is."
         return $RequestedLocation.ToLower()
     }
 
     if ($null -eq $flexLocations) {
-        Write-Warning "Flex Consumption supported region list was empty. Continuing with requested location '$RequestedLocation'."
         return $RequestedLocation.ToLower()
     }
 
@@ -514,9 +442,6 @@ function Assert-FlexConsumptionLocation {
                 elseif ($null -ne $_ -and $_.PSObject.Properties.Name -contains "name") {
                     [string]$_.name
                 }
-                elseif ($null -ne $_ -and $_.PSObject.Properties.Name -contains "location") {
-                    [string]$_.location
-                }
             } |
             Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
             ForEach-Object { $_.ToLower() } |
@@ -524,62 +449,30 @@ function Assert-FlexConsumptionLocation {
     )
 
     $requestedNormalized = $RequestedLocation.ToLower()
-
-    if ($supportedLocations.Count -eq 0) {
-        Write-Warning "Could not parse Flex Consumption supported regions. Continuing with requested location '$RequestedLocation'."
-        return $requestedNormalized
-    }
-
     if ($supportedLocations -contains $requestedNormalized) {
         return $requestedNormalized
     }
 
-    throw "Location '$RequestedLocation' does not currently support Azure Functions Flex Consumption for Python according to Azure CLI. Run: az functionapp list-flexconsumption-locations --runtime python --query `"sort_by(@, &name)[].{Region:name}`" -o table"
-}
-
-function Set-AppSettings {
-    param(
-        [Parameter(Mandatory = $true)][string]$AppKind,
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
-        [Parameter(Mandatory = $true)][string[]]$Settings
-    )
-
-    if ($AppKind -eq "webapp") {
-        Invoke-AzCli -Arguments @(
-            "webapp", "config", "appsettings", "set",
-            "--name", $Name,
-            "--resource-group", $ResourceGroupName,
-            "--settings"
-        ) + $Settings + @("-o", "none") | Out-Null
-        return
+    $allowedLocations = Get-PolicyAllowedLocations
+    $candidateLocations = @($supportedLocations)
+    if ($allowedLocations.Count -gt 0) {
+        $candidateLocations = @($supportedLocations | Where-Object { $allowedLocations -contains $_ })
     }
 
-    if ($AppKind -eq "functionapp") {
-        Invoke-AzCli -Arguments @(
-            "functionapp", "config", "appsettings", "set",
-            "--name", $Name,
-            "--resource-group", $ResourceGroupName,
-            "--settings"
-        ) + $Settings + @("-o", "none") | Out-Null
-        return
+    if ($candidateLocations.Count -gt 0) {
+        $fallback = $candidateLocations[0]
+        Write-Warning "Location '$RequestedLocation' does not support Azure Functions Flex Consumption. Falling back to '$fallback'."
+        return $fallback
     }
 
-    throw "Unknown AppKind '$AppKind'."
+    throw "Location '$RequestedLocation' does not support Azure Functions Flex Consumption, and no policy-allowed fallback region was found. Run 'az functionapp list-flexconsumption-locations --query ""sort_by(@, &name)[].{Region:name}"" -o table' to choose a supported region."
 }
 
 Ensure-Command -Name "az"
-
 $account = Get-AzCliJson -Arguments @("account", "show", "-o", "json")
-
-if ($null -eq $account -or [string]::IsNullOrWhiteSpace([string]$account.id)) {
-    throw "Azure CLI is not logged in. Run: az login"
-}
-
 $subscriptionId = [string]$account.id
 
 Write-Step "Ensuring required Azure resource providers are registered"
-
 foreach ($namespace in @(
     "Microsoft.Web",
     "Microsoft.Storage",
@@ -588,22 +481,9 @@ foreach ($namespace in @(
     "Microsoft.KeyVault",
     "Microsoft.ContainerRegistry",
     "Microsoft.App",
-    "Microsoft.OperationalInsights",
-    "Microsoft.Authorization"
+    "Microsoft.OperationalInsights"
 )) {
     Ensure-ProviderRegistered -Namespace $namespace
-}
-
-try {
-    Invoke-AzCli -Arguments @(
-        "extension", "add",
-        "--name", "containerapp",
-        "--upgrade",
-        "-o", "none"
-    ) | Out-Null
-}
-catch {
-    Write-Warning "Could not install/update Azure CLI containerapp extension automatically. If Container Apps commands fail, run: az extension add --name containerapp --upgrade"
 }
 
 if ($SetGithubSecrets -or $RerunWorkflowRuns) {
@@ -623,14 +503,8 @@ $prefixCompact = Normalize-CompactName -Value $Prefix
 $prefixDashed = Normalize-DashedName -Value $Prefix
 
 $resourceGroupPrefix = "rg-$prefixDashed-"
-
 if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
-    $matchingGroups = Get-AzCliJson -Arguments @(
-        "group", "list",
-        "--query", "[?starts_with(name, '$resourceGroupPrefix')].name",
-        "-o", "json"
-    )
-
+    $matchingGroups = Get-AzCliJson -Arguments @("group", "list", "--query", "[?starts_with(name, '$resourceGroupPrefix')].name", "-o", "json")
     if ($null -eq $matchingGroups) {
         $matchingGroups = @()
     }
@@ -652,14 +526,12 @@ if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
         if ($matchingGroups.Count -gt 1) {
             Write-Warning "Multiple matching resource groups were found. Creating a new one. Use -ResourceGroupName to explicitly reuse an existing group."
         }
-
         $ResourceGroupName = "$resourceGroupPrefix$(New-RandomToken -Length 6)"
     }
 }
 
 $resourceGroupPattern = "^rg-$([regex]::Escape($prefixDashed))-(?<suffix>[a-z0-9]+)$"
 $token = ""
-
 if ($ResourceGroupName.ToLower() -match $resourceGroupPattern) {
     $token = [string]$Matches["suffix"]
 }
@@ -676,7 +548,7 @@ elseif ($token.Length -gt 12) {
 }
 
 $Location = Resolve-DeploymentLocation -RequestedLocation $Location
-$Location = Assert-FlexConsumptionLocation -RequestedLocation $Location
+$Location = Resolve-FlexConsumptionLocation -RequestedLocation $Location
 
 $planName = "plan-$prefixDashed-$token"
 $backendAppName = "api-$prefixDashed-$token"
@@ -691,14 +563,12 @@ $keyVaultName = "kv-$prefixDashed-$token"
 $containerAppsEnvironmentName = "cae-$prefixDashed-$token"
 $containerAppsJobName = "job-$prefixDashed-$token"
 $containerAppsJobContainerName = "delivery-worker"
-$deploymentContainerName = "function-releases"
 $pythonRuntime = "PYTHON:3.11"
 $nodeRuntime = "NODE:20-lts"
 
 if ($containerAppsEnvironmentName.Length -gt 32) {
     $containerAppsEnvironmentName = $containerAppsEnvironmentName.Substring(0, 32).TrimEnd('-')
 }
-
 if ($containerAppsJobName.Length -gt 32) {
     $containerAppsJobName = $containerAppsJobName.Substring(0, 32).TrimEnd('-')
 }
@@ -708,19 +578,11 @@ if ($eventSubscriptionName.Length -gt 64) {
 }
 
 $storageAccountName = ("st" + $prefixCompact + $token)
-
-if ($storageAccountName.Length -gt 24) {
-    $storageAccountName = $storageAccountName.Substring(0, 24)
-}
-
+if ($storageAccountName.Length -gt 24) { $storageAccountName = $storageAccountName.Substring(0, 24) }
 $storageAccountName = $storageAccountName.ToLower()
 
 $acrName = ("acr" + $prefixCompact + $token)
-
-if ($acrName.Length -gt 50) {
-    $acrName = $acrName.Substring(0, 50)
-}
-
+if ($acrName.Length -gt 50) { $acrName = $acrName.Substring(0, 50) }
 $acrName = $acrName.ToLower()
 
 $blobConnectionString = ""
@@ -732,7 +594,6 @@ $acrLoginServer = ""
 $acrUsername = ""
 $acrPassword = ""
 $acrId = ""
-$storageAccountId = ""
 $backendUrl = ""
 $frontendUrl = ""
 $authSecretKey = ""
@@ -745,480 +606,130 @@ $deliveryJobResourceId = ""
 $deploymentStarted = $false
 
 try {
-    Write-Step "Creating or reusing resource group '$ResourceGroupName' in '$Location'"
-
-    Invoke-AzCli -Arguments @(
-        "group", "create",
-        "--name", $ResourceGroupName,
-        "--location", $Location,
-        "-o", "none"
-    ) | Out-Null
-
+    Write-Step "Creating resource group '$ResourceGroupName' in '$Location'"
+    Invoke-AzCli -Arguments @("group", "create", "--name", $ResourceGroupName, "--location", $Location, "-o", "none") | Out-Null
     $deploymentStarted = $true
 
-    Write-Step "Creating or reusing App Service plan and web apps"
+    Write-Step "Creating App Service plan and web apps"
+    Invoke-AzCli -Arguments @("appservice", "plan", "create", "--name", $planName, "--resource-group", $ResourceGroupName, "--is-linux", "--sku", "B1", "--location", $Location, "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "create", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--plan", $planName, "--runtime", $pythonRuntime, "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "create", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--plan", $planName, "--runtime", $nodeRuntime, "-o", "none") | Out-Null
 
-    $planExists = Test-AzResourceExists -ShowArguments @(
-        "appservice", "plan", "show",
-        "--name", $planName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if (-not $planExists) {
-        Invoke-AzCli -Arguments @(
-            "appservice", "plan", "create",
-            "--name", $planName,
-            "--resource-group", $ResourceGroupName,
-            "--is-linux",
-            "--sku", "B1",
-            "--location", $Location,
-            "-o", "none"
-        ) | Out-Null
-    }
-    else {
-        Write-Info "App Service plan '$planName' already exists. Reusing it."
-    }
-
-    $backendExists = Test-AzResourceExists -ShowArguments @(
-        "webapp", "show",
-        "--name", $backendAppName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if (-not $backendExists) {
-        Invoke-AzCli -Arguments @(
-            "webapp", "create",
-            "--name", $backendAppName,
-            "--resource-group", $ResourceGroupName,
-            "--plan", $planName,
-            "--runtime", $pythonRuntime,
-            "-o", "none"
-        ) | Out-Null
-    }
-    else {
-        Write-Info "Backend web app '$backendAppName' already exists. Reusing it."
-    }
-
-    $frontendExists = Test-AzResourceExists -ShowArguments @(
-        "webapp", "show",
-        "--name", $frontendAppName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if (-not $frontendExists) {
-        Invoke-AzCli -Arguments @(
-            "webapp", "create",
-            "--name", $frontendAppName,
-            "--resource-group", $ResourceGroupName,
-            "--plan", $planName,
-            "--runtime", $nodeRuntime,
-            "-o", "none"
-        ) | Out-Null
-    }
-    else {
-        Write-Info "Frontend web app '$frontendAppName' already exists. Reusing it."
-    }
-
-    Write-Step "Creating or reusing storage account for blobs, Function host state, and Flex deployment packages"
-
-    $storageExists = Test-AzResourceExists -ShowArguments @(
-        "storage", "account", "show",
-        "--name", $storageAccountName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if (-not $storageExists) {
-        Invoke-AzCli -Arguments @(
-            "storage", "account", "create",
-            "--name", $storageAccountName,
-            "--resource-group", $ResourceGroupName,
-            "--location", $Location,
-            "--sku", "Standard_LRS",
-            "--kind", "StorageV2",
-            "--allow-blob-public-access", "false",
-            "--min-tls-version", "TLS1_2",
-            "-o", "none"
-        ) | Out-Null
-    }
-    else {
-        Write-Info "Storage account '$storageAccountName' already exists. Reusing it."
-    }
-
-    $storageAccountId = Get-AzCliTsv -Arguments @(
-        "storage", "account", "show",
-        "--resource-group", $ResourceGroupName,
-        "--name", $storageAccountName,
-        "--query", "id",
-        "-o", "tsv"
-    )
-
-    $blobConnectionString = Get-AzCliTsv -Arguments @(
-        "storage", "account", "show-connection-string",
-        "--resource-group", $ResourceGroupName,
-        "--name", $storageAccountName,
-        "--query", "connectionString",
-        "-o", "tsv"
-    )
-
+    Write-Step "Creating storage account for blobs and function host"
+    Invoke-AzCli -Arguments @("storage", "account", "create", "--name", $storageAccountName, "--resource-group", $ResourceGroupName, "--location", $Location, "--sku", "Standard_LRS", "--kind", "StorageV2", "--allow-blob-public-access", "false", "--min-tls-version", "TLS1_2", "-o", "none") | Out-Null
+    $blobConnectionString = Get-AzCliTsv -Arguments @("storage", "account", "show-connection-string", "--resource-group", $ResourceGroupName, "--name", $storageAccountName, "--query", "connectionString", "-o", "tsv")
     if ([string]::IsNullOrWhiteSpace($blobConnectionString)) {
         throw "Storage connection string retrieval returned empty output."
     }
+    Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "vaults", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "deliveries", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
 
-    foreach ($containerName in @("vaults", "deliveries", $deploymentContainerName)) {
-        Invoke-AzCli -Arguments @(
-            "storage", "container", "create",
-            "--name", $containerName,
-            "--connection-string", $blobConnectionString,
-            "--auth-mode", "key",
-            "-o", "none"
-        ) | Out-Null
+    Write-Step "Creating Function App (Flex Consumption)"
+    $functionAppExists = $false
+    try {
+        $existingFunctionApp = Get-AzCliJson -Arguments @("functionapp", "show", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "-o", "json")
+        $functionAppExists = $null -ne $existingFunctionApp -and -not [string]::IsNullOrWhiteSpace([string]$existingFunctionApp.id)
     }
-
-    Write-Step "Creating or reusing Function App (Flex Consumption)"
-
-    $functionAppExists = Test-AzResourceExists -ShowArguments @(
-        "functionapp", "show",
-        "--name", $functionAppName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if ($functionAppExists -and $RecreateFunctionApp) {
-        Write-Warning "RecreateFunctionApp is enabled. Deleting existing Function App '$functionAppName'."
-        Invoke-AzCli -Arguments @(
-            "functionapp", "delete",
-            "--name", $functionAppName,
-            "--resource-group", $ResourceGroupName,
-            "-o", "none"
-        ) | Out-Null
-
+    catch {
         $functionAppExists = $false
     }
 
     if (-not $functionAppExists) {
-        Invoke-AzCli -Arguments @(
-            "functionapp", "create",
-            "--name", $functionAppName,
-            "--resource-group", $ResourceGroupName,
-            "--storage-account", $storageAccountName,
-            "--flexconsumption-location", $Location,
-            "--runtime", "python",
-            "--runtime-version", "3.11",
-            "--functions-version", "4",
-            "--deployment-storage-name", $storageAccountName,
-            "--deployment-storage-container-name", $deploymentContainerName,
-            "--deployment-storage-auth-type", "StorageAccountConnectionString",
-            "--deployment-storage-auth-value", "DEPLOYMENT_STORAGE_CONNECTION_STRING",
-            "-o", "none"
-        ) | Out-Null
+        Invoke-AzCli -Arguments @("functionapp", "create", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--storage-account", $storageAccountName, "--flexconsumption-location", $Location, "--runtime", "python", "--runtime-version", "3.11", "-o", "none") | Out-Null
     }
     else {
-        Write-Info "Function App '$functionAppName' already exists. Reusing it. If it was created with the wrong plan, rerun with -RecreateFunctionApp or use a clean resource group."
+        Write-Host "Function App '$functionAppName' already exists. Reusing existing app." -ForegroundColor Yellow
     }
 
-    Write-Step "Enabling publishing credentials where supported"
-
+    Write-Step "Enabling basic publishing credentials for SCM deployment"
     foreach ($siteName in @($backendAppName, $frontendAppName, $functionAppName)) {
-        try {
-            Invoke-AzCli -Arguments @(
-                "resource", "update",
-                "--resource-group", $ResourceGroupName,
-                "--namespace", "Microsoft.Web",
-                "--resource-type", "basicPublishingCredentialsPolicies",
-                "--parent", "sites/$siteName",
-                "--name", "scm",
-                "--set", "properties.allow=true",
-                "-o", "none"
-            ) | Out-Null
-
-            Invoke-AzCli -Arguments @(
-                "resource", "update",
-                "--resource-group", $ResourceGroupName,
-                "--namespace", "Microsoft.Web",
-                "--resource-type", "basicPublishingCredentialsPolicies",
-                "--parent", "sites/$siteName",
-                "--name", "ftp",
-                "--set", "properties.allow=true",
-                "-o", "none"
-            ) | Out-Null
-        }
-        catch {
-            Write-Warning "Could not enable basic publishing credentials for '$siteName': $($_.Exception.Message)"
-        }
+        Invoke-AzCli -Arguments @("resource", "update", "--resource-group", $ResourceGroupName, "--namespace", "Microsoft.Web", "--resource-type", "basicPublishingCredentialsPolicies", "--parent", "sites/$siteName", "--name", "scm", "--set", "properties.allow=true", "-o", "none") | Out-Null
+        Invoke-AzCli -Arguments @("resource", "update", "--resource-group", $ResourceGroupName, "--namespace", "Microsoft.Web", "--resource-type", "basicPublishingCredentialsPolicies", "--parent", "sites/$siteName", "--name", "ftp", "--set", "properties.allow=true", "-o", "none") | Out-Null
     }
 
-    Write-Step "Creating or reusing Cosmos DB account, database, and container"
-
-    $cosmosExists = Test-AzResourceExists -ShowArguments @(
-        "cosmosdb", "show",
-        "--name", $cosmosAccountName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if (-not $cosmosExists) {
-        Invoke-AzCli -Arguments @(
-            "cosmosdb", "create",
-            "--name", $cosmosAccountName,
-            "--resource-group", $ResourceGroupName,
-            "--kind", "GlobalDocumentDB",
-            "--locations", "regionName=$Location", "failoverPriority=0",
-            "--default-consistency-level", "Session",
-            "-o", "none"
-        ) | Out-Null
-    }
-    else {
-        Write-Info "Cosmos DB account '$cosmosAccountName' already exists. Reusing it."
-    }
-
-    Invoke-AzCli -Arguments @(
-        "cosmosdb", "sql", "database", "create",
-        "--account-name", $cosmosAccountName,
-        "--resource-group", $ResourceGroupName,
-        "--name", $cosmosDatabaseName,
-        "-o", "none"
-    ) | Out-Null
-
-    Invoke-AzCli -Arguments @(
-        "cosmosdb", "sql", "container", "create",
-        "--account-name", $cosmosAccountName,
-        "--resource-group", $ResourceGroupName,
-        "--database-name", $cosmosDatabaseName,
-        "--name", $cosmosContainerName,
-        "--partition-key-path", "/user_id",
-        "--throughput", "400",
-        "-o", "none"
-    ) | Out-Null
-
-    $cosmosConnectionString = Get-AzCliTsv -Arguments @(
-        "cosmosdb", "keys", "list",
-        "--type", "connection-strings",
-        "--name", $cosmosAccountName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "connectionStrings[0].connectionString",
-        "-o", "tsv"
-    )
-
+    Write-Step "Creating Cosmos DB account, database, and container"
+    Invoke-AzCli -Arguments @("cosmosdb", "create", "--name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--kind", "GlobalDocumentDB", "--locations", "regionName=$Location", "failoverPriority=0", "--default-consistency-level", "Session", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("cosmosdb", "sql", "database", "create", "--account-name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--name", $cosmosDatabaseName, "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("cosmosdb", "sql", "container", "create", "--account-name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--database-name", $cosmosDatabaseName, "--name", $cosmosContainerName, "--partition-key-path", "/user_id", "--throughput", "400", "-o", "none") | Out-Null
+    $cosmosConnectionString = Get-AzCliTsv -Arguments @("cosmosdb", "keys", "list", "--type", "connection-strings", "--name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--query", "connectionStrings[0].connectionString", "-o", "tsv")
     if ([string]::IsNullOrWhiteSpace($cosmosConnectionString)) {
         throw "Cosmos connection string retrieval returned empty output."
     }
 
-    Write-Step "Creating or reusing Event Grid topic"
+    Write-Step "Creating Event Grid topic"
+    Invoke-AzCli -Arguments @("eventgrid", "topic", "create", "--name", $eventGridTopicName, "--resource-group", $ResourceGroupName, "--location", $Location, "--input-schema", "eventgridschema", "-o", "none") | Out-Null
+    $eventGridEndpoint = Get-AzCliTsv -Arguments @("eventgrid", "topic", "show", "--name", $eventGridTopicName, "--resource-group", $ResourceGroupName, "--query", "endpoint", "-o", "tsv")
+    $eventGridKey = Get-AzCliTsv -Arguments @("eventgrid", "topic", "key", "list", "--name", $eventGridTopicName, "--resource-group", $ResourceGroupName, "--query", "key1", "-o", "tsv")
 
-    $eventGridTopicExists = Test-AzResourceExists -ShowArguments @(
-        "eventgrid", "topic", "show",
-        "--name", $eventGridTopicName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if (-not $eventGridTopicExists) {
-        Invoke-AzCli -Arguments @(
-            "eventgrid", "topic", "create",
-            "--name", $eventGridTopicName,
-            "--resource-group", $ResourceGroupName,
-            "--location", $Location,
-            "--input-schema", "eventgridschema",
-            "-o", "none"
-        ) | Out-Null
+    Write-Step "Creating Key Vault and saving connection-string secrets"
+    $keyVaultExists = $false
+    try {
+        $existingKeyVault = Get-AzCliJson -Arguments @("keyvault", "show", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "-o", "json")
+        $keyVaultExists = $null -ne $existingKeyVault -and -not [string]::IsNullOrWhiteSpace([string]$existingKeyVault.id)
     }
-    else {
-        Write-Info "Event Grid topic '$eventGridTopicName' already exists. Reusing it."
+    catch {
+        $keyVaultExists = $false
     }
-
-    $eventGridEndpoint = Get-AzCliTsv -Arguments @(
-        "eventgrid", "topic", "show",
-        "--name", $eventGridTopicName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "endpoint",
-        "-o", "tsv"
-    )
-
-    $eventGridKey = Get-AzCliTsv -Arguments @(
-        "eventgrid", "topic", "key", "list",
-        "--name", $eventGridTopicName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "key1",
-        "-o", "tsv"
-    )
-
-    Write-Step "Creating or reusing Key Vault and saving connection-string secrets"
-
-    $keyVaultExists = Test-AzResourceExists -ShowArguments @(
-        "keyvault", "show",
-        "--name", $keyVaultName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
 
     if (-not $keyVaultExists) {
-        Invoke-AzCli -Arguments @(
-            "keyvault", "create",
-            "--name", $keyVaultName,
-            "--resource-group", $ResourceGroupName,
-            "--location", $Location,
-            "--enable-rbac-authorization", "false",
-            "-o", "none"
-        ) | Out-Null
+        Invoke-AzCli -Arguments @("keyvault", "create", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "--location", $Location, "--enable-rbac-authorization", "false", "-o", "none") | Out-Null
     }
     else {
-        Write-Info "Key Vault '$keyVaultName' already exists. Reusing it."
+        Write-Host "Key Vault '$keyVaultName' already exists. Reusing existing vault." -ForegroundColor Yellow
     }
 
-    $keyVaultUrl = Get-AzCliTsv -Arguments @(
-        "keyvault", "show",
-        "--name", $keyVaultName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "properties.vaultUri",
-        "-o", "tsv"
-    )
-
-    Invoke-AzCli -Arguments @(
-        "keyvault", "secret", "set",
-        "--vault-name", $keyVaultName,
-        "--name", "COSMOS-CONNECTION-STRING",
-        "--value", $cosmosConnectionString,
-        "-o", "none"
-    ) | Out-Null
-
-    Invoke-AzCli -Arguments @(
-        "keyvault", "secret", "set",
-        "--vault-name", $keyVaultName,
-        "--name", "BLOB-CONNECTION-STRING",
-        "--value", $blobConnectionString,
-        "-o", "none"
-    ) | Out-Null
+    $keyVaultUrl = Get-AzCliTsv -Arguments @("keyvault", "show", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "--query", "properties.vaultUri", "-o", "tsv")
+    Invoke-AzCli -Arguments @("keyvault", "secret", "set", "--vault-name", $keyVaultName, "--name", "COSMOS-CONNECTION-STRING", "--value", $cosmosConnectionString, "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("keyvault", "secret", "set", "--vault-name", $keyVaultName, "--name", "BLOB-CONNECTION-STRING", "--value", $blobConnectionString, "-o", "none") | Out-Null
 
     Write-Step "Enabling managed identities for backend and functions"
-
-    $backendPrincipalId = Get-AzCliTsv -Arguments @(
-        "webapp", "identity", "assign",
-        "--name", $backendAppName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "principalId",
-        "-o", "tsv"
-    )
-
+    $backendPrincipalId = Get-AzCliTsv -Arguments @("webapp", "identity", "assign", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--query", "principalId", "-o", "tsv")
     if ([string]::IsNullOrWhiteSpace($backendPrincipalId)) {
         throw "Backend web app managed identity principalId was empty."
     }
-
-    $functionPrincipalId = Get-AzCliTsv -Arguments @(
-        "functionapp", "identity", "assign",
-        "--name", $functionAppName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "principalId",
-        "-o", "tsv"
-    )
-
+    $functionPrincipalId = Get-AzCliTsv -Arguments @("functionapp", "identity", "assign", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--query", "principalId", "-o", "tsv")
     if ([string]::IsNullOrWhiteSpace($functionPrincipalId)) {
         throw "Function app managed identity principalId was empty."
     }
 
     Write-Step "Granting backend access to Key Vault secrets and RSA key operations"
+    Invoke-AzCli -Arguments @("keyvault", "set-policy", "--name", $keyVaultName, "--object-id", $backendPrincipalId, "--secret-permissions", "get", "list", "--key-permissions", "get", "create", "decrypt", "unwrapKey", "-o", "none") | Out-Null
 
-    Invoke-AzCli -Arguments @(
-        "keyvault", "set-policy",
-        "--name", $keyVaultName,
-        "--object-id", $backendPrincipalId,
-        "--secret-permissions", "get", "list",
-        "--key-permissions", "get", "create", "decrypt", "unwrapKey", "encrypt", "wrapKey",
-        "-o", "none"
-    ) | Out-Null
+    Write-Step "Creating Azure Container Registry for worker image"
+    Invoke-AzCli -Arguments @("acr", "create", "--name", $acrName, "--resource-group", $ResourceGroupName, "--location", $Location, "--sku", "Basic", "--admin-enabled", "true", "-o", "none") | Out-Null
+    $acrLoginServer = Get-AzCliTsv -Arguments @("acr", "show", "--name", $acrName, "--resource-group", $ResourceGroupName, "--query", "loginServer", "-o", "tsv")
+    $acrId = Get-AzCliTsv -Arguments @("acr", "show", "--name", $acrName, "--resource-group", $ResourceGroupName, "--query", "id", "-o", "tsv")
+    $acrUsername = Get-AzCliTsv -Arguments @("acr", "credential", "show", "--name", $acrName, "--resource-group", $ResourceGroupName, "--query", "username", "-o", "tsv")
+    $acrPassword = Get-AzCliTsv -Arguments @("acr", "credential", "show", "--name", $acrName, "--resource-group", $ResourceGroupName, "--query", "passwords[0].value", "-o", "tsv")
 
-    Write-Step "Creating or reusing Azure Container Registry for worker image"
-
-    $acrExists = Test-AzResourceExists -ShowArguments @(
-        "acr", "show",
-        "--name", $acrName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
-
-    if (-not $acrExists) {
-        Invoke-AzCli -Arguments @(
-            "acr", "create",
-            "--name", $acrName,
-            "--resource-group", $ResourceGroupName,
-            "--location", $Location,
-            "--sku", "Basic",
-            "--admin-enabled", "true",
-            "-o", "none"
-        ) | Out-Null
+    Write-Step "Creating Container Apps environment for delivery jobs"
+    $containerAppsEnvironmentExists = $false
+    try {
+        $existingEnvironment = Get-AzCliJson -Arguments @("containerapp", "env", "show", "--name", $containerAppsEnvironmentName, "--resource-group", $ResourceGroupName, "-o", "json")
+        $containerAppsEnvironmentExists = $null -ne $existingEnvironment -and -not [string]::IsNullOrWhiteSpace([string]$existingEnvironment.id)
     }
-    else {
-        Write-Info "ACR '$acrName' already exists. Reusing it."
+    catch {
+        $containerAppsEnvironmentExists = $false
     }
-
-    $acrLoginServer = Get-AzCliTsv -Arguments @(
-        "acr", "show",
-        "--name", $acrName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "loginServer",
-        "-o", "tsv"
-    )
-
-    $acrId = Get-AzCliTsv -Arguments @(
-        "acr", "show",
-        "--name", $acrName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "id",
-        "-o", "tsv"
-    )
-
-    $acrUsername = Get-AzCliTsv -Arguments @(
-        "acr", "credential", "show",
-        "--name", $acrName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "username",
-        "-o", "tsv"
-    )
-
-    $acrPassword = Get-AzCliTsv -Arguments @(
-        "acr", "credential", "show",
-        "--name", $acrName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "passwords[0].value",
-        "-o", "tsv"
-    )
-
-    Write-Step "Creating or reusing Container Apps environment for delivery jobs"
-
-    $containerAppsEnvironmentExists = Test-AzResourceExists -ShowArguments @(
-        "containerapp", "env", "show",
-        "--name", $containerAppsEnvironmentName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
 
     if (-not $containerAppsEnvironmentExists) {
-        Invoke-AzCli -Arguments @(
-            "containerapp", "env", "create",
-            "--name", $containerAppsEnvironmentName,
-            "--resource-group", $ResourceGroupName,
-            "--location", $Location,
-            "-o", "none"
-        ) | Out-Null
+        Invoke-AzCli -Arguments @("containerapp", "env", "create", "--name", $containerAppsEnvironmentName, "--resource-group", $ResourceGroupName, "--location", $Location, "-o", "none") | Out-Null
     }
     else {
-        Write-Info "Container Apps environment '$containerAppsEnvironmentName' already exists. Reusing it."
+        Write-Host "Container Apps environment '$containerAppsEnvironmentName' already exists. Reusing existing environment." -ForegroundColor Yellow
     }
 
     Write-Step "Creating or updating Container Apps delivery job"
-
-    $deliveryJobExists = Test-AzResourceExists -ShowArguments @(
-        "containerapp", "job", "show",
-        "--name", $containerAppsJobName,
-        "--resource-group", $ResourceGroupName,
-        "-o", "json"
-    )
+    $deliveryJobExists = $false
+    try {
+        $existingDeliveryJob = Get-AzCliJson -Arguments @("containerapp", "job", "show", "--name", $containerAppsJobName, "--resource-group", $ResourceGroupName, "-o", "json")
+        $deliveryJobExists = $null -ne $existingDeliveryJob -and -not [string]::IsNullOrWhiteSpace([string]$existingDeliveryJob.id)
+    }
+    catch {
+        $deliveryJobExists = $false
+    }
 
     $workerImage = "$acrLoginServer/lastwrites-worker:latest"
-
     $workerEnvVars = @(
         "LOCAL_DEV_MODE=false",
         "COSMOS_CONNECTION_STRING=$cosmosConnectionString",
@@ -1228,27 +739,36 @@ try {
         "KEY_VAULT_URL=$keyVaultUrl",
         "DELIVERIES_CONTAINER=deliveries"
     )
+    $createJobArguments = @(
+        "containerapp", "job", "create",
+        "--name", $containerAppsJobName,
+        "--resource-group", $ResourceGroupName,
+        "--environment", $containerAppsEnvironmentName,
+        "--trigger-type", "Manual",
+        "--replica-timeout", "3600",
+        "--replica-retry-limit", "1",
+        "--replica-completion-count", "1",
+        "--parallelism", "1",
+        "--container-name", $containerAppsJobContainerName,
+        "--image", "mcr.microsoft.com/k8se/quickstart-jobs:latest",
+        "--cpu", "0.5",
+        "--memory", "1.0Gi",
+        "--env-vars"
+    ) + $workerEnvVars + @("-o", "none")
+    $updateJobArguments = @(
+        "containerapp", "job", "update",
+        "--name", $containerAppsJobName,
+        "--resource-group", $ResourceGroupName,
+        "--image", $workerImage,
+        "--container-name", $containerAppsJobContainerName,
+        "--replace-env-vars"
+    ) + $workerEnvVars + @("-o", "none")
 
     if (-not $deliveryJobExists) {
-        Invoke-AzCli -Arguments @(
-            "containerapp", "job", "create",
-            "--name", $containerAppsJobName,
-            "--resource-group", $ResourceGroupName,
-            "--environment", $containerAppsEnvironmentName,
-            "--trigger-type", "Manual",
-            "--replica-timeout", "3600",
-            "--replica-retry-limit", "1",
-            "--replica-completion-count", "1",
-            "--parallelism", "1",
-            "--container-name", $containerAppsJobContainerName,
-            "--image", "mcr.microsoft.com/k8se/quickstart-jobs:latest",
-            "--cpu", "0.5",
-            "--memory", "1.0Gi",
-            "--env-vars"
-        ) + $workerEnvVars + @("-o", "none") | Out-Null
+        Invoke-AzCli -Arguments $createJobArguments | Out-Null
     }
     else {
-        Write-Info "Container Apps job '$containerAppsJobName' already exists. Updating configuration."
+        Write-Host "Container Apps job '$containerAppsJobName' already exists. Updating configuration." -ForegroundColor Yellow
     }
 
     Invoke-AzCli -Arguments @(
@@ -1258,23 +778,11 @@ try {
         "--system-assigned",
         "-o", "none"
     ) | Out-Null
-
     $deliveryJobPrincipalId = Resolve-ContainerAppJobPrincipalId -JobName $containerAppsJobName -ResourceGroupName $ResourceGroupName
 
-    $deliveryJobResourceId = Get-AzCliTsv -Arguments @(
-        "containerapp", "job", "show",
-        "--name", $containerAppsJobName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "id",
-        "-o", "tsv"
-    )
-
-    Ensure-RoleAssignment -PrincipalId $deliveryJobPrincipalId -Role "AcrPull" -Scope $acrId
-
-    Ensure-RoleAssignmentWithFallback `
-        -PrincipalId $functionPrincipalId `
-        -Roles @("Container Apps Jobs Operator", "Azure Container Apps Contributor", "Contributor") `
-        -Scope $deliveryJobResourceId
+    $deliveryJobResourceId = Get-AzCliTsv -Arguments @("containerapp", "job", "show", "--name", $containerAppsJobName, "--resource-group", $ResourceGroupName, "--query", "id", "-o", "tsv")
+    Ensure-RoleAssignment -PrincipalId $deliveryJobPrincipalId -RoleName "AcrPull" -Scope $acrId
+    Ensure-RoleAssignment -PrincipalId $functionPrincipalId -RoleName "Container Apps Jobs Operator" -Scope $deliveryJobResourceId
 
     Invoke-AzCli -Arguments @(
         "containerapp", "job", "registry", "set",
@@ -1286,121 +794,33 @@ try {
     ) | Out-Null
 
     if (Test-AcrTagExists -RegistryName $acrName -RepositoryName "lastwrites-worker" -Tag "latest") {
-        Invoke-AzCli -Arguments @(
-            "containerapp", "job", "update",
-            "--name", $containerAppsJobName,
-            "--resource-group", $ResourceGroupName,
-            "--image", $workerImage,
-            "--container-name", $containerAppsJobContainerName,
-            "--replace-env-vars"
-        ) + $workerEnvVars + @("-o", "none") | Out-Null
+        Invoke-AzCli -Arguments $updateJobArguments | Out-Null
     }
     else {
         Write-Warning "Worker image '$workerImage' was not found in ACR yet. The delivery job will stay on the placeholder image until the worker image is pushed. Run the worker deploy workflow after infra provisioning."
     }
 
     Write-Step "Granting delivery worker access to Key Vault RSA decrypt operations"
+    Invoke-AzCli -Arguments @("keyvault", "set-policy", "--name", $keyVaultName, "--object-id", $deliveryJobPrincipalId, "--key-permissions", "get", "decrypt", "unwrapKey", "-o", "none") | Out-Null
 
-    Invoke-AzCli -Arguments @(
-        "keyvault", "set-policy",
-        "--name", $keyVaultName,
-        "--object-id", $deliveryJobPrincipalId,
-        "--key-permissions", "get", "decrypt", "unwrapKey",
-        "-o", "none"
-    ) | Out-Null
-
-    $backendHost = Get-AzCliTsv -Arguments @(
-        "webapp", "show",
-        "--name", $backendAppName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "defaultHostName",
-        "-o", "tsv"
-    )
-
-    $frontendHost = Get-AzCliTsv -Arguments @(
-        "webapp", "show",
-        "--name", $frontendAppName,
-        "--resource-group", $ResourceGroupName,
-        "--query", "defaultHostName",
-        "-o", "tsv"
-    )
-
+    $backendHost = Get-AzCliTsv -Arguments @("webapp", "show", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--query", "defaultHostName", "-o", "tsv")
+    $frontendHost = Get-AzCliTsv -Arguments @("webapp", "show", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--query", "defaultHostName", "-o", "tsv")
     $backendUrl = "https://$backendHost"
     $frontendUrl = "https://$frontendHost"
     $frontendVerifyEmailUrl = "$frontendUrl/verify-email"
     $authSecretKey = New-StrongSecret -ByteLength 48
 
     Write-Step "Applying runtime settings to backend, frontend, and function apps"
-
-    Set-AppSettings -AppKind "webapp" -Name $backendAppName -ResourceGroupName $ResourceGroupName -Settings @(
-        "KEY_VAULT_URL=$keyVaultUrl",
-        "KEY_VAULT_RSA_KEY_SIZE=2048",
-        "KEY_VAULT_RSA_HARDWARE_PROTECTED=false",
-        "COSMOS_DATABASE_NAME=$cosmosDatabaseName",
-        "COSMOS_VAULTS_CONTAINER=$cosmosContainerName",
-        "FRONTEND_ORIGINS=$frontendUrl",
-        "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING",
-        "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING",
-        "AUTH_SECRET_KEY=$authSecretKey",
-        "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl",
-        "AUTH_ACCESS_TOKEN_TTL_MINUTES=120",
-        "AUTH_REQUIRE_EMAIL_VERIFICATION=true",
-        "AUTH_EXPOSE_VERIFICATION_TOKEN=false",
-        "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440",
-        "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000",
-        "SCM_DO_BUILD_DURING_DEPLOYMENT=true",
-        "ENABLE_ORYX_BUILD=true",
-        "WEBSITES_PORT=8000"
-    )
-
-    Set-AppSettings -AppKind "webapp" -Name $frontendAppName -ResourceGroupName $ResourceGroupName -Settings @(
-        "NEXT_PUBLIC_API_URL=$backendUrl"
-    )
-
-    Invoke-AzCli -Arguments @(
-        "webapp", "config", "set",
-        "--name", $backendAppName,
-        "--resource-group", $ResourceGroupName,
-        "--startup-file", "python -m uvicorn main:app --host 0.0.0.0 --port 8000",
-        "-o", "none"
-    ) | Out-Null
-
-    Invoke-AzCli -Arguments @(
-        "webapp", "config", "set",
-        "--name", $frontendAppName,
-        "--resource-group", $ResourceGroupName,
-        "--startup-file", "node server.js",
-        "-o", "none"
-    ) | Out-Null
-
-    Set-AppSettings -AppKind "functionapp" -Name $functionAppName -ResourceGroupName $ResourceGroupName -Settings @(
-        "DEPLOYMENT_STORAGE_CONNECTION_STRING=$blobConnectionString",
-        "AzureWebJobsStorage=$blobConnectionString",
-        "COSMOS_CONNECTION_STRING=$cosmosConnectionString",
-        "COSMOS_DATABASE_NAME=$cosmosDatabaseName",
-        "COSMOS_VAULTS_CONTAINER=$cosmosContainerName",
-        "EVENT_GRID_ENDPOINT=$eventGridEndpoint",
-        "EVENT_GRID_KEY=$eventGridKey",
-        "BLOB_CONNECTION_STRING=$blobConnectionString",
-        "AZURE_SUBSCRIPTION_ID=$subscriptionId",
-        "CONTAINER_APPS_RESOURCE_GROUP=$ResourceGroupName",
-        "CONTAINER_APPS_JOB_NAME=$containerAppsJobName",
-        "CONTAINER_APPS_API_VERSION=2024-03-01"
-    )
+    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "KEY_VAULT_RSA_KEY_SIZE=2048", "KEY_VAULT_RSA_HARDWARE_PROTECTED=false", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "AUTH_SECRET_KEY=$authSecretKey", "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl", "AUTH_ACCESS_TOKEN_TTL_MINUTES=120", "AUTH_REQUIRE_EMAIL_VERIFICATION=true", "AUTH_EXPOSE_VERIFICATION_TOKEN=false", "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440", "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000", "SCM_DO_BUILD_DURING_DEPLOYMENT=true", "ENABLE_ORYX_BUILD=true", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "python -m uvicorn main:app --host 0.0.0.0 --port 8000", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "node server.js", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("functionapp", "config", "appsettings", "set", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--settings", "COSMOS_CONNECTION_STRING=$cosmosConnectionString", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "EVENT_GRID_ENDPOINT=$eventGridEndpoint", "EVENT_GRID_KEY=$eventGridKey", "BLOB_CONNECTION_STRING=$blobConnectionString", "AZURE_SUBSCRIPTION_ID=$subscriptionId", "CONTAINER_APPS_RESOURCE_GROUP=$ResourceGroupName", "CONTAINER_APPS_JOB_NAME=$containerAppsJobName", "CONTAINER_APPS_API_VERSION=2024-03-01", "-o", "none") | Out-Null
 
     Write-Step "Ensuring Event Grid subscription to start_delivery_job function"
-
     $startDeliveryJobFunctionExists = $false
-
     try {
-        $startDeliveryJobFunction = Get-AzCliJson -Arguments @(
-            "functionapp", "function", "show",
-            "--name", $functionAppName,
-            "--resource-group", $ResourceGroupName,
-            "--function-name", "start_delivery_job",
-            "-o", "json"
-        )
-
+        $startDeliveryJobFunction = Get-AzCliJson -Arguments @("functionapp", "function", "show", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--function-name", "start_delivery_job", "-o", "json")
         $startDeliveryJobFunctionExists = $null -ne $startDeliveryJobFunction -and -not [string]::IsNullOrWhiteSpace([string]$startDeliveryJobFunction.id)
     }
     catch {
@@ -1408,52 +828,44 @@ try {
     }
 
     if ($startDeliveryJobFunctionExists) {
-        $eventGridTopicId = Get-AzCliTsv -Arguments @(
-            "eventgrid", "topic", "show",
-            "--name", $eventGridTopicName,
-            "--resource-group", $ResourceGroupName,
-            "--query", "id",
-            "-o", "tsv"
-        )
-
+        $eventGridTopicId = Get-AzCliTsv -Arguments @("eventgrid", "topic", "show", "--name", $eventGridTopicName, "--resource-group", $ResourceGroupName, "--query", "id", "-o", "tsv")
         $startDeliveryJobFunctionResourceId = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$functionAppName/functions/start_delivery_job"
 
-        $eventSubscriptionExists = Test-AzResourceExists -ShowArguments @(
-            "eventgrid", "event-subscription", "show",
-            "--name", $eventSubscriptionName,
-            "--source-resource-id", $eventGridTopicId,
-            "-o", "json"
-        )
+        $eventSubscriptionExists = $false
+        try {
+            $existingEventSubscription = Get-AzCliJson -Arguments @("eventgrid", "event-subscription", "show", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "-o", "json")
+            $eventSubscriptionExists = $null -ne $existingEventSubscription -and -not [string]::IsNullOrWhiteSpace([string]$existingEventSubscription.id)
+        }
+        catch {
+            $eventSubscriptionExists = $false
+        }
 
         if (-not $eventSubscriptionExists) {
-            Invoke-AzCli -Arguments @(
-                "eventgrid", "event-subscription", "create",
-                "--name", $eventSubscriptionName,
-                "--source-resource-id", $eventGridTopicId,
-                "--endpoint-type", "azurefunction",
-                "--endpoint", $startDeliveryJobFunctionResourceId,
-                "--included-event-types", "GracePeriodExpired",
-                "-o", "none"
-            ) | Out-Null
+            Invoke-AzCli -Arguments @("eventgrid", "event-subscription", "create", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "--endpoint-type", "azurefunction", "--endpoint", $startDeliveryJobFunctionResourceId, "--included-event-types", "GracePeriodExpired", "-o", "none") | Out-Null
         }
         else {
-            Invoke-AzCli -Arguments @(
-                "eventgrid", "event-subscription", "update",
-                "--name", $eventSubscriptionName,
-                "--source-resource-id", $eventGridTopicId,
-                "--endpoint-type", "azurefunction",
-                "--endpoint", $startDeliveryJobFunctionResourceId,
-                "--included-event-types", "GracePeriodExpired",
-                "-o", "none"
-            ) | Out-Null
+            Write-Host "Event subscription '$eventSubscriptionName' already exists. Updating endpoint to start_delivery_job." -ForegroundColor Yellow
+            Invoke-AzCli -Arguments @("eventgrid", "event-subscription", "update", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "--endpoint-type", "azurefunction", "--endpoint", $startDeliveryJobFunctionResourceId, "--included-event-types", "GracePeriodExpired", "-o", "none") | Out-Null
         }
     }
     else {
-        Write-Warning "Function 'start_delivery_job' was not found in '$functionAppName'. This is normal before deploying the Functions code. Deploy functions first, then run this script again to attach Event Grid."
+        Write-Warning "Function 'start_delivery_job' was not found in '$functionAppName'. Event subscription '$eventSubscriptionName' was not created. Deploy function code first, then run infra/deploy.ps1 again to attach Event Grid."
     }
 
     if (-not $SkipLocalFileUpdate) {
         Write-Step "Writing local development config files"
+
+        $requiredValues = [ordered]@{
+            COSMOS_CONNECTION_STRING = $cosmosConnectionString
+            BLOB_CONNECTION_STRING = $blobConnectionString
+            EVENT_GRID_ENDPOINT = $eventGridEndpoint
+            EVENT_GRID_KEY = $eventGridKey
+        }
+        foreach ($entry in $requiredValues.GetEnumerator()) {
+            if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
+                throw "Cannot write local config files because '$($entry.Key)' is empty."
+            }
+        }
 
 $backendEnvContent = @"
 KEY_VAULT_URL=
@@ -1476,13 +888,11 @@ AUTH_EXPOSE_VERIFICATION_TOKEN=true
 EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440
 AUTH_PASSWORD_PBKDF2_ITERATIONS=260000
 "@
-
         Set-Content -Path $backendEnvPath -Value $backendEnvContent -Encoding UTF8
 
-$frontendEnvContent = @"
+        $frontendEnvContent = @"
 NEXT_PUBLIC_API_URL=http://localhost:8000
 "@
-
         Set-Content -Path $frontendEnvPath -Value $frontendEnvContent -Encoding UTF8
 
         $functionsSettings = [ordered]@{
@@ -1490,7 +900,6 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
             Values = [ordered]@{
                 AzureWebJobsStorage = $blobConnectionString
                 FUNCTIONS_WORKER_RUNTIME = "python"
-                DEPLOYMENT_STORAGE_CONNECTION_STRING = $blobConnectionString
                 COSMOS_CONNECTION_STRING = $cosmosConnectionString
                 COSMOS_DATABASE_NAME = $cosmosDatabaseName
                 COSMOS_VAULTS_CONTAINER = $cosmosContainerName
@@ -1503,41 +912,23 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
                 CONTAINER_APPS_API_VERSION = "2024-03-01"
             }
         }
-
         ($functionsSettings | ConvertTo-Json -Depth 5) | Set-Content -Path $functionsSettingsPath -Encoding UTF8
     }
 
     if ($SetGithubSecrets) {
         Write-Step "Reading publish profiles and writing GitHub secrets for workflows"
 
-        $backendPublishProfile = Get-AzCliRaw -Arguments @(
-            "webapp", "deployment", "list-publishing-profiles",
-            "--name", $backendAppName,
-            "--resource-group", $ResourceGroupName,
-            "--xml"
-        )
-
-        $frontendPublishProfile = Get-AzCliRaw -Arguments @(
-            "webapp", "deployment", "list-publishing-profiles",
-            "--name", $frontendAppName,
-            "--resource-group", $ResourceGroupName,
-            "--xml"
-        )
+        $backendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--xml")
+        $frontendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--xml")
 
         $functionsPublishProfile = ""
         $canSetFunctionsPublishProfile = $true
-
         try {
-            $functionsPublishProfile = Get-AzCliRaw -Arguments @(
-                "functionapp", "deployment", "list-publishing-profiles",
-                "--name", $functionAppName,
-                "--resource-group", $ResourceGroupName,
-                "--xml"
-            )
+            $functionsPublishProfile = Get-AzCliRaw -Arguments @("functionapp", "deployment", "list-publishing-profiles", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--xml")
         }
         catch {
             $canSetFunctionsPublishProfile = $false
-            Write-Warning "Skipping AZURE_FUNCTIONAPP_PUBLISH_PROFILE for '$functionAppName'. If your Functions workflow uses publish-profile auth, use Azure login/OIDC or generate the profile from the portal if available."
+            Write-Warning "Skipping AZURE_FUNCTIONAPP_PUBLISH_PROFILE for '$functionAppName'. This Function App may be using Flex Consumption and does not support publish profile deployment."
         }
 
         Set-OrUpdateGithubSecret -Name "AZURE_BACKEND_WEBAPP_NAME" -Value $backendAppName -Repo $GithubRepo
@@ -1548,7 +939,6 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
         Set-OrUpdateGithubSecret -Name "NEXT_PUBLIC_API_URL" -Value $backendUrl -Repo $GithubRepo
 
         Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_NAME" -Value $functionAppName -Repo $GithubRepo
-
         if ($canSetFunctionsPublishProfile -and -not [string]::IsNullOrWhiteSpace($functionsPublishProfile)) {
             Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_PUBLISH_PROFILE" -Value $functionsPublishProfile -Repo $GithubRepo
         }
@@ -1558,36 +948,16 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
         Set-OrUpdateGithubSecret -Name "ACR_PASSWORD" -Value $acrPassword -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_CONTAINERAPPS_RESOURCE_GROUP" -Value $ResourceGroupName -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_CONTAINERAPPS_JOB_NAME" -Value $containerAppsJobName -Repo $GithubRepo
-        Set-OrUpdateGithubSecret -Name "AZURE_RESOURCE_GROUP" -Value $ResourceGroupName -Repo $GithubRepo
-        Set-OrUpdateGithubSecret -Name "AZURE_SUBSCRIPTION_ID" -Value $subscriptionId -Repo $GithubRepo
     }
 
     if ($RerunWorkflowRuns) {
         Write-Step "Re-running latest workflow runs"
-
-        $workflows = @(
-            "deploy-backend.yml",
-            "deploy-frontend.yml",
-            "deploy-functions.yml",
-            "deploy-worker.yml"
-        )
+        $workflows = @("deploy-backend.yml", "deploy-frontend.yml", "deploy-functions.yml", "deploy-worker.yml")
 
         foreach ($workflow in $workflows) {
-            $runId = Get-GhRaw -Arguments @(
-                "run", "list",
-                "--repo", $GithubRepo,
-                "--workflow", $workflow,
-                "--limit", "1",
-                "--json", "databaseId",
-                "-q", ".[0].databaseId"
-            )
-
+            $runId = Get-GhRaw -Arguments @("run", "list", "--repo", $GithubRepo, "--workflow", $workflow, "--limit", "1", "--json", "databaseId", "-q", ".[0].databaseId")
             if (-not [string]::IsNullOrWhiteSpace($runId)) {
-                Invoke-GhCli -Arguments @(
-                    "run", "rerun",
-                    $runId,
-                    "--repo", $GithubRepo
-                ) | Out-Null
+                Invoke-GhCli -Arguments @("run", "rerun", $runId, "--repo", $GithubRepo) | Out-Null
             }
         }
     }
@@ -1596,7 +966,6 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 
     Write-Host "`nDeployment complete." -ForegroundColor Green
     Write-Host "Resource Group: $ResourceGroupName"
-    Write-Host "Location:       $Location"
     Write-Host "Backend URL:   $backendUrl"
     Write-Host "Frontend URL:  $frontendUrl"
     Write-Host "Function App:  $functionAppName"
@@ -1604,12 +973,6 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
     Write-Host "Delivery Job:  $containerAppsJobName"
     Write-Host "ACR:           $acrLoginServer"
     Write-Host "Portal:        $resourceGroupPortalUrl"
-
-    Write-Host "`nNext steps:" -ForegroundColor Cyan
-    Write-Host "1. Push/run deploy-backend.yml and deploy-frontend.yml."
-    Write-Host "2. Push/run deploy-worker.yml so '$workerImage' exists."
-    Write-Host "3. Push/run deploy-functions.yml so 'start_delivery_job' exists."
-    Write-Host "4. Run this script once more to attach Event Grid to 'start_delivery_job' if it was missing."
 }
 catch {
     Write-Host "`nDeployment failed." -ForegroundColor Red
@@ -1617,14 +980,8 @@ catch {
 
     if ($CleanupOnFailure -and $deploymentStarted) {
         Write-Warning "CleanupOnFailure is enabled. Deleting resource group '$ResourceGroupName'."
-
         try {
-            Invoke-AzCli -Arguments @(
-                "group", "delete",
-                "--name", $ResourceGroupName,
-                "--yes",
-                "--no-wait"
-            ) | Out-Null
+            Invoke-AzCli -Arguments @("group", "delete", "--name", $ResourceGroupName, "--yes", "--no-wait") | Out-Null
         }
         catch {
             Write-Warning "Failed to start resource group deletion: $($_.Exception.Message)"
