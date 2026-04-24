@@ -226,6 +226,90 @@ function New-RandomToken {
     -join (1..$Length | ForEach-Object { $chars[(Get-Random -Minimum 0 -Maximum $chars.Length)] })
 }
 
+function New-StorageAccountName {
+    param(
+        [Parameter(Mandatory = $true)][string]$PrefixCompact,
+        [Parameter(Mandatory = $true)][string]$Suffix
+    )
+
+    $name = ("st" + $PrefixCompact + $Suffix).ToLower()
+    if ($name.Length -gt 24) {
+        $name = $name.Substring(0, 24)
+    }
+
+    return $name
+}
+
+function Test-BlobEndpointExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName
+    )
+
+    $blobEndpoint = "https://$StorageAccountName.blob.core.windows.net/?comp=list"
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $blobEndpoint -TimeoutSec 20 | Out-Null
+        return $true
+    }
+    catch {
+        $response = $_.Exception.Response
+        if ($null -eq $response) {
+            return $false
+        }
+
+        $statusCode = [int]$response.StatusCode
+        if ($statusCode -eq 404) {
+            return $false
+        }
+
+        # 400/403 means the blob service exists but rejected the anonymous request.
+        return $true
+    }
+}
+
+function Wait-BlobEndpointExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [int]$Attempts = 12,
+        [int]$DelaySeconds = 10
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        if (Test-BlobEndpointExists -StorageAccountName $StorageAccountName) {
+            return $true
+        }
+
+        if ($attempt -lt $Attempts) {
+            Write-Warning "Blob endpoint for storage account '$StorageAccountName' returned 404 on attempt $attempt/$Attempts. Retrying in $DelaySeconds seconds."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return $false
+}
+
+function Wait-StorageAccountSucceeded {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [int]$Attempts = 30,
+        [int]$DelaySeconds = 5
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $state = Get-AzCliTsv -Arguments @("storage", "account", "show", "--name", $StorageAccountName, "--resource-group", $ResourceGroupName, "--query", "provisioningState", "-o", "tsv")
+        if ($state -eq "Succeeded") {
+            return $true
+        }
+
+        if ($attempt -lt $Attempts) {
+            Write-Warning "Storage account '$StorageAccountName' provisioningState is '$state' on attempt $attempt/$Attempts. Retrying in $DelaySeconds seconds."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return $false
+}
+
 function New-StrongSecret {
     param([int]$ByteLength = 48)
 
@@ -653,9 +737,7 @@ if ($eventSubscriptionName.Length -gt 64) {
     $eventSubscriptionName = $eventSubscriptionName.Substring(0, 64).TrimEnd('-')
 }
 
-$storageAccountName = ("st" + $prefixCompact + $token)
-if ($storageAccountName.Length -gt 24) { $storageAccountName = $storageAccountName.Substring(0, 24) }
-$storageAccountName = $storageAccountName.ToLower()
+$storageAccountName = New-StorageAccountName -PrefixCompact $prefixCompact -Suffix $token
 
 $acrName = ("acr" + $prefixCompact + $token)
 if ($acrName.Length -gt 50) { $acrName = $acrName.Substring(0, 50) }
@@ -692,7 +774,29 @@ try {
     Invoke-AzCli -Arguments @("webapp", "create", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--plan", $planName, "--runtime", $nodeRuntime, "-o", "none") | Out-Null
 
     Write-Step "Creating storage account for blobs and function host"
-    Invoke-AzCli -Arguments @("storage", "account", "create", "--name", $storageAccountName, "--resource-group", $ResourceGroupName, "--location", $Location, "--sku", "Standard_LRS", "--kind", "StorageV2", "--allow-blob-public-access", "false", "--min-tls-version", "TLS1_2", "-o", "none") | Out-Null
+    $storageAccountReady = $false
+    for ($storageAttempt = 1; $storageAttempt -le 3; $storageAttempt++) {
+        Invoke-AzCli -Arguments @("storage", "account", "create", "--name", $storageAccountName, "--resource-group", $ResourceGroupName, "--location", $Location, "--sku", "Standard_LRS", "--kind", "StorageV2", "--allow-blob-public-access", "false", "--min-tls-version", "TLS1_2", "-o", "none") | Out-Null
+        if (-not (Wait-StorageAccountSucceeded -StorageAccountName $storageAccountName -ResourceGroupName $ResourceGroupName -Attempts 30 -DelaySeconds 5)) {
+            throw "Storage account '$storageAccountName' did not reach provisioningState 'Succeeded'."
+        }
+
+        if (Wait-BlobEndpointExists -StorageAccountName $storageAccountName -Attempts 12 -DelaySeconds 10) {
+            $storageAccountReady = $true
+            break
+        }
+
+        if ($storageAttempt -lt 3) {
+            $previousStorageAccountName = $storageAccountName
+            $storageAccountName = New-StorageAccountName -PrefixCompact $prefixCompact -Suffix (New-RandomToken -Length 10)
+            Write-Warning "Blob endpoint for storage account '$previousStorageAccountName' is still unavailable. Retrying with new storage account '$storageAccountName'."
+        }
+    }
+
+    if (-not $storageAccountReady) {
+        throw "Blob endpoint for storage account '$storageAccountName' did not become available. Try a new -ResourceGroupName or rerun later."
+    }
+
     $blobConnectionString = Get-AzCliTsv -Arguments @("storage", "account", "show-connection-string", "--resource-group", $ResourceGroupName, "--name", $storageAccountName, "--query", "connectionString", "-o", "tsv")
     if ([string]::IsNullOrWhiteSpace($blobConnectionString)) {
         throw "Storage connection string retrieval returned empty output."
