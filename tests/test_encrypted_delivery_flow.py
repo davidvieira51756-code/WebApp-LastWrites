@@ -186,7 +186,8 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
 
         archive = ZipFile(io.BytesIO(package_response.content))
         archive_names = set(archive.namelist())
-        self.assertIn("00-cover.pdf", archive_names)
+        self.assertIn("Delivery.pdf", archive_names)
+        self.assertNotIn("00-cover.pdf", archive_names)
         self.assertIn(first_file["file_name"], archive_names)
         self.assertIn(second_file["file_name"], archive_names)
 

@@ -42,6 +42,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _date_from_iso(raw_value: str) -> str:
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return raw_value.split("T", 1)[0]
+
+
 def _get_required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -345,15 +352,19 @@ def _decrypt_vault_file(file_metadata: Dict[str, Any]) -> bytes:
     return plaintext
 
 
-def _generate_cover_pdf(vault_document: Dict[str, Any], file_items: List[Dict[str, Any]], output_path: Path) -> None:
+def _generate_cover_pdf(
+    vault_document: Dict[str, Any],
+    file_items: List[Dict[str, Any]],
+    output_path: Path,
+    delivered_at: str,
+) -> None:
     styles = getSampleStyleSheet()
     story: List[Any] = []
 
     story.append(Paragraph("Last Writes Delivery Package", styles["Title"]))
     story.append(Spacer(1, 12))
     story.append(Paragraph(f"Vault: {vault_document.get('name', 'Unnamed Vault')}", styles["Heading2"]))
-    story.append(Paragraph(f"Vault ID: {vault_document.get('id', 'unknown')}", styles["BodyText"]))
-    story.append(Paragraph(f"Generated at: {_now_iso()}", styles["BodyText"]))
+    story.append(Paragraph(f"Delivered: {_date_from_iso(delivered_at)}", styles["BodyText"]))
     story.append(Spacer(1, 12))
 
     owner_message = str(vault_document.get("owner_message", "")).strip()
@@ -375,17 +386,15 @@ def _generate_cover_pdf(vault_document: Dict[str, Any], file_items: List[Dict[st
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("Included Files", styles["Heading3"]))
-    table_rows: List[List[str]] = [["File Name", "Type", "Original Size"]]
+    table_rows: List[List[str]] = [["File Name"]]
     for file_item in file_items:
         table_rows.append(
             [
                 str(file_item.get("file_name", "Unnamed file")),
-                str(file_item.get("content_type", "Unknown") or "Unknown"),
-                str(file_item.get("size_bytes", "Unknown")),
             ]
         )
 
-    table = Table(table_rows, repeatRows=1, colWidths=[280, 140, 100])
+    table = Table(table_rows, repeatRows=1, colWidths=[520])
     table.setStyle(
         TableStyle(
             [
@@ -405,7 +414,7 @@ def _generate_cover_pdf(vault_document: Dict[str, Any], file_items: List[Dict[st
 
 def _build_zip_archive(cover_pdf_path: Path, extracted_files: List[Path], output_zip: Path) -> None:
     with ZipFile(output_zip, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zip_file:
-        zip_file.write(cover_pdf_path, arcname="00-cover.pdf")
+        zip_file.write(cover_pdf_path, arcname="Delivery.pdf")
         for file_path in extracted_files:
             zip_file.write(file_path, arcname=file_path.name)
 
@@ -443,6 +452,7 @@ def run() -> int:
             extracted_dir.mkdir(parents=True, exist_ok=True)
             cover_pdf_path = temp_root / "cover.pdf"
             output_zip = temp_root / f"{vault_id}-delivery.zip"
+            delivered_at = _now_iso()
 
             extracted_files: List[Path] = []
             for file_item in files:
@@ -454,7 +464,12 @@ def run() -> int:
                 target_path.write_bytes(plaintext)
                 extracted_files.append(target_path)
 
-            _generate_cover_pdf(vault_document=vault_document, file_items=files, output_path=cover_pdf_path)
+            _generate_cover_pdf(
+                vault_document=vault_document,
+                file_items=files,
+                output_path=cover_pdf_path,
+                delivered_at=delivered_at,
+            )
             _build_zip_archive(
                 cover_pdf_path=cover_pdf_path,
                 extracted_files=extracted_files,
@@ -472,7 +487,7 @@ def run() -> int:
                     "delivery_size_bytes": upload_result["size_bytes"],
                     "delivery_checksum_sha256": upload_result["checksum_sha256"],
                     "delivery_error": None,
-                    "delivered_at": _now_iso(),
+                    "delivered_at": delivered_at,
                     "delivery_job_execution_name": execution_name,
                 },
             )
