@@ -25,6 +25,53 @@ function Ensure-Command {
     }
 }
 
+function Format-AzCliArgumentsForError {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $sensitiveOptions = @("--account-key", "--connection-string", "--password", "--value")
+    $sensitiveSettingNames = @(
+        "ACR_PASSWORD",
+        "AUTH_SECRET_KEY",
+        "BLOB_CONNECTION_STRING",
+        "COSMOS_CONNECTION_STRING",
+        "EVENT_GRID_KEY"
+    )
+    $redactedArguments = New-Object System.Collections.Generic.List[string]
+    $skipNext = $false
+
+    for ($index = 0; $index -lt $Arguments.Count; $index++) {
+        if ($skipNext) {
+            $skipNext = $false
+            continue
+        }
+
+        $argument = [string]$Arguments[$index]
+        if ($sensitiveOptions -contains $argument) {
+            $redactedArguments.Add($argument)
+            if (($index + 1) -lt $Arguments.Count) {
+                $redactedArguments.Add("<redacted>")
+                $skipNext = $true
+            }
+            continue
+        }
+
+        $redacted = $argument -replace "(?i)(AccountKey=)[^;]+", '$1<redacted>'
+        foreach ($settingName in $sensitiveSettingNames) {
+            if ($redacted -like "$settingName=*") {
+                $redacted = "$settingName=<redacted>"
+                break
+            }
+        }
+
+        $redactedArguments.Add($redacted)
+    }
+
+    return ($redactedArguments -join ' ')
+}
+
 function Invoke-AzCli {
     param(
         [Parameter(Mandatory = $true)]
@@ -45,10 +92,39 @@ function Invoke-AzCli {
 
     if ($exitCode -ne 0) {
         $renderedOutput = ($output | Out-String).Trim()
-        throw "Azure CLI command failed (exit $exitCode): az $($effectiveArguments -join ' ')`n$renderedOutput"
+        $safeArguments = Format-AzCliArgumentsForError -Arguments $effectiveArguments
+        throw "Azure CLI command failed (exit $exitCode): az $safeArguments`n$renderedOutput"
     }
 
     return $output
+}
+
+function Invoke-AzCliWithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [int]$Attempts = 6,
+        [int]$DelaySeconds = 10,
+        [string]$RetryDescription = "Azure CLI command"
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            return Invoke-AzCli -Arguments $Arguments
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -ge $Attempts) {
+                break
+            }
+
+            Write-Warning "$RetryDescription failed on attempt $attempt/$Attempts. Retrying in $DelaySeconds seconds."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    throw $lastError
 }
 
 function Normalize-AzCliOutput {
@@ -621,8 +697,8 @@ try {
     if ([string]::IsNullOrWhiteSpace($blobConnectionString)) {
         throw "Storage connection string retrieval returned empty output."
     }
-    Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "vaults", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
-    Invoke-AzCli -Arguments @("storage", "container", "create", "--name", "deliveries", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") | Out-Null
+    Invoke-AzCliWithRetry -Arguments @("storage", "container", "create", "--name", "vaults", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") -Attempts 12 -DelaySeconds 10 -RetryDescription "Creating storage container 'vaults'" | Out-Null
+    Invoke-AzCliWithRetry -Arguments @("storage", "container", "create", "--name", "deliveries", "--connection-string", $blobConnectionString, "--auth-mode", "key", "-o", "none") -Attempts 12 -DelaySeconds 10 -RetryDescription "Creating storage container 'deliveries'" | Out-Null
 
     Write-Step "Creating Function App (Flex Consumption)"
     $functionAppExists = $false
