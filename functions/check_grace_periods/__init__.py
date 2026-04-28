@@ -10,11 +10,8 @@ from azure.core.credentials import AzureKeyCredential
 from azure.cosmos import CosmosClient, exceptions
 from azure.eventgrid import EventGridEvent, EventGridPublisherClient
 
-from shared_telemetry import configure_application_insights
-
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
-configure_application_insights("last-writes-check-grace-periods")
 
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None

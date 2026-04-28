@@ -16,6 +16,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from azure.core.exceptions import AzureError, ResourceExistsError
 from azure.cosmos import CosmosClient, exceptions
+from azure.identity import DefaultAzureCredential
 from azure.keyvault.keys.crypto import CryptographyClient, EncryptionAlgorithm
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from cryptography.hazmat.primitives import hashes, serialization
@@ -26,35 +27,11 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-try:
-    from worker_container.runtime_services import (
-        AuditService,
-        DeliveryBlobService,
-        LocalAuditService,
-        LocalDeliveryBlobService,
-        build_delivery_email_service,
-        build_key_vault_credential,
-        configure_application_insights,
-        sanitize_filename,
-    )
-except ModuleNotFoundError:
-    from runtime_services import (
-        AuditService,
-        DeliveryBlobService,
-        LocalAuditService,
-        LocalDeliveryBlobService,
-        build_delivery_email_service,
-        build_key_vault_credential,
-        configure_application_insights,
-        sanitize_filename,
-    )
-
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("last_writes_worker")
-configure_application_insights("last-writes-worker")
 
 
 def _env_to_bool(value: str) -> bool:
@@ -190,8 +167,6 @@ def _update_local_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[
 
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
-_audit_service = None
-_delivery_blob_service = None
 
 
 def _get_azure_cosmos_container():
@@ -337,7 +312,7 @@ def _unwrap_file_key(*, key_kid: str, wrapped_key: str) -> bytes:
         )
 
     key_vault_url = _get_required_env("KEY_VAULT_URL")
-    credential = build_key_vault_credential()
+    credential = DefaultAzureCredential()
     crypto_client = CryptographyClient(key_kid, credential=credential)
     decrypted = crypto_client.decrypt(
         EncryptionAlgorithm.rsa_oaep_256,
@@ -441,99 +416,7 @@ def _build_zip_archive(cover_pdf_path: Path, extracted_files: List[Path], output
     with ZipFile(output_zip, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zip_file:
         zip_file.write(cover_pdf_path, arcname="Delivery.pdf")
         for file_path in extracted_files:
-            zip_file.write(file_path, arcname=sanitize_filename(file_path.name))
-
-
-def _get_audit_service():
-    global _audit_service
-
-    if _audit_service is not None:
-        return _audit_service
-
-    if _is_local_dev_mode():
-        _audit_service = LocalAuditService()
-    else:
-        _audit_service = AuditService(_get_required_env("COSMOS_CONNECTION_STRING"))
-    _audit_service.initialize()
-    return _audit_service
-
-
-def _get_delivery_blob_service():
-    global _delivery_blob_service
-
-    if _delivery_blob_service is not None:
-        return _delivery_blob_service
-
-    if _is_local_dev_mode():
-        _delivery_blob_service = LocalDeliveryBlobService()
-    else:
-        _delivery_blob_service = DeliveryBlobService(_get_required_env("BLOB_CONNECTION_STRING"))
-    return _delivery_blob_service
-
-
-def _delivery_sas_ttl_minutes() -> int:
-    raw_value = os.getenv("DELIVERY_SAS_TTL_MINUTES", "1440").strip()
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        return 1440
-    return parsed if parsed > 0 else 1440
-
-
-def _generate_delivery_download_payload(upload_result: Dict[str, Any]) -> Dict[str, str]:
-    blob_service = _get_delivery_blob_service()
-    return blob_service.generate_read_sas_url(
-        container_name=str(upload_result["container_name"]),
-        blob_name=str(upload_result["blob_name"]),
-        expires_in_minutes=_delivery_sas_ttl_minutes(),
-    )
-
-
-def _record_delivery_completed_audit(vault_document: Dict[str, Any], delivered_at: str) -> None:
-    owner_user_id = str(vault_document.get("user_id", "")).strip()
-    vault_id = str(vault_document.get("id", "")).strip()
-    if not owner_user_id or not vault_id:
-        return
-
-    try:
-        _get_audit_service().record_event(
-            owner_user_id=owner_user_id,
-            event_type="delivery_completed",
-            vault_id=vault_id,
-            actor_type="system",
-            details={
-                "delivery_container_name": vault_document.get("delivery_container_name"),
-                "delivery_blob_name": vault_document.get("delivery_blob_name"),
-                "delivered_at": delivered_at,
-            },
-            occurred_at=delivered_at,
-        )
-    except Exception:
-        logger.exception("Failed to persist delivery_completed audit event. vault_id=%s", vault_id)
-
-
-def _send_delivery_email(vault_document: Dict[str, Any], download_payload: Dict[str, str]) -> None:
-    recipients = vault_document.get("recipients", [])
-    if not isinstance(recipients, list):
-        recipients = []
-
-    recipients = [
-        str(recipient).strip().lower()
-        for recipient in recipients
-        if str(recipient).strip()
-    ]
-    if not recipients:
-        logger.warning("Delivery email skipped because recipients list is empty. vault_id=%s", vault_document.get("id"))
-        return
-
-    build_delivery_email_service().send_delivery_notification(
-        recipients=recipients,
-        vault_name=str(vault_document.get("name", "Unnamed Vault")),
-        vault_id=str(vault_document.get("id", "")),
-        download_url=str(download_payload["url"]),
-        expires_at=str(download_payload["expires_at"]),
-        owner_message=str(vault_document.get("owner_message", "")).strip() or None,
-    )
+            zip_file.write(file_path, arcname=file_path.name)
 
 
 def run() -> int:
@@ -594,7 +477,6 @@ def run() -> int:
             )
 
             upload_result = _upload_delivery_zip(vault_id=vault_id, zip_path=output_zip)
-            download_payload = _generate_delivery_download_payload(upload_result)
             updated_vault = _update_vault(
                 vault_id,
                 {
@@ -607,32 +489,11 @@ def run() -> int:
                     "delivery_error": None,
                     "delivered_at": delivered_at,
                     "delivery_job_execution_name": execution_name,
-                    "delivery_sas_expires_at": download_payload["expires_at"],
-                    "delivery_notification_error": None,
                 },
             )
             if updated_vault is None:
                 raise RuntimeError("Vault metadata could not be updated after delivery ZIP upload.")
 
-            try:
-                _send_delivery_email(updated_vault, download_payload)
-                updated_vault = _update_vault(
-                    vault_id,
-                    {
-                        "delivery_notification_sent_at": _now_iso(),
-                        "delivery_notification_error": None,
-                    },
-                ) or updated_vault
-            except Exception as exc:
-                logger.exception("Delivery email dispatch failed. vault_id=%s", vault_id)
-                updated_vault = _update_vault(
-                    vault_id,
-                    {
-                        "delivery_notification_error": str(exc),
-                    },
-                ) or updated_vault
-
-            _record_delivery_completed_audit(updated_vault, delivered_at)
             logger.info(
                 "Worker completed successfully. vault_id=%s delivery_blob=%s",
                 vault_id,

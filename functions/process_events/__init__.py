@@ -3,16 +3,13 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import azure.functions as func
 from azure.cosmos import CosmosClient, exceptions
 
-from shared_telemetry import configure_application_insights
-
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
-configure_application_insights("last-writes-process-events")
 
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
@@ -123,6 +120,38 @@ def _update_vault_status_to_delivery_initiated(
         raise
 
 
+def _send_mocked_email_notification(vault_document: Dict[str, Any]) -> None:
+    recipients: List[str] = vault_document.get("recipients", [])
+    sender = os.getenv("NOTIFICATION_SENDER", "noreply@lastwrites.local")
+    vault_id = vault_document.get("id", "unknown")
+    vault_name = vault_document.get("name", "Unnamed Vault")
+
+    if not recipients:
+        logger.warning(
+            "MOCK EMAIL skipped because recipients list is empty. vault_id=%s",
+            vault_id,
+        )
+        return
+
+    subject = f"[Last Writes] Delivery initiated for vault '{vault_name}'"
+    logger.info(
+        "MOCK EMAIL dispatch starting. sender=%s recipient_count=%s vault_id=%s",
+        sender,
+        len(recipients),
+        vault_id,
+    )
+
+    for recipient in recipients:
+        logger.info(
+            "MOCK EMAIL dispatch. to=%s subject=%s vault_id=%s",
+            recipient,
+            subject,
+            vault_id,
+        )
+
+    logger.info("MOCK EMAIL dispatch completed. vault_id=%s", vault_id)
+
+
 def main(event: func.EventGridEvent) -> None:
     logger.info(
         "Event Grid event received. id=%s type=%s subject=%s topic=%s",
@@ -178,11 +207,12 @@ def main(event: func.EventGridEvent) -> None:
         )
         if updated_vault is None:
             logger.warning(
-                "Vault not found for processing. vault_id=%s",
+                "Vault not found for processing; mocked notification skipped. vault_id=%s",
                 vault_id,
             )
             return
 
+        _send_mocked_email_notification(updated_vault)
         logger.info(
             "Grace period expiration event processed successfully. event_id=%s vault_id=%s",
             event.id,

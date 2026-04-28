@@ -1,1 +1,0 @@
-2026-04-28T13:23:37  Startup Request, url: /detectors, method: GET, type: request, pid: 833,1,7, ScmType: None

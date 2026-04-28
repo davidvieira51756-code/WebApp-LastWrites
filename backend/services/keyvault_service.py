@@ -5,11 +5,7 @@ import os
 from typing import Dict, Optional
 
 from azure.keyvault.secrets import SecretClient
-
-try:
-    from backend.services.azure_identity_service import build_key_vault_credential
-except ModuleNotFoundError:
-    from services.azure_identity_service import build_key_vault_credential
+from azure.identity import DefaultAzureCredential
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +27,7 @@ class KeyVaultService:
             "BLOB-CONNECTION-STRING",
         )
 
-        self._credential = None
+        self._credential: Optional[DefaultAzureCredential] = None
         self._secret_client: Optional[SecretClient] = None
 
     @staticmethod
@@ -52,7 +48,7 @@ class KeyVaultService:
             return None
 
         if self._secret_client is None:
-            self._credential = build_key_vault_credential()
+            self._credential = DefaultAzureCredential()
             self._secret_client = SecretClient(
                 vault_url=self._key_vault_url,
                 credential=self._credential,
@@ -117,5 +113,12 @@ class KeyVaultService:
                 "Azure Key Vault",
             )
         except Exception:
-            logger.exception("Failed to fetch connection strings from Azure Key Vault.")
-            raise
+            logger.exception(
+                "Failed to fetch connection strings from Azure Key Vault; "
+                "falling back to local environment variables."
+            )
+            return self._validate_connection_strings(
+                local_connection_strings["cosmos_connection_string"],
+                local_connection_strings["blob_connection_string"],
+                "local environment variables fallback",
+            )

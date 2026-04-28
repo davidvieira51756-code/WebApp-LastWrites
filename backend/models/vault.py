@@ -83,10 +83,7 @@ class Vault(VaultBase):
     delivery_checksum_sha256: Optional[str] = Field(default=None, min_length=32, max_length=128)
     delivery_initiated_at: Optional[str] = None
     delivered_at: Optional[str] = None
-    delivery_sas_expires_at: Optional[str] = None
     delivery_error: Optional[str] = None
-    delivery_notification_sent_at: Optional[str] = None
-    delivery_notification_error: Optional[str] = None
     delivery_job_started_at: Optional[str] = None
     delivery_job_execution_name: Optional[str] = None
 
