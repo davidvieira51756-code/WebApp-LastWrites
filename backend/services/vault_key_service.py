@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from azure.identity import DefaultAzureCredential
 from azure.keyvault.keys import KeyClient
 from azure.keyvault.keys.crypto import CryptographyClient, EncryptionAlgorithm
 from cryptography.hazmat.primitives import serialization
@@ -14,8 +13,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 
 try:
+    from backend.services.azure_identity_service import build_key_vault_credential
     from backend.services.file_crypto_service import b64url_decode, public_jwk_from_rsa_public_key
 except ModuleNotFoundError:
+    from services.azure_identity_service import build_key_vault_credential
     from services.file_crypto_service import b64url_decode, public_jwk_from_rsa_public_key
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ class AzureVaultKeyService:
         if not self._key_vault_url:
             raise ValueError("Environment variable KEY_VAULT_URL is required for AzureVaultKeyService.")
 
-        self._credential = DefaultAzureCredential()
+        self._credential = build_key_vault_credential()
         self._key_client = KeyClient(
             vault_url=self._key_vault_url,
             credential=self._credential,

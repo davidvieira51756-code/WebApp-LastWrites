@@ -134,6 +134,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
     def test_worker_generates_delivery_zip_for_encrypted_vault(self) -> None:
         email = f"worker-owner-{uuid4().hex[:8]}@example.com"
         token = self._register_and_login(email)
+        recipient_email = f"recipient-{uuid4().hex[:8]}@example.com"
 
         vault = self._create_vault(
             token,
@@ -145,7 +146,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         add_recipient_response = self.client.post(
             f"/vaults/{vault_id}/recipients",
             headers=self._auth_headers(token),
-            json={"email": f"recipient-{uuid4().hex[:8]}@example.com"},
+            json={"email": recipient_email},
         )
         self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
 
@@ -184,12 +185,67 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(package_response.status_code, 200, package_response.text)
         self.assertEqual(package_response.headers.get("content-type"), "application/zip")
 
+        package_link_response = self.client.get(
+            f"/vaults/{vault_id}/delivery-package-link",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(package_link_response.status_code, 200, package_link_response.text)
+        package_link_payload = package_link_response.json()
+        self.assertIn("/local-downloads/deliveries/", package_link_payload["download_url"])
+        self.assertTrue(package_link_payload["expires_at"])
+
+        audit_response = self.client.get(
+            f"/vaults/{vault_id}/audit",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(audit_response.status_code, 200, audit_response.text)
+        audit_event_types = [event["event_type"] for event in audit_response.json()]
+        self.assertIn("login", audit_event_types)
+        self.assertIn("vault_created", audit_event_types)
+        self.assertIn("delivery_completed", audit_event_types)
+
         archive = ZipFile(io.BytesIO(package_response.content))
         archive_names = set(archive.namelist())
         self.assertIn("Delivery.pdf", archive_names)
         self.assertNotIn("00-cover.pdf", archive_names)
         self.assertIn(first_file["file_name"], archive_names)
         self.assertIn(second_file["file_name"], archive_names)
+
+    def test_activation_request_creates_audit_events(self) -> None:
+        owner_email = f"owner-audit-{uuid4().hex[:8]}@example.com"
+        recipient_email = f"recipient-audit-{uuid4().hex[:8]}@example.com"
+        owner_token = self._register_and_login(owner_email)
+        recipient_token = self._register_and_login(recipient_email)
+
+        vault = self._create_vault(
+            owner_token,
+            name="Audit Vault",
+            owner_message="Audit trail check",
+        )
+        vault_id = vault["id"]
+
+        add_recipient_response = self.client.post(
+            f"/vaults/{vault_id}/recipients",
+            headers=self._auth_headers(owner_token),
+            json={"email": recipient_email},
+        )
+        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        activation_response = self.client.post(
+            f"/vaults/{vault_id}/activation-requests",
+            headers=self._auth_headers(recipient_token),
+            json={"reason": "Threshold should start grace period."},
+        )
+        self.assertEqual(activation_response.status_code, 201, activation_response.text)
+
+        audit_response = self.client.get(
+            f"/vaults/{vault_id}/audit",
+            headers=self._auth_headers(owner_token),
+        )
+        self.assertEqual(audit_response.status_code, 200, audit_response.text)
+        audit_event_types = [event["event_type"] for event in audit_response.json()]
+        self.assertIn("activation_requested", audit_event_types)
+        self.assertIn("grace_period_started", audit_event_types)
 
 
 if __name__ == "__main__":

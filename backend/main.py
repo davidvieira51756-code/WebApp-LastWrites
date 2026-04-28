@@ -15,6 +15,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 try:
+    from backend.models.audit import AuditEventResponse
     from backend.models.auth import (
         AuthLoginRequest,
         AuthMeResponse,
@@ -30,15 +31,24 @@ try:
         VaultResponse,
         VaultUpdate,
     )
+    from backend.services.audit_service import AuditService, LocalAuditService
     from backend.services.auth_service import AuthService
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
     from backend.services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
+    from backend.services.file_safety_service import (
+        max_upload_size_bytes,
+        sanitize_filename,
+        validate_upload,
+    )
     from backend.services.keyvault_service import KeyVaultService
     from backend.services.local_blob_service import LocalBlobService
     from backend.services.local_cosmos_service import LocalCosmosService
+    from backend.services.rate_limit_service import InMemoryLoginRateLimiter
+    from backend.services.telemetry_service import configure_application_insights
     from backend.services.vault_key_service import AzureVaultKeyService, LocalVaultKeyService
 except ModuleNotFoundError:
+    from models.audit import AuditEventResponse
     from models.auth import (
         AuthLoginRequest,
         AuthMeResponse,
@@ -54,13 +64,17 @@ except ModuleNotFoundError:
         VaultResponse,
         VaultUpdate,
     )
+    from services.audit_service import AuditService, LocalAuditService
     from services.auth_service import AuthService
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
     from services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
+    from services.file_safety_service import max_upload_size_bytes, sanitize_filename, validate_upload
     from services.keyvault_service import KeyVaultService
     from services.local_blob_service import LocalBlobService
     from services.local_cosmos_service import LocalCosmosService
+    from services.rate_limit_service import InMemoryLoginRateLimiter
+    from services.telemetry_service import configure_application_insights
     from services.vault_key_service import AzureVaultKeyService, LocalVaultKeyService
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -111,6 +125,7 @@ def get_vault_file_metadata(vault_item: dict, file_id: str) -> Optional[dict]:
     )
 
 app = FastAPI(title="Last Writes Backend API", version="1.0.0")
+configure_application_insights("last-writes-backend", fastapi_app=app)
 
 frontend_origins_env = os.getenv("FRONTEND_ORIGINS", "http://localhost:3000")
 frontend_origins = [
@@ -126,6 +141,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def apply_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    if not _is_truthy(os.getenv("LOCAL_DEV_MODE", "false")):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 
 def get_cosmos_service(request: Request) -> CosmosService:
@@ -156,6 +185,16 @@ def get_auth_service(request: Request) -> AuthService:
             detail="Auth service is not initialized.",
         )
     return auth_service
+
+
+def get_audit_service(request: Request):
+    audit_service = getattr(request.app.state, "audit_service", None)
+    if audit_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Audit service is not initialized.",
+        )
+    return audit_service
 
 
 def get_vault_key_service(request: Request):
@@ -269,6 +308,53 @@ def _download_vault_file_bytes(
     return plaintext
 
 
+def _get_client_ip(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").strip()
+    if forwarded_for:
+        first_hop = forwarded_for.split(",", 1)[0].strip()
+        if first_hop:
+            return first_hop
+
+    if request.client and request.client.host:
+        return request.client.host
+
+    return "unknown"
+
+
+def _build_login_rate_limit_key(request: Request, email: str) -> str:
+    return f"{_get_client_ip(request)}|{email.strip().lower()}"
+
+
+def _record_audit_event(
+    audit_service,
+    *,
+    owner_user_id: str,
+    event_type: str,
+    vault_id: Optional[str] = None,
+    actor_user_id: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    actor_type: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        audit_service.record_event(
+            owner_user_id=owner_user_id,
+            event_type=event_type,
+            vault_id=vault_id,
+            actor_user_id=actor_user_id,
+            actor_email=actor_email,
+            actor_type=actor_type,
+            details=details,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to persist audit event. owner_user_id=%s event_type=%s vault_id=%s",
+            owner_user_id,
+            event_type,
+            vault_id,
+        )
+
+
 def get_current_user(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(auth_bearer),
@@ -359,6 +445,8 @@ def startup_event() -> None:
         if local_dev_mode:
             cosmos_service = LocalCosmosService()
             cosmos_service.initialize()
+            audit_service = LocalAuditService()
+            audit_service.initialize()
             blob_service = LocalBlobService()
             blob_service.initialize()
             auth_service = AuthService()
@@ -373,6 +461,10 @@ def startup_event() -> None:
                 connection_string=secure_settings["cosmos_connection_string"]
             )
             cosmos_service.initialize()
+            audit_service = AuditService(
+                connection_string=secure_settings["cosmos_connection_string"]
+            )
+            audit_service.initialize()
 
             blob_service = BlobService(
                 connection_string=secure_settings["blob_connection_string"]
@@ -392,9 +484,11 @@ def startup_event() -> None:
             logger.info("Application startup completed.")
 
         app.state.cosmos_service = cosmos_service
+        app.state.audit_service = audit_service
         app.state.blob_service = blob_service
         app.state.auth_service = auth_service
         app.state.vault_key_service = vault_key_service
+        app.state.login_rate_limiter = InMemoryLoginRateLimiter()
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise
@@ -523,6 +617,8 @@ def verify_email(payload: EmailVerificationRequest, request: Request):
 def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenResponse:
     cosmos_service = get_cosmos_service(request)
     auth_service = get_auth_service(request)
+    audit_service = get_audit_service(request)
+    rate_limiter = getattr(request.app.state, "login_rate_limiter", None)
 
     normalized_email = auth_service.normalize_email(payload.email)
     if not is_valid_email(normalized_email):
@@ -530,6 +626,16 @@ def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenRespo
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A valid email is required.",
         )
+
+    rate_limit_key = _build_login_rate_limit_key(request, normalized_email)
+    if rate_limiter is not None:
+        retry_after_seconds = rate_limiter.get_retry_after_seconds(rate_limit_key)
+        if retry_after_seconds > 0:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many login attempts. Try again later.",
+                headers={"Retry-After": str(retry_after_seconds)},
+            )
 
     try:
         user_item = cosmos_service.get_user_by_email(normalized_email)
@@ -541,6 +647,14 @@ def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenRespo
         ) from None
 
     if user_item is None:
+        if rate_limiter is not None:
+            retry_after_seconds = rate_limiter.register_failure(rate_limit_key)
+            if retry_after_seconds > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many login attempts. Try again later.",
+                    headers={"Retry-After": str(retry_after_seconds)},
+                )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials.",
@@ -549,6 +663,14 @@ def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenRespo
 
     password_hash = str(user_item.get("password_hash", ""))
     if not auth_service.verify_password(payload.password, password_hash):
+        if rate_limiter is not None:
+            retry_after_seconds = rate_limiter.register_failure(rate_limit_key)
+            if retry_after_seconds > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many login attempts. Try again later.",
+                    headers={"Retry-After": str(retry_after_seconds)},
+                )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials.",
@@ -557,10 +679,25 @@ def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenRespo
 
     email_verified = bool(user_item.get("is_email_verified", False))
     if auth_service.should_require_email_verification() and not email_verified:
+        if rate_limiter is not None:
+            rate_limiter.reset(rate_limit_key)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email verification is required before signing in.",
         )
+
+    if rate_limiter is not None:
+        rate_limiter.reset(rate_limit_key)
+
+    _record_audit_event(
+        audit_service,
+        owner_user_id=str(user_item.get("id", "")),
+        event_type="login",
+        actor_user_id=str(user_item.get("id", "")),
+        actor_email=str(user_item.get("email", "")),
+        actor_type="owner",
+        details={"ip_address": _get_client_ip(request)},
+    )
 
     token_payload = auth_service.issue_access_token(user_item)
     return AuthTokenResponse(
@@ -589,6 +726,7 @@ def create_vault(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> VaultResponse:
     cosmos_service = get_cosmos_service(request)
+    audit_service = get_audit_service(request)
     vault_key_service = get_vault_key_service(request)
     vault_payload = vault.model_dump(exclude_unset=True)
     vault_id = str(uuid4())
@@ -605,6 +743,19 @@ def create_vault(
             vault_payload["recipients"] = normalize_recipients(recipients)
         vault_payload.update(vault_key_service.ensure_vault_key(vault_id))
         created_item = cosmos_service.create_vault(vault_payload)
+        _record_audit_event(
+            audit_service,
+            owner_user_id=str(current_user.get("id", "")),
+            event_type="vault_created",
+            vault_id=vault_id,
+            actor_user_id=str(current_user.get("id", "")),
+            actor_email=str(current_user.get("email", "")),
+            actor_type="owner",
+            details={
+                "vault_name": str(created_item.get("name", "")),
+                "recipient_count": len(created_item.get("recipients", []) or []),
+            },
+        )
         return VaultResponse(**created_item)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -719,6 +870,37 @@ def get_vault(
     return VaultResponse(**vault_item)
 
 
+@app.get("/vaults/{vault_id}/audit", response_model=List[AuditEventResponse])
+def list_vault_audit_events(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[AuditEventResponse]:
+    cosmos_service = get_cosmos_service(request)
+    audit_service = get_audit_service(request)
+    owner_user_id = str(current_user.get("id", "")).strip()
+
+    get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=owner_user_id,
+    )
+
+    try:
+        audit_items = audit_service.list_events_for_vault(
+            owner_user_id=owner_user_id,
+            vault_id=vault_id,
+        )
+    except Exception:
+        logger.exception("Unhandled error while listing audit events for vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list audit events.",
+        ) from None
+
+    return [AuditEventResponse(**audit_item) for audit_item in audit_items]
+
+
 @app.patch("/vaults/{vault_id}", response_model=VaultResponse)
 def update_vault(
     vault_id: str,
@@ -823,6 +1005,7 @@ def check_in_vault(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> VaultResponse:
     cosmos_service = get_cosmos_service(request)
+    audit_service = get_audit_service(request)
     get_owned_vault_or_404(
         cosmos_service=cosmos_service,
         vault_id=vault_id,
@@ -845,6 +1028,17 @@ def check_in_vault(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Vault not found.",
         )
+
+    _record_audit_event(
+        audit_service,
+        owner_user_id=str(current_user.get("id", "")),
+        event_type="check_in",
+        vault_id=vault_id,
+        actor_user_id=str(current_user.get("id", "")),
+        actor_email=str(current_user.get("email", "")),
+        actor_type="owner",
+        details={"status": str(updated_vault.get("status", ""))},
+    )
 
     return VaultResponse(**updated_vault)
 
@@ -941,12 +1135,78 @@ def download_delivery_package(
             detail="Failed to download delivery package.",
         ) from None
 
-    file_name = str(vault_item.get("delivery_file_name", "")).strip() or f"{vault_id}-delivery.zip"
+    file_name = sanitize_filename(
+        str(vault_item.get("delivery_file_name", "")).strip() or f"{vault_id}-delivery.zip"
+    )
     return Response(
         content=payload,
         media_type="application/zip",
         headers=_build_attachment_headers(file_name),
     )
+
+
+@app.get("/vaults/{vault_id}/delivery-package-link")
+def get_delivery_package_link(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    blob_service = get_blob_service(request)
+
+    try:
+        vault_item = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception("Unhandled error while reading delivery link for vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve delivery package link.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
+
+    current_user_id = str(current_user.get("id", "")).strip()
+    current_email = str(current_user.get("email", "")).strip().lower()
+    is_owner = str(vault_item.get("user_id", "")).strip() == current_user_id
+    is_recipient = _is_vault_recipient(vault_item, current_email)
+    if not is_owner and not is_recipient:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
+
+    delivery_container_name = str(vault_item.get("delivery_container_name", "")).strip()
+    delivery_blob_name = str(vault_item.get("delivery_blob_name", "")).strip()
+    if not delivery_container_name or not delivery_blob_name:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The delivery package is not available yet.",
+        )
+
+    try:
+        sas_payload = blob_service.generate_read_sas_url(
+            container_name=delivery_container_name,
+            blob_name=delivery_blob_name,
+            expires_in_minutes=int(os.getenv("DELIVERY_SAS_TTL_MINUTES", "1440")),
+        )
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The delivery package could not be found.",
+        ) from None
+    except Exception:
+        logger.exception("Failed to generate delivery package link for vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate delivery package link.",
+        ) from None
+
+    return {
+        "vault_id": vault_id,
+        "file_name": sanitize_filename(
+            str(vault_item.get("delivery_file_name", "")).strip() or f"{vault_id}-delivery.zip"
+        ),
+        "download_url": sas_payload["url"],
+        "expires_at": sas_payload["expires_at"],
+    }
 
 
 @app.post(
@@ -961,6 +1221,7 @@ def submit_activation_request(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> RecipientVaultSummary:
     cosmos_service = get_cosmos_service(request)
+    audit_service = get_audit_service(request)
     recipient_email = str(current_user.get("email", "")).strip().lower()
 
     if not recipient_email:
@@ -970,6 +1231,8 @@ def submit_activation_request(
         )
 
     try:
+        previous_vault = cosmos_service.get_vault_by_id(vault_id)
+        previous_status = str(previous_vault.get("status", "")) if previous_vault else ""
         updated_vault, outcome = cosmos_service.add_activation_request(
             vault_id=vault_id,
             recipient_email=recipient_email,
@@ -1000,6 +1263,37 @@ def submit_activation_request(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This vault is no longer accepting activation requests.",
+        )
+
+    owner_user_id = str(updated_vault.get("user_id", "")).strip()
+    _record_audit_event(
+        audit_service,
+        owner_user_id=owner_user_id,
+        event_type="activation_requested",
+        vault_id=vault_id,
+        actor_user_id=str(current_user.get("id", "")),
+        actor_email=recipient_email,
+        actor_type="recipient",
+        details={
+            "reason": payload.reason,
+            "activation_requests_count": len(updated_vault.get("activation_requests", []) or []),
+            "status": str(updated_vault.get("status", "")),
+        },
+    )
+    if previous_status != "grace_period" and str(updated_vault.get("status", "")) == "grace_period":
+        _record_audit_event(
+            audit_service,
+            owner_user_id=owner_user_id,
+            event_type="grace_period_started",
+            vault_id=vault_id,
+            actor_user_id=str(current_user.get("id", "")),
+            actor_email=recipient_email,
+            actor_type="system",
+            details={
+                "grace_period_started_at": updated_vault.get("grace_period_started_at"),
+                "grace_period_expires_at": updated_vault.get("grace_period_expires_at"),
+                "activation_requests_count": len(updated_vault.get("activation_requests", []) or []),
+            },
         )
 
     return _build_recipient_vault_summary(updated_vault, recipient_email)
@@ -1282,7 +1576,7 @@ def download_vault_file(
             detail="Failed to download file.",
         ) from None
 
-    file_name = str(file_metadata.get("file_name", "")).strip() or f"{file_id}.bin"
+    file_name = sanitize_filename(str(file_metadata.get("file_name", "")).strip() or f"{file_id}.bin")
     media_type = str(file_metadata.get("content_type", "")).strip() or "application/octet-stream"
     return Response(
         content=payload,
@@ -1398,7 +1692,13 @@ async def upload_vault_file(
             vault_item=vault_item,
         )
 
-        plaintext_bytes = await file.read()
+        plaintext_bytes = await file.read(max_upload_size_bytes() + 1)
+        sanitized_file_name = sanitize_filename(file.filename)
+        validate_upload(
+            sanitized_file_name,
+            file.content_type,
+            len(plaintext_bytes),
+        )
         encryption_payload = encrypt_file_bytes(
             plaintext_bytes,
             vault_item.get("public_jwk", {}),
@@ -1407,7 +1707,7 @@ async def upload_vault_file(
         uploaded_blob_metadata = blob_service.upload_bytes(
             vault_id=vault_id,
             payload=encryption_payload["ciphertext"],
-            file_name=file.filename,
+            file_name=sanitized_file_name,
             content_type=file.content_type,
             blob_content_type="application/octet-stream",
         )
@@ -1436,6 +1736,11 @@ async def upload_vault_file(
             "vault_id": vault_id,
             "file": uploaded_file_metadata,
         }
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
     except HTTPException:
         raise
     except Exception:

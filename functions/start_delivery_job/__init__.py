@@ -11,8 +11,11 @@ import azure.functions as func
 from azure.cosmos import CosmosClient, exceptions
 from azure.identity import DefaultAzureCredential
 
+from shared_telemetry import configure_application_insights
+
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+configure_application_insights("last-writes-start-delivery-job")
 
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
