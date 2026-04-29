@@ -1,0 +1,47 @@
+<step title="Incoming Request" date="2026-04-28T22:02:08.728" instance="97ff5b" url="/api/publish?type=zip&amp;restart=True&amp;clean=True" method="POST" type="request" pid="831,1,20" Accept="*/*" Host="api-lastwrites-q70u2m.scm.azurewebsites.net" User-Agent="AZURECLI/2.85.0 (MSI)" Accept-Encoding="gzip, deflate" Authorization="Bas..." Cache-Control="no-cache" Content-Type="application/octet-stream" Cookie="ARRAffinity=97ff5ba4585c527db3cb6e73e0db448db892e73539fbd16224904bdfade808a0; ARRAffinitySameSite=97ff5ba4585c527db3cb6e73e0db448db892e73539fbd16224904bdfade808a0" Content-Length="28653" x-ms-client-request-id="dc9250a9-434d-11f1-82f2-48684aa84d0e" x-ms-artifact-checksum="4a42c1bc4368054974724cf71e391aa44f1eed60335e4259a969766980c5b4a6" X-ARR-LOG-ID="dc9250a9-434d-11f1-82f2-48684aa84d0e" CLIENT-IP="37.189.23.97:57605" X-SITE-DEPLOYMENT-ID="api-lastwrites-q70u2m" WAS-DEFAULT-HOSTNAME="api-lastwrites-q70u2m.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/publish?type=zip&amp;restart=True&amp;clean=True" X-Client-IP="37.189.23.97" X-Client-Port="57605" >
+  <step title="OneDeploy" date="2026-04-28T22:02:09.129" >
+    <step title="None repository commit" date="2026-04-28T22:02:09.218" >
+      <step title="Commit id: 8017b646-9c28-4062-a1c6-373d8882a35a" date="2026-04-28T22:02:09.237" Message="N/A" AuthorName="N/A" AuthorEmail="N/A" /><!-- duration: 13ms -->
+    </step><!-- duration: 91ms -->
+    <step title="Starting PushDeployAsync" date="2026-04-28T22:02:09.387" /><!-- duration: 11ms -->
+    <step title="Writing artifact to /tmp/zipdeploy/a3805eda-9fdc-4cdc-98d9-382c85d3173f.zip" date="2026-04-28T22:02:09.477" >
+      <step title="Writing multipart request body to /tmp/zipdeploy/a3805eda-9fdc-4cdc-98d9-382c85d3173f.zip" date="2026-04-28T22:02:09.498" /><!-- duration: 10ms -->
+    </step><!-- duration: 537ms -->
+    <step title="Attempting to fetch target branch HEAD" date="2026-04-28T22:02:10.153" /><!-- duration: 18ms -->
+    <step title="Acquiring Deployment Lock" date="2026-04-28T22:02:10.183" /><!-- duration: 28ms -->
+    <step title="Acquired Deployment Lock" date="2026-04-28T22:02:10.411" /><!-- duration: 12ms -->
+    <step title="Performing fetch based deployment" date="2026-04-28T22:02:10.463" >
+      <step title="Creating temporary deployment" date="2026-04-28T22:02:10.482" /><!-- duration: 489ms -->
+      <step title="Releasing Deployment Lock" date="2026-04-28T22:02:12.865" /><!-- duration: 28ms -->
+      <step title="Cleaning up temp folders from previous zip deployments and extracting pushed zip file /tmp/zipdeploy/a3805eda-9fdc-4cdc-98d9-382c85d3173f.zip (0.03 MB) to /tmp/zipdeploy/extracted" date="2026-04-28T22:02:13.023" >
+        <step title="ChmodRecursive Process exited with total time taken in ms: 169" date="2026-04-28T22:02:13.313" /><!-- duration: 60ms -->
+      </step><!-- duration: 379ms -->
+      <step title="None repository commit" date="2026-04-28T22:02:13.423" >
+        <step title="Commit id: 8017b646-9c28-4062-a1c6-373d8882a35a" date="2026-04-28T22:02:13.442" Message="OneDeploy" AuthorName="N/A" AuthorEmail="N/A" /><!-- duration: 12ms -->
+      </step><!-- duration: 60ms -->
+      <step title="Deployment timer started" date="2026-04-28T22:02:15.532" >
+        <step title="DeploymentManager.Deploy(id:8017b646-9c28-4062-a1c6-373d8882a35a)" date="2026-04-28T22:02:15.692" >
+          <step title="Collecting changeset information" date="2026-04-28T22:02:15.852" /><!-- duration: 390ms -->
+          <step title="Updating submodules" date="2026-04-28T22:02:16.305" /><!-- duration: 1787ms -->
+          <step title="Determining deployment builder" date="2026-04-28T22:02:19.312" >
+            <step title="Builder is OryxBuilder" date="2026-04-28T22:02:19.504" /><!-- duration: 18ms -->
+          </step><!-- duration: 232ms -->
+          <step title="PreDeployment: context.CleanOutputPath False" date="2026-04-28T22:02:19.692" >
+            <step title="PreDeployment: context.OutputPath /home/site/wwwroot" date="2026-04-28T22:02:20.154" >
+              <step title="Building" date="2026-04-28T22:02:20.844" >
+                <step title="Executing external process" date="2026-04-28T22:02:23.072" type="process" path="bash" arguments="-c &quot;oryx build /tmp/zipdeploy/extracted -o /home/site/wwwroot --platform python --platform-version 3.11 -p virtualenv_name=antenv --log-file /tmp/build-debug.log  -i /tmp/8dea571d15d9704 --compress-destination-dir | tee /tmp/oryx-build.log ; exit $PIPESTATUS &quot;" /><!-- duration: 119066ms -->
+                <step title="Using PythonDeploymentLogParser" date="2026-04-28T22:04:22.741" /><!-- duration: 4ms -->
+                <step title="Modified file to trigger a restart of the app container." date="2026-04-28T22:04:24.411" /><!-- duration: 4ms -->
+                <step title="Skip function trigger and logicapp sync because function is not enabled." date="2026-04-28T22:04:24.430" /><!-- duration: 4ms -->
+              </step><!-- duration: 124438ms -->
+            </step><!-- duration: 125137ms -->
+            <step title="Cleaning up temp files" date="2026-04-28T22:04:25.296" /><!-- duration: 1842ms -->
+            <step title="Cleaning up temp files" date="2026-04-28T22:04:27.144" /><!-- duration: 507ms -->
+            <step title="Reloading status file with latest updates" date="2026-04-28T22:04:27.716" >
+              <step title="WebHooksManager.PublishEventAsync: PostDeployment" date="2026-04-28T22:04:27.721" /><!-- duration: 155ms -->
+            </step><!-- duration: 165ms -->
+            <step title="Cleaning up temporary deployment - fetch deployment was successful" date="2026-04-28T22:04:27.888" /><!-- duration: 4ms -->
+          </step><!-- duration: 128241ms -->
+        </step><!-- duration: 132253ms -->
+        <step title="Outgoing response" date="2026-04-28T22:04:27.960" type="response" statusCode="200" statusText="OK" /><!-- duration: 4ms -->
+      </step><!-- duration: 132436ms -->
