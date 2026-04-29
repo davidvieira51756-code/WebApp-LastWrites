@@ -244,26 +244,6 @@ function New-StorageAccountName {
     return $name
 }
 
-function New-KeyVaultName {
-    param(
-        [Parameter(Mandatory = $true)][string]$BaseName,
-        [int]$RandomLength = 4
-    )
-
-    $suffix = New-RandomToken -Length $RandomLength
-    $maxBaseLength = 24 - $RandomLength - 1
-    $normalizedBaseName = $BaseName.ToLower()
-    if ($normalizedBaseName.Length -gt $maxBaseLength) {
-        $normalizedBaseName = $normalizedBaseName.Substring(0, $maxBaseLength).TrimEnd('-')
-    }
-
-    if ([string]::IsNullOrWhiteSpace($normalizedBaseName)) {
-        throw "Unable to generate a valid Key Vault base name from '$BaseName'."
-    }
-
-    return "$normalizedBaseName-$suffix"
-}
-
 function Test-BlobEndpointExists {
     param(
         [Parameter(Mandatory = $true)][string]$StorageAccountName
@@ -1091,29 +1071,7 @@ try {
     }
 
     if (-not $keyVaultExists) {
-        $keyVaultCreated = $false
-        for ($keyVaultAttempt = 1; $keyVaultAttempt -le 12; $keyVaultAttempt++) {
-            try {
-                Invoke-AzCli -Arguments @("keyvault", "create", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "--location", $Location, "--enable-rbac-authorization", "false", "-o", "none") | Out-Null
-                $keyVaultCreated = $true
-                break
-            }
-            catch {
-                $errorMessage = $_.Exception.Message
-                if ($errorMessage -match "VaultAlreadyExists" -and $keyVaultAttempt -lt 12) {
-                    $previousKeyVaultName = $keyVaultName
-                    $keyVaultName = New-KeyVaultName -BaseName $keyVaultName
-                    Write-Warning "Key Vault name '$previousKeyVaultName' is unavailable globally. Retrying with '$keyVaultName'."
-                    continue
-                }
-
-                throw
-            }
-        }
-
-        if (-not $keyVaultCreated) {
-            throw "Unable to create a Key Vault after multiple attempts."
-        }
+        Invoke-AzCli -Arguments @("keyvault", "create", "--name", $keyVaultName, "--resource-group", $ResourceGroupName, "--location", $Location, "--enable-rbac-authorization", "false", "-o", "none") | Out-Null
     }
     else {
         Write-Host "Key Vault '$keyVaultName' already exists. Reusing existing vault." -ForegroundColor Yellow
