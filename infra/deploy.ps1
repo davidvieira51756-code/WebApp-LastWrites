@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Location = "switzerlandnorth",
+    [string]$Location = "italynorth",
     [string]$Prefix = "lastwrites",
     [string]$ResourceGroupName = "rg-lastwrites-516251",
     [string]$GithubRepo = "",
@@ -155,6 +155,9 @@ function Get-AzCliRaw {
     )
 
     $output = Invoke-AzCli -Arguments $Arguments
+    if ($null -eq $output) {
+        return ""
+    }
     return Normalize-AzCliOutput -Output $output
 }
 
