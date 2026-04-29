@@ -2,7 +2,7 @@
 param(
     [string]$Location = "italynorth",
     [string]$Prefix = "lastwrites",
-    [string]$ResourceGroupName = "rg-lastwrites-5101021",
+    [string]$ResourceGroupName = "rg-lastwrites-516251",
     [string]$GithubRepo = "",
     [switch]$SetGithubSecrets,
     [switch]$RerunWorkflowRuns,
@@ -24,6 +24,7 @@ function Ensure-Command {
         throw "Required command '$Name' was not found in PATH."
     }
 }
+
 
 function Format-AzCliArgumentsForError {
     param(
@@ -452,22 +453,48 @@ function Resolve-ContainerAppJobPrincipalId {
 
     $maxAttempts = 12
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-        $principalId = Get-AzCliTsv -Arguments @(
-            "containerapp", "job", "identity", "show",
-            "--name", $JobName,
-            "--resource-group", $ResourceGroupName,
-            "--query", "principalId",
-            "-o", "tsv"
-        )
+        $principalId = ""
 
-        if (-not (Test-IsGuid -Value $principalId)) {
+        try {
             $principalId = Get-AzCliTsv -Arguments @(
-                "containerapp", "job", "show",
+                "containerapp", "job", "identity", "show",
                 "--name", $JobName,
                 "--resource-group", $ResourceGroupName,
-                "--query", "identity.principalId",
+                "--query", "principalId",
                 "-o", "tsv"
             )
+        }
+        catch {
+            $message = $_.Exception.Message
+            if ($message -notmatch "Precondition Failed" -or $attempt -eq $maxAttempts) {
+                throw
+            }
+
+            Write-Warning "Container Apps job identity endpoint is not ready yet for '$JobName'. Retrying in 10 seconds ($attempt/$maxAttempts)."
+            Start-Sleep -Seconds 10
+            continue
+        }
+
+        if (-not (Test-IsGuid -Value $principalId)) {
+            try {
+                $principalId = Get-AzCliTsv -Arguments @(
+                    "containerapp", "job", "show",
+                    "--name", $JobName,
+                    "--resource-group", $ResourceGroupName,
+                    "--query", "identity.principalId",
+                    "-o", "tsv"
+                )
+            }
+            catch {
+                $message = $_.Exception.Message
+                if ($message -notmatch "Precondition Failed" -or $attempt -eq $maxAttempts) {
+                    throw
+                }
+
+                Write-Warning "Container Apps job resource view is not ready yet for '$JobName'. Retrying in 10 seconds ($attempt/$maxAttempts)."
+                Start-Sleep -Seconds 10
+                continue
+            }
         }
 
         if (Test-IsGuid -Value $principalId) {
@@ -502,6 +529,195 @@ function Test-AcrTagExists {
     }
 
     return [string]::Equals($matchingTag.Trim(), $Tag, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-FunctionExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$FunctionAppName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$FunctionName
+    )
+
+    try {
+        $function = Get-AzCliJson -Arguments @(
+            "functionapp", "function", "show",
+            "--name", $FunctionAppName,
+            "--resource-group", $ResourceGroupName,
+            "--function-name", $FunctionName,
+            "-o", "json"
+        )
+    }
+    catch {
+        return $false
+    }
+
+    return $null -ne $function -and -not [string]::IsNullOrWhiteSpace([string]$function.id)
+}
+
+function Test-EventGridSubscriptionExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$EventSubscriptionName,
+        [Parameter(Mandatory = $true)][string]$SourceResourceId
+    )
+
+    try {
+        $eventSubscription = Get-AzCliJson -Arguments @(
+            "eventgrid", "event-subscription", "show",
+            "--name", $EventSubscriptionName,
+            "--source-resource-id", $SourceResourceId,
+            "-o", "json"
+        )
+    }
+    catch {
+        return $false
+    }
+
+    return $null -ne $eventSubscription -and -not [string]::IsNullOrWhiteSpace([string]$eventSubscription.id)
+}
+
+function Get-OrCreateGithubActionsAzureCredentialsJson {
+    param(
+        [Parameter(Mandatory = $true)][string]$ResourceGroupScope,
+        [Parameter(Mandatory = $true)][string]$PrincipalDisplayName
+    )
+
+    $existingAppId = Get-AzCliTsv -Arguments @(
+        "ad", "sp", "list",
+        "--display-name", $PrincipalDisplayName,
+        "--query", "[0].appId",
+        "-o", "tsv"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($existingAppId)) {
+        return Get-AzCliRaw -Arguments @(
+            "ad", "sp", "create-for-rbac",
+            "--name", $PrincipalDisplayName,
+            "--role", "Contributor",
+            "--scopes", $ResourceGroupScope,
+            "--json-auth", "true",
+            "-o", "json"
+        )
+    }
+
+    $principalObjectId = Get-AzCliTsv -Arguments @(
+        "ad", "sp", "show",
+        "--id", $existingAppId,
+        "--query", "id",
+        "-o", "tsv"
+    )
+    Ensure-RoleAssignment -PrincipalId $principalObjectId -RoleName "Contributor" -Scope $ResourceGroupScope
+
+    $credentialReset = Get-AzCliJson -Arguments @(
+        "ad", "sp", "credential", "reset",
+        "--id", $existingAppId,
+        "-o", "json"
+    )
+    $accountInfo = Get-AzCliJson -Arguments @("account", "show", "-o", "json")
+
+    $authPayload = [ordered]@{
+        clientId       = [string]$credentialReset.appId
+        clientSecret   = [string]$credentialReset.password
+        subscriptionId = [string]$accountInfo.id
+        tenantId       = [string]$credentialReset.tenant
+    }
+
+    return ($authPayload | ConvertTo-Json -Compress)
+}
+
+function Wait-GithubWorkflowRun {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$WorkflowName,
+        [int]$Attempts = 90,
+        [int]$DelaySeconds = 10
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $runState = Get-GhRaw -Arguments @(
+            "run", "view", $RunId,
+            "--repo", $Repo,
+            "--json", "status,conclusion",
+            "-q", "{status: .status, conclusion: .conclusion}"
+        ) | ConvertFrom-Json
+
+        if ($runState.status -eq "completed") {
+            if ($runState.conclusion -ne "success") {
+                throw "GitHub Actions workflow '$WorkflowName' finished with conclusion '$($runState.conclusion)'."
+            }
+            return
+        }
+
+        if ($attempt -lt $Attempts) {
+            Write-Warning "Workflow '$WorkflowName' is '$($runState.status)'. Waiting $DelaySeconds seconds ($attempt/$Attempts)."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    throw "GitHub Actions workflow '$WorkflowName' did not complete in time."
+}
+
+function Wait-FunctionAvailable {
+    param(
+        [Parameter(Mandatory = $true)][string]$FunctionAppName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$FunctionName,
+        [int]$Attempts = 18,
+        [int]$DelaySeconds = 10
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        if (Test-FunctionExists -FunctionAppName $FunctionAppName -ResourceGroupName $ResourceGroupName -FunctionName $FunctionName) {
+            return $true
+        }
+
+        if ($attempt -lt $Attempts) {
+            Write-Warning "Function '$FunctionName' is not available yet in '$FunctionAppName'. Retrying in $DelaySeconds seconds ($attempt/$Attempts)."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return $false
+}
+
+function Set-ContainerAppJobRegistry {
+    param(
+        [Parameter(Mandatory = $true)][string]$JobName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$RegistryServer,
+        [Parameter(Mandatory = $true)][string]$RegistryUsername,
+        [Parameter(Mandatory = $true)][string]$RegistryPassword
+    )
+
+    try {
+        Invoke-AzCliWithRetry -Arguments @(
+            "containerapp", "job", "registry", "set",
+            "--name", $JobName,
+            "--resource-group", $ResourceGroupName,
+            "--server", $RegistryServer,
+            "--identity", "system",
+            "-o", "none"
+        ) -Attempts 3 -DelaySeconds 10 -RetryDescription "Configuring Container Apps job registry with managed identity" | Out-Null
+        return
+    }
+    catch {
+        $message = $_.Exception.Message
+        if ($message -notmatch "Precondition Failed") {
+            throw
+        }
+
+        Write-Warning "Container Apps job registry managed identity configuration returned 'Precondition Failed'. Falling back to ACR admin credentials for image pulls."
+    }
+
+    Invoke-AzCliWithRetry -Arguments @(
+        "containerapp", "job", "registry", "set",
+        "--name", $JobName,
+        "--resource-group", $ResourceGroupName,
+        "--server", $RegistryServer,
+        "--username", $RegistryUsername,
+        "--password", $RegistryPassword,
+        "-o", "none"
+    ) -Attempts 3 -DelaySeconds 10 -RetryDescription "Configuring Container Apps job registry with ACR credentials" | Out-Null
 }
 
 function Get-PolicyAllowedLocations {
@@ -964,14 +1180,7 @@ try {
     Ensure-RoleAssignment -PrincipalId $deliveryJobPrincipalId -RoleName "AcrPull" -Scope $acrId
     Ensure-RoleAssignment -PrincipalId $functionPrincipalId -RoleName "Container Apps Jobs Operator" -Scope $deliveryJobResourceId
 
-    Invoke-AzCli -Arguments @(
-        "containerapp", "job", "registry", "set",
-        "--name", $containerAppsJobName,
-        "--resource-group", $ResourceGroupName,
-        "--server", $acrLoginServer,
-        "--identity", "system",
-        "-o", "none"
-    ) | Out-Null
+    Set-ContainerAppJobRegistry -JobName $containerAppsJobName -ResourceGroupName $ResourceGroupName -RegistryServer $acrLoginServer -RegistryUsername $acrUsername -RegistryPassword $acrPassword
 
     if (Test-AcrTagExists -RegistryName $acrName -RepositoryName "lastwrites-worker" -Tag "latest") {
         Invoke-AzCli -Arguments $updateJobArguments | Out-Null
@@ -994,43 +1203,8 @@ try {
     Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "KEY_VAULT_RSA_KEY_SIZE=2048", "KEY_VAULT_RSA_HARDWARE_PROTECTED=false", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "AUTH_SECRET_KEY=$authSecretKey", "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl", "AUTH_ACCESS_TOKEN_TTL_MINUTES=120", "AUTH_REQUIRE_EMAIL_VERIFICATION=true", "AUTH_EXPOSE_VERIFICATION_TOKEN=false", "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440", "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000", "SCM_DO_BUILD_DURING_DEPLOYMENT=true", "ENABLE_ORYX_BUILD=true", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "python -m uvicorn main:app --host 0.0.0.0 --port 8000", "-o", "none") | Out-Null
-    Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "node server.js", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "HOSTNAME=0.0.0.0 node /home/site/wwwroot/server.js", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("functionapp", "config", "appsettings", "set", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--settings", "COSMOS_CONNECTION_STRING=$cosmosConnectionString", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "EVENT_GRID_ENDPOINT=$eventGridEndpoint", "EVENT_GRID_KEY=$eventGridKey", "BLOB_CONNECTION_STRING=$blobConnectionString", "AZURE_SUBSCRIPTION_ID=$subscriptionId", "CONTAINER_APPS_RESOURCE_GROUP=$ResourceGroupName", "CONTAINER_APPS_JOB_NAME=$containerAppsJobName", "CONTAINER_APPS_API_VERSION=2024-03-01", "-o", "none") | Out-Null
-
-    Write-Step "Ensuring Event Grid subscription to start_delivery_job function"
-    $startDeliveryJobFunctionExists = $false
-    try {
-        $startDeliveryJobFunction = Get-AzCliJson -Arguments @("functionapp", "function", "show", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--function-name", "start_delivery_job", "-o", "json")
-        $startDeliveryJobFunctionExists = $null -ne $startDeliveryJobFunction -and -not [string]::IsNullOrWhiteSpace([string]$startDeliveryJobFunction.id)
-    }
-    catch {
-        $startDeliveryJobFunctionExists = $false
-    }
-
-    if ($startDeliveryJobFunctionExists) {
-        $eventGridTopicId = Get-AzCliTsv -Arguments @("eventgrid", "topic", "show", "--name", $eventGridTopicName, "--resource-group", $ResourceGroupName, "--query", "id", "-o", "tsv")
-        $startDeliveryJobFunctionResourceId = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$functionAppName/functions/start_delivery_job"
-
-        $eventSubscriptionExists = $false
-        try {
-            $existingEventSubscription = Get-AzCliJson -Arguments @("eventgrid", "event-subscription", "show", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "-o", "json")
-            $eventSubscriptionExists = $null -ne $existingEventSubscription -and -not [string]::IsNullOrWhiteSpace([string]$existingEventSubscription.id)
-        }
-        catch {
-            $eventSubscriptionExists = $false
-        }
-
-        if (-not $eventSubscriptionExists) {
-            Invoke-AzCli -Arguments @("eventgrid", "event-subscription", "create", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "--endpoint-type", "azurefunction", "--endpoint", $startDeliveryJobFunctionResourceId, "--included-event-types", "GracePeriodExpired", "-o", "none") | Out-Null
-        }
-        else {
-            Write-Host "Event subscription '$eventSubscriptionName' already exists. Updating endpoint to start_delivery_job." -ForegroundColor Yellow
-            Invoke-AzCli -Arguments @("eventgrid", "event-subscription", "update", "--name", $eventSubscriptionName, "--source-resource-id", $eventGridTopicId, "--endpoint-type", "azurefunction", "--endpoint", $startDeliveryJobFunctionResourceId, "--included-event-types", "GracePeriodExpired", "-o", "none") | Out-Null
-        }
-    }
-    else {
-        Write-Warning "Function 'start_delivery_job' was not found in '$functionAppName'. Event subscription '$eventSubscriptionName' was not created. Deploy function code first, then run infra/deploy.ps1 again to attach Event Grid."
-    }
 
     if (-not $SkipLocalFileUpdate) {
         Write-Step "Writing local development config files"
@@ -1100,16 +1274,9 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
 
         $backendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--xml")
         $frontendPublishProfile = Get-AzCliRaw -Arguments @("webapp", "deployment", "list-publishing-profiles", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--xml")
-
-        $functionsPublishProfile = ""
-        $canSetFunctionsPublishProfile = $true
-        try {
-            $functionsPublishProfile = Get-AzCliRaw -Arguments @("functionapp", "deployment", "list-publishing-profiles", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--xml")
-        }
-        catch {
-            $canSetFunctionsPublishProfile = $false
-            Write-Warning "Skipping AZURE_FUNCTIONAPP_PUBLISH_PROFILE for '$functionAppName'. This Function App may be using Flex Consumption and does not support publish profile deployment."
-        }
+        $resourceGroupScope = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName"
+        $githubActionsPrincipalName = "gha-$prefixDashed-$token"
+        $azureCredentialsJson = Get-OrCreateGithubActionsAzureCredentialsJson -ResourceGroupScope $resourceGroupScope -PrincipalDisplayName $githubActionsPrincipalName
 
         Set-OrUpdateGithubSecret -Name "AZURE_BACKEND_WEBAPP_NAME" -Value $backendAppName -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_BACKEND_WEBAPP_PUBLISH_PROFILE" -Value $backendPublishProfile -Repo $GithubRepo
@@ -1119,9 +1286,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
         Set-OrUpdateGithubSecret -Name "NEXT_PUBLIC_API_URL" -Value $backendUrl -Repo $GithubRepo
 
         Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_NAME" -Value $functionAppName -Repo $GithubRepo
-        if ($canSetFunctionsPublishProfile -and -not [string]::IsNullOrWhiteSpace($functionsPublishProfile)) {
-            Set-OrUpdateGithubSecret -Name "AZURE_FUNCTIONAPP_PUBLISH_PROFILE" -Value $functionsPublishProfile -Repo $GithubRepo
-        }
+        Set-OrUpdateGithubSecret -Name "AZURE_CREDENTIALS" -Value $azureCredentialsJson -Repo $GithubRepo
 
         Set-OrUpdateGithubSecret -Name "ACR_LOGIN_SERVER" -Value $acrLoginServer -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "ACR_USERNAME" -Value $acrUsername -Repo $GithubRepo
@@ -1133,20 +1298,97 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
     if ($RerunWorkflowRuns) {
         Write-Step "Re-running latest workflow runs"
         $workflows = @("deploy-backend.yml", "deploy-frontend.yml", "deploy-functions.yml", "deploy-worker.yml")
+        $queuedRuns = New-Object System.Collections.Generic.List[object]
 
         foreach ($workflow in $workflows) {
             $runId = Get-GhRaw -Arguments @("run", "list", "--repo", $GithubRepo, "--workflow", $workflow, "--limit", "1", "--json", "databaseId", "-q", ".[0].databaseId")
             if (-not [string]::IsNullOrWhiteSpace($runId)) {
                 Invoke-GhCli -Arguments @("run", "rerun", $runId, "--repo", $GithubRepo) | Out-Null
+                $queuedRuns.Add([pscustomobject]@{ Workflow = $workflow; RunId = $runId }) | Out-Null
             }
             else {
                 Write-Warning "No previous run was found for '$workflow'. Dispatching a new workflow run instead."
                 Invoke-GhCli -Arguments @("workflow", "run", $workflow, "--repo", $GithubRepo, "--ref", "main") | Out-Null
+                Start-Sleep -Seconds 5
+                $dispatchedRunId = Get-GhRaw -Arguments @("run", "list", "--repo", $GithubRepo, "--workflow", $workflow, "--limit", "1", "--json", "databaseId", "-q", ".[0].databaseId")
+                if (-not [string]::IsNullOrWhiteSpace($dispatchedRunId)) {
+                    $queuedRuns.Add([pscustomobject]@{ Workflow = $workflow; RunId = $dispatchedRunId }) | Out-Null
+                }
             }
+        }
+
+        Write-Step "Waiting for GitHub Actions workflows to finish"
+        foreach ($queuedRun in $queuedRuns) {
+            Wait-GithubWorkflowRun -RunId ([string]$queuedRun.RunId) -Repo $GithubRepo -WorkflowName ([string]$queuedRun.Workflow)
         }
     }
     else {
-        Write-Warning "Infrastructure is ready, but application code deployment was not triggered. The URLs can show 'Application Error' until the GitHub Actions deploy workflows publish the backend and frontend packages. To update GitHub secrets and trigger deployment, rerun with: -GithubRepo owner/repo -SetGithubSecrets -RerunWorkflowRuns"
+        Write-Warning "Infrastructure is ready, but GitHub workflow re-run was skipped. Automatic application deployment and delivery automation can remain incomplete until backend, frontend, functions, and worker workflows finish successfully."
+    }
+
+    Write-Step "Ensuring Event Grid subscription to start_delivery_job function"
+    if (-not (Wait-FunctionAvailable -FunctionAppName $functionAppName -ResourceGroupName $ResourceGroupName -FunctionName "start_delivery_job")) {
+        throw "Azure Function 'start_delivery_job' was not detected in '$functionAppName' after deployment."
+    }
+
+    $eventGridTopicId = Get-AzCliTsv -Arguments @(
+        "eventgrid", "topic", "show",
+        "--name", $eventGridTopicName,
+        "--resource-group", $ResourceGroupName,
+        "--query", "id",
+        "-o", "tsv"
+    )
+    $startDeliveryJobFunctionResourceId = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$functionAppName/functions/start_delivery_job"
+
+    if (-not (Test-EventGridSubscriptionExists -EventSubscriptionName $eventSubscriptionName -SourceResourceId $eventGridTopicId)) {
+        Invoke-AzCli -Arguments @(
+            "eventgrid", "event-subscription", "create",
+            "--name", $eventSubscriptionName,
+            "--source-resource-id", $eventGridTopicId,
+            "--endpoint-type", "azurefunction",
+            "--endpoint", $startDeliveryJobFunctionResourceId,
+            "--included-event-types", "GracePeriodExpired",
+            "-o", "none"
+        ) | Out-Null
+    }
+    else {
+        Write-Host "Event subscription '$eventSubscriptionName' already exists. Updating endpoint to start_delivery_job." -ForegroundColor Yellow
+        Invoke-AzCli -Arguments @(
+            "eventgrid", "event-subscription", "update",
+            "--name", $eventSubscriptionName,
+            "--source-resource-id", $eventGridTopicId,
+            "--endpoint-type", "azurefunction",
+            "--endpoint", $startDeliveryJobFunctionResourceId,
+            "--included-event-types", "GracePeriodExpired",
+            "-o", "none"
+        ) | Out-Null
+    }
+
+    Write-Step "Validating delivery automation prerequisites"
+    $deliveryReadinessIssues = New-Object System.Collections.Generic.List[string]
+
+    if (-not (Test-FunctionExists -FunctionAppName $functionAppName -ResourceGroupName $ResourceGroupName -FunctionName "start_delivery_job")) {
+        $deliveryReadinessIssues.Add("Azure Function 'start_delivery_job' is not deployed in '$functionAppName'.")
+    }
+
+    if (-not (Test-AcrTagExists -RegistryName $acrName -RepositoryName "lastwrites-worker" -Tag "latest")) {
+        $deliveryReadinessIssues.Add("Worker image '$acrLoginServer/lastwrites-worker:latest' is missing from ACR.")
+    }
+
+    $eventGridTopicId = Get-AzCliTsv -Arguments @(
+        "eventgrid", "topic", "show",
+        "--name", $eventGridTopicName,
+        "--resource-group", $ResourceGroupName,
+        "--query", "id",
+        "-o", "tsv"
+    )
+    if (-not (Test-EventGridSubscriptionExists -EventSubscriptionName $eventSubscriptionName -SourceResourceId $eventGridTopicId)) {
+        $deliveryReadinessIssues.Add("Event Grid subscription '$eventSubscriptionName' is not attached to topic '$eventGridTopicName'.")
+    }
+
+    if ($deliveryReadinessIssues.Count -gt 0) {
+        $joinedIssues = $deliveryReadinessIssues -join [Environment]::NewLine
+        throw "Deployment finished provisioning infrastructure, but the application delivery pipeline is incomplete:`n$joinedIssues`nRerun after publishing application code (backend, frontend, functions, worker) so the environment becomes fully operational."
     }
 
     $resourceGroupPortalUrl = "https://portal.azure.com/#resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/overview"

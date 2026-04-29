@@ -1,5 +1,65 @@
+function normalizeUrl(value: string): string {
+  return value.trim().replace(/\/$/, "");
+}
+
+function tryDeriveAzureApiUrl(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const currentHost = window.location.hostname.toLowerCase();
+  const match = currentHost.match(/^web-(.+)\.azurewebsites\.net$/);
+  if (!match) {
+    return "";
+  }
+
+  return `https://api-${match[1]}.azurewebsites.net`;
+}
+
+function shouldUseConfiguredUrl(configuredUrl: string): boolean {
+  if (!configuredUrl) {
+    return false;
+  }
+
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  const currentHost = window.location.hostname.toLowerCase();
+  const configuredHost = (() => {
+    try {
+      return new URL(configuredUrl).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+
+  if (!configuredHost) {
+    return false;
+  }
+
+  const currentIsLocal = /^(localhost|127\.0\.0\.1)$/.test(currentHost);
+  const configuredIsLocal = /^(localhost|127\.0\.0\.1)$/.test(configuredHost);
+  if (currentIsLocal || configuredIsLocal) {
+    return currentIsLocal === configuredIsLocal;
+  }
+
+  const currentAzureMatch = currentHost.match(/^web-(.+)\.azurewebsites\.net$/);
+  const configuredAzureMatch = configuredHost.match(/^api-(.+)\.azurewebsites\.net$/);
+  if (currentAzureMatch && configuredAzureMatch) {
+    return currentAzureMatch[1] === configuredAzureMatch[1];
+  }
+
+  return true;
+}
+
 export function getApiUrl(): string {
-  return (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/$/, "");
+  const configuredUrl = normalizeUrl(process.env.NEXT_PUBLIC_API_URL || "");
+  if (shouldUseConfiguredUrl(configuredUrl)) {
+    return configuredUrl;
+  }
+
+  return tryDeriveAzureApiUrl();
 }
 
 export function buildAuthHeaders(

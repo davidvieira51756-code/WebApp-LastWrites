@@ -57,7 +57,8 @@ jobs:
           fi
 
           cd .next/standalone
-          zip -r ../../../frontend-release.zip .
+          rm -f ../../../frontend-release.zip
+          find . -mindepth 1 -printf '%P\n' | zip -r ../../../frontend-release.zip -@
 
       - name: Deploy frontend to Azure Web App
         uses: azure/webapps-deploy@v3

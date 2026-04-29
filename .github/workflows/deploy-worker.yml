@@ -69,6 +69,8 @@ jobs:
       - name: Update Container Apps job image
         env:
           ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
           RESOURCE_GROUP: ${{ secrets.AZURE_CONTAINERAPPS_RESOURCE_GROUP }}
           JOB_NAME: ${{ secrets.AZURE_CONTAINERAPPS_JOB_NAME }}
         run: |
@@ -79,7 +81,8 @@ jobs:
             --name "${JOB_NAME}" \
             --resource-group "${RESOURCE_GROUP}" \
             --server "${ACR_LOGIN_SERVER}" \
-            --identity system \
+            --username "${ACR_USERNAME}" \
+            --password "${ACR_PASSWORD}" \
             --only-show-errors
 
           az containerapp job update \

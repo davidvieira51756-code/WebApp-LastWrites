@@ -1,0 +1,13 @@
+.env.example
+main.py
+requirements.txt
+models/auth.py
+models/vault.py
+services/auth_service.py
+services/blob_service.py
+services/cosmos_service.py
+services/file_crypto_service.py
+services/keyvault_service.py
+services/local_blob_service.py
+services/local_cosmos_service.py
+services/vault_key_service.py
