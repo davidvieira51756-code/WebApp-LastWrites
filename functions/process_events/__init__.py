@@ -11,6 +11,30 @@ from azure.cosmos import CosmosClient, exceptions
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
+try:
+    from azure.monitor.opentelemetry import configure_azure_monitor
+except Exception:  # pragma: no cover - optional dependency resolution
+    configure_azure_monitor = None
+
+_monitoring_configured = False
+
+
+def _configure_monitoring() -> None:
+    global _monitoring_configured
+
+    if _monitoring_configured:
+        return
+
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "").strip()
+    if not connection_string or configure_azure_monitor is None:
+        return
+
+    try:
+        configure_azure_monitor(connection_string=connection_string)
+        _monitoring_configured = True
+    except Exception:
+        logger.exception("Failed to configure Application Insights telemetry.")
+
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
 
@@ -153,6 +177,7 @@ def _send_mocked_email_notification(vault_document: Dict[str, Any]) -> None:
 
 
 def main(event: func.EventGridEvent) -> None:
+    _configure_monitoring()
     logger.info(
         "Event Grid event received. id=%s type=%s subject=%s topic=%s",
         event.id,

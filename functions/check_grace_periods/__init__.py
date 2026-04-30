@@ -13,6 +13,30 @@ from azure.eventgrid import EventGridEvent, EventGridPublisherClient
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
+try:
+    from azure.monitor.opentelemetry import configure_azure_monitor
+except Exception:  # pragma: no cover - optional dependency resolution
+    configure_azure_monitor = None
+
+_monitoring_configured = False
+
+
+def _configure_monitoring() -> None:
+    global _monitoring_configured
+
+    if _monitoring_configured:
+        return
+
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "").strip()
+    if not connection_string or configure_azure_monitor is None:
+        return
+
+    try:
+        configure_azure_monitor(connection_string=connection_string)
+        _monitoring_configured = True
+    except Exception:
+        logger.exception("Failed to configure Application Insights telemetry.")
+
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
 _event_grid_client: Optional[EventGridPublisherClient] = None
@@ -185,6 +209,7 @@ def _publish_expiration_event(
 
 
 def main(mytimer: func.TimerRequest) -> None:
+    _configure_monitoring()
     now_utc = datetime.now(timezone.utc)
     logger.info("check_grace_periods timer fired at %s", now_utc.isoformat())
 

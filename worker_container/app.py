@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from azure.communication.email import EmailClient
 from azure.core.exceptions import AzureError, ResourceExistsError
 from azure.cosmos import CosmosClient, exceptions
 from azure.identity import DefaultAzureCredential
@@ -32,6 +33,30 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("last_writes_worker")
+
+try:
+    from azure.monitor.opentelemetry import configure_azure_monitor
+except Exception:  # pragma: no cover - optional dependency resolution
+    configure_azure_monitor = None
+
+_monitoring_configured = False
+
+
+def _configure_monitoring() -> None:
+    global _monitoring_configured
+
+    if _monitoring_configured:
+        return
+
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "").strip()
+    if not connection_string or configure_azure_monitor is None:
+        return
+
+    try:
+        configure_azure_monitor(connection_string=connection_string)
+        _monitoring_configured = True
+    except Exception:
+        logger.exception("Failed to configure Application Insights telemetry in worker.")
 
 
 def _env_to_bool(value: str) -> bool:
@@ -167,6 +192,7 @@ def _update_local_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[
 
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
+_audit_container = None
 
 
 def _get_azure_cosmos_container():
@@ -184,6 +210,25 @@ def _get_azure_cosmos_container():
     database_client = _cosmos_client.get_database_client(database_name)
     _vaults_container = database_client.get_container_client(container_name)
     return _vaults_container
+
+
+def _get_azure_audit_container():
+    global _cosmos_client
+    global _audit_container
+
+    if _audit_container is not None:
+        return _audit_container
+
+    connection_string = _get_required_env("COSMOS_CONNECTION_STRING")
+    database_name = os.getenv("COSMOS_DATABASE_NAME", "last-writes-db")
+    container_name = os.getenv("COSMOS_AUDIT_CONTAINER", "audit_logs")
+
+    if _cosmos_client is None:
+        _cosmos_client = CosmosClient.from_connection_string(connection_string)
+
+    database_client = _cosmos_client.get_database_client(database_name)
+    _audit_container = database_client.get_container_client(container_name)
+    return _audit_container
 
 
 def _get_azure_vault(vault_id: str) -> Optional[Dict[str, Any]]:
@@ -221,6 +266,125 @@ def _update_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[s
     if _is_local_dev_mode():
         return _update_local_vault(vault_id, update_data)
     return _update_azure_vault(vault_id, update_data)
+
+
+def _audit_partition_key(vault_id: Optional[str], owner_user_id: str) -> str:
+    normalized_vault_id = str(vault_id or "").strip()
+    if normalized_vault_id:
+        return f"vault:{normalized_vault_id}"
+    return f"user:{owner_user_id}"
+
+
+def _record_local_audit_event(audit_item: Dict[str, Any]) -> None:
+    items = _load_local_items()
+    items.append(audit_item)
+    _save_local_items(items)
+
+
+def _record_azure_audit_event(audit_item: Dict[str, Any]) -> None:
+    container = _get_azure_audit_container()
+    container.create_item(body=audit_item)
+
+
+def _record_audit_event(
+    *,
+    event_type: str,
+    owner_user_id: str,
+    vault_id: Optional[str],
+    actor_email: Optional[str],
+    source: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    event_at: Optional[str] = None,
+) -> None:
+    audit_item = {
+        "id": str(uuid4()),
+        "doc_type": "audit_log",
+        "partition_key": _audit_partition_key(vault_id, owner_user_id),
+        "event_type": str(event_type).strip(),
+        "event_at": event_at or _now_iso(),
+        "owner_user_id": str(owner_user_id).strip(),
+        "vault_id": str(vault_id).strip() if vault_id is not None else None,
+        "actor_user_id": None,
+        "actor_email": str(actor_email).strip().lower() if actor_email else None,
+        "source": str(source).strip() or "worker",
+        "metadata": metadata or {},
+    }
+
+    try:
+        if _is_local_dev_mode():
+            _record_local_audit_event(audit_item)
+        else:
+            _record_azure_audit_event(audit_item)
+    except Exception:
+        logger.exception(
+            "Failed to persist worker audit event. event_type=%s vault_id=%s",
+            event_type,
+            vault_id,
+        )
+
+
+def _recipient_access_url(vault_id: str) -> Optional[str]:
+    frontend_base_url = os.getenv("FRONTEND_BASE_URL", "").strip().rstrip("/")
+    if not frontend_base_url:
+        return None
+    return f"{frontend_base_url}/incoming/{vault_id}"
+
+
+def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
+    connection_string = os.getenv("ACS_EMAIL_CONNECTION_STRING", "").strip()
+    sender_address = os.getenv("ACS_EMAIL_SENDER", "").strip()
+    if not connection_string or not sender_address:
+        logger.warning("ACS email configuration is missing; delivery notification skipped.")
+        return
+
+    recipients = [
+        str(recipient).strip()
+        for recipient in vault_document.get("recipients", [])
+        if str(recipient).strip()
+    ]
+    if not recipients:
+        logger.warning("Delivery notification skipped because recipients list is empty.")
+        return
+
+    vault_id = str(vault_document.get("id", "")).strip()
+    vault_name = str(vault_document.get("name", "Unnamed Vault")).strip() or "Unnamed Vault"
+    access_url = _recipient_access_url(vault_id)
+    delivered_at = str(vault_document.get("delivered_at", "")).strip() or _now_iso()
+    plain_text_lines = [
+        f"The delivery package for vault '{vault_name}' is now available.",
+        f"Delivered at: {delivered_at}",
+    ]
+    html_lines = [
+        f"<p>The delivery package for vault <strong>{vault_name}</strong> is now available.</p>",
+        f"<p>Delivered at: {delivered_at}</p>",
+    ]
+    if access_url:
+        plain_text_lines.append(f"Access it here after signing in: {access_url}")
+        html_lines.append(
+            f"<p>Access it here after signing in: <a href=\"{access_url}\">{access_url}</a></p>"
+        )
+
+    email_client = EmailClient.from_connection_string(connection_string)
+    message = {
+        "senderAddress": sender_address,
+        "recipients": {
+            "to": [{"address": recipient} for recipient in recipients],
+        },
+        "content": {
+            "subject": f"[Last Writes] Delivery package available for '{vault_name}'",
+            "plainText": "\n".join(plain_text_lines),
+            "html": "".join(html_lines),
+        },
+    }
+
+    poller = email_client.begin_send(message)
+    result = poller.result()
+    logger.info(
+        "ACS email notification sent. vault_id=%s message_id=%s recipient_count=%s",
+        vault_id,
+        getattr(result, "id", None),
+        len(recipients),
+    )
 
 
 def _download_blob_bytes(container_name: str, blob_name: str) -> bytes:
@@ -420,6 +584,7 @@ def _build_zip_archive(cover_pdf_path: Path, extracted_files: List[Path], output
 
 
 def run() -> int:
+    _configure_monitoring()
     logger.info("Worker startup initiated.")
 
     try:
@@ -493,6 +658,27 @@ def run() -> int:
             )
             if updated_vault is None:
                 raise RuntimeError("Vault metadata could not be updated after delivery ZIP upload.")
+
+            _record_audit_event(
+                event_type="delivery_completed",
+                owner_user_id=str(updated_vault.get("user_id", "")).strip(),
+                vault_id=vault_id,
+                actor_email=None,
+                source="worker",
+                metadata={
+                    "delivery_blob_name": upload_result["blob_name"],
+                    "delivery_container_name": upload_result["container_name"],
+                    "delivery_size_bytes": upload_result["size_bytes"],
+                },
+                event_at=delivered_at,
+            )
+            try:
+                _send_delivery_notification(updated_vault)
+            except Exception:
+                logger.exception(
+                    "Delivery notification failed after ZIP creation. vault_id=%s",
+                    vault_id,
+                )
 
             logger.info(
                 "Worker completed successfully. vault_id=%s delivery_blob=%s",

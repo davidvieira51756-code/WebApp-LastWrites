@@ -109,3 +109,15 @@ class RecipientVaultSummary(BaseModel):
     grace_period_expires_at: Optional[str] = None
     delivered_at: Optional[str] = None
     delivery_available: bool = False
+
+
+class AuditLogEntry(BaseModel):
+    id: str
+    event_type: str = Field(..., min_length=1, max_length=128)
+    event_at: str = Field(..., min_length=1)
+    owner_user_id: str = Field(..., min_length=1, max_length=128)
+    vault_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    actor_user_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    actor_email: Optional[str] = Field(default=None, max_length=320)
+    source: str = Field(default="api", min_length=1, max_length=64)
+    metadata: Dict[str, object] = Field(default_factory=dict)

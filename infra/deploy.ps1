@@ -857,6 +857,7 @@ foreach ($namespace in @(
     "Microsoft.Storage",
     "Microsoft.DocumentDB",
     "Microsoft.EventGrid",
+    "Microsoft.Insights",
     "Microsoft.KeyVault",
     "Microsoft.ContainerRegistry",
     "Microsoft.App",
@@ -936,8 +937,10 @@ $functionAppName = "func-$prefixDashed-$token"
 $cosmosAccountName = "cdb-$prefixDashed-$token"
 $cosmosDatabaseName = "last-writes-db"
 $cosmosContainerName = "vaults"
+$cosmosAuditContainerName = "audit_logs"
 $eventGridTopicName = "eg-$prefixDashed-$token"
 $eventSubscriptionName = "es-grace-$token"
+$appInsightsName = "appi-$prefixDashed-$token"
 $keyVaultName = "kv-$prefixDashed-$token"
 $containerAppsEnvironmentName = "cae-$prefixDashed-$token"
 $containerAppsJobName = "job-$prefixDashed-$token"
@@ -966,6 +969,7 @@ $blobConnectionString = ""
 $cosmosConnectionString = ""
 $eventGridEndpoint = ""
 $eventGridKey = ""
+$appInsightsConnectionString = ""
 $keyVaultUrl = ""
 $acrLoginServer = ""
 $acrUsername = ""
@@ -979,6 +983,8 @@ $backendPrincipalId = ""
 $functionPrincipalId = ""
 $deliveryJobPrincipalId = ""
 $deliveryJobResourceId = ""
+$acsEmailConnectionString = [Environment]::GetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING")
+$acsEmailSender = [Environment]::GetEnvironmentVariable("ACS_EMAIL_SENDER")
 
 $deploymentStarted = $false
 
@@ -991,6 +997,13 @@ try {
     Invoke-AzCli -Arguments @("appservice", "plan", "create", "--name", $planName, "--resource-group", $ResourceGroupName, "--is-linux", "--sku", "B1", "--location", $Location, "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "create", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--plan", $planName, "--runtime", $pythonRuntime, "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "create", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--plan", $planName, "--runtime", $nodeRuntime, "-o", "none") | Out-Null
+
+    Write-Step "Creating Application Insights resource"
+    Invoke-AzCli -Arguments @("monitor", "app-insights", "component", "create", "--app", $appInsightsName, "--resource-group", $ResourceGroupName, "--location", $Location, "--kind", "web", "-o", "none") | Out-Null
+    $appInsightsConnectionString = Get-AzCliTsv -Arguments @("monitor", "app-insights", "component", "show", "--app", $appInsightsName, "--resource-group", $ResourceGroupName, "--query", "connectionString", "-o", "tsv")
+    if ([string]::IsNullOrWhiteSpace($appInsightsConnectionString)) {
+        throw "Application Insights connection string retrieval returned empty output."
+    }
 
     Write-Step "Creating storage account for blobs and function host"
     $storageAccountReady = $false
@@ -1050,6 +1063,7 @@ try {
     Invoke-AzCli -Arguments @("cosmosdb", "create", "--name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--kind", "GlobalDocumentDB", "--locations", "regionName=$Location", "failoverPriority=0", "--default-consistency-level", "Session", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("cosmosdb", "sql", "database", "create", "--account-name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--name", $cosmosDatabaseName, "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("cosmosdb", "sql", "container", "create", "--account-name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--database-name", $cosmosDatabaseName, "--name", $cosmosContainerName, "--partition-key-path", "/user_id", "--throughput", "400", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("cosmosdb", "sql", "container", "create", "--account-name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--database-name", $cosmosDatabaseName, "--name", $cosmosAuditContainerName, "--partition-key-path", "/partition_key", "--throughput", "400", "-o", "none") | Out-Null
     $cosmosConnectionString = Get-AzCliTsv -Arguments @("cosmosdb", "keys", "list", "--type", "connection-strings", "--name", $cosmosAccountName, "--resource-group", $ResourceGroupName, "--query", "connectionStrings[0].connectionString", "-o", "tsv")
     if ([string]::IsNullOrWhiteSpace($cosmosConnectionString)) {
         throw "Cosmos connection string retrieval returned empty output."
@@ -1134,9 +1148,14 @@ try {
         "COSMOS_CONNECTION_STRING=$cosmosConnectionString",
         "COSMOS_DATABASE_NAME=$cosmosDatabaseName",
         "COSMOS_VAULTS_CONTAINER=$cosmosContainerName",
+        "COSMOS_AUDIT_CONTAINER=$cosmosAuditContainerName",
         "BLOB_CONNECTION_STRING=$blobConnectionString",
         "KEY_VAULT_URL=$keyVaultUrl",
-        "DELIVERIES_CONTAINER=deliveries"
+        "DELIVERIES_CONTAINER=deliveries",
+        "FRONTEND_BASE_URL=https://$frontendAppName.azurewebsites.net",
+        "ACS_EMAIL_CONNECTION_STRING=$acsEmailConnectionString",
+        "ACS_EMAIL_SENDER=$acsEmailSender",
+        "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString"
     )
     $createJobArguments = @(
         "containerapp", "job", "create",
@@ -1202,12 +1221,16 @@ try {
     $frontendVerifyEmailUrl = "$frontendUrl/verify-email"
     $authSecretKey = New-StrongSecret -ByteLength 48
 
+    if ([string]::IsNullOrWhiteSpace($acsEmailConnectionString) -or [string]::IsNullOrWhiteSpace($acsEmailSender)) {
+        Write-Warning "ACS email settings are missing in the local environment. Set ACS_EMAIL_CONNECTION_STRING and ACS_EMAIL_SENDER before rerunning deploy if you want delivery emails enabled."
+    }
+
     Write-Step "Applying runtime settings to backend, frontend, and function apps"
-    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "KEY_VAULT_RSA_KEY_SIZE=2048", "KEY_VAULT_RSA_HARDWARE_PROTECTED=false", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "AUTH_SECRET_KEY=$authSecretKey", "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl", "AUTH_ACCESS_TOKEN_TTL_MINUTES=120", "AUTH_REQUIRE_EMAIL_VERIFICATION=true", "AUTH_EXPOSE_VERIFICATION_TOKEN=false", "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440", "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000", "SCM_DO_BUILD_DURING_DEPLOYMENT=true", "ENABLE_ORYX_BUILD=true", "-o", "none") | Out-Null
-    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "KEY_VAULT_RSA_KEY_SIZE=2048", "KEY_VAULT_RSA_HARDWARE_PROTECTED=false", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "COSMOS_AUDIT_CONTAINER=$cosmosAuditContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "AUTH_SECRET_KEY=$authSecretKey", "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl", "AUTH_ACCESS_TOKEN_TTL_MINUTES=120", "AUTH_REQUIRE_EMAIL_VERIFICATION=true", "AUTH_EXPOSE_VERIFICATION_TOKEN=false", "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440", "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000", "LOGIN_RATE_LIMIT_ATTEMPTS=5", "LOGIN_RATE_LIMIT_WINDOW_SECONDS=300", "MAX_UPLOAD_BYTES=10485760", "UPLOAD_ALLOWED_CONTENT_TYPES=application/json,application/msword,application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,image/jpeg,image/png,text/csv,text/markdown,text/plain", "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "SCM_DO_BUILD_DURING_DEPLOYMENT=true", "ENABLE_ORYX_BUILD=true", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "NEXT_PUBLIC_APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "python -m uvicorn main:app --host 0.0.0.0 --port 8000", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "HOSTNAME=0.0.0.0 node /home/site/wwwroot/server.js", "-o", "none") | Out-Null
-    Invoke-AzCli -Arguments @("functionapp", "config", "appsettings", "set", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--settings", "COSMOS_CONNECTION_STRING=$cosmosConnectionString", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "EVENT_GRID_ENDPOINT=$eventGridEndpoint", "EVENT_GRID_KEY=$eventGridKey", "BLOB_CONNECTION_STRING=$blobConnectionString", "AZURE_SUBSCRIPTION_ID=$subscriptionId", "CONTAINER_APPS_RESOURCE_GROUP=$ResourceGroupName", "CONTAINER_APPS_JOB_NAME=$containerAppsJobName", "CONTAINER_APPS_API_VERSION=2024-03-01", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("functionapp", "config", "appsettings", "set", "--name", $functionAppName, "--resource-group", $ResourceGroupName, "--settings", "COSMOS_CONNECTION_STRING=$cosmosConnectionString", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "COSMOS_AUDIT_CONTAINER=$cosmosAuditContainerName", "EVENT_GRID_ENDPOINT=$eventGridEndpoint", "EVENT_GRID_KEY=$eventGridKey", "BLOB_CONNECTION_STRING=$blobConnectionString", "AZURE_SUBSCRIPTION_ID=$subscriptionId", "CONTAINER_APPS_RESOURCE_GROUP=$ResourceGroupName", "CONTAINER_APPS_JOB_NAME=$containerAppsJobName", "CONTAINER_APPS_API_VERSION=2024-03-01", "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "-o", "none") | Out-Null
 
     if (-not $SkipLocalFileUpdate) {
         Write-Step "Writing local development config files"
@@ -1232,6 +1255,7 @@ KEY_VAULT_RSA_HARDWARE_PROTECTED=false
 COSMOS_CONNECTION_STRING=$cosmosConnectionString
 COSMOS_DATABASE_NAME=$cosmosDatabaseName
 COSMOS_VAULTS_CONTAINER=$cosmosContainerName
+COSMOS_AUDIT_CONTAINER=$cosmosAuditContainerName
 
 BLOB_CONNECTION_STRING=$blobConnectionString
 
@@ -1244,11 +1268,17 @@ AUTH_REQUIRE_EMAIL_VERIFICATION=true
 AUTH_EXPOSE_VERIFICATION_TOKEN=true
 EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440
 AUTH_PASSWORD_PBKDF2_ITERATIONS=260000
+LOGIN_RATE_LIMIT_ATTEMPTS=5
+LOGIN_RATE_LIMIT_WINDOW_SECONDS=300
+MAX_UPLOAD_BYTES=10485760
+UPLOAD_ALLOWED_CONTENT_TYPES=application/json,application/msword,application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,image/jpeg,image/png,text/csv,text/markdown,text/plain
+APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString
 "@
         Set-Content -Path $backendEnvPath -Value $backendEnvContent -Encoding UTF8
 
-        $frontendEnvContent = @"
+$frontendEnvContent = @"
 NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString
 "@
         Set-Content -Path $frontendEnvPath -Value $frontendEnvContent -Encoding UTF8
 
@@ -1260,6 +1290,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
                 COSMOS_CONNECTION_STRING = $cosmosConnectionString
                 COSMOS_DATABASE_NAME = $cosmosDatabaseName
                 COSMOS_VAULTS_CONTAINER = $cosmosContainerName
+                COSMOS_AUDIT_CONTAINER = $cosmosAuditContainerName
                 EVENT_GRID_ENDPOINT = $eventGridEndpoint
                 EVENT_GRID_KEY = $eventGridKey
                 BLOB_CONNECTION_STRING = $blobConnectionString
@@ -1267,6 +1298,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000
                 CONTAINER_APPS_RESOURCE_GROUP = $ResourceGroupName
                 CONTAINER_APPS_JOB_NAME = $containerAppsJobName
                 CONTAINER_APPS_API_VERSION = "2024-03-01"
+                APPLICATIONINSIGHTS_CONNECTION_STRING = $appInsightsConnectionString
             }
         }
         ($functionsSettings | ConvertTo-Json -Depth 5) | Set-Content -Path $functionsSettingsPath -Encoding UTF8

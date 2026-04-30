@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 import re
+from collections import defaultdict, deque
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from uuid import uuid4
@@ -26,6 +29,7 @@ try:
     from backend.models.vault import (
         ActivationRequestCreate,
         RecipientVaultSummary,
+        AuditLogEntry,
         VaultCreate,
         VaultResponse,
         VaultUpdate,
@@ -37,6 +41,7 @@ try:
     from backend.services.keyvault_service import KeyVaultService
     from backend.services.local_blob_service import LocalBlobService
     from backend.services.local_cosmos_service import LocalCosmosService
+    from backend.services.monitoring import configure_monitoring
     from backend.services.vault_key_service import AzureVaultKeyService, LocalVaultKeyService
 except ModuleNotFoundError:
     from models.auth import (
@@ -50,6 +55,7 @@ except ModuleNotFoundError:
     from models.vault import (
         ActivationRequestCreate,
         RecipientVaultSummary,
+        AuditLogEntry,
         VaultCreate,
         VaultResponse,
         VaultUpdate,
@@ -61,6 +67,7 @@ except ModuleNotFoundError:
     from services.keyvault_service import KeyVaultService
     from services.local_blob_service import LocalBlobService
     from services.local_cosmos_service import LocalCosmosService
+    from services.monitoring import configure_monitoring
     from services.vault_key_service import AzureVaultKeyService, LocalVaultKeyService
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -70,6 +77,25 @@ EMAIL_ADDRESS_REGEX = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
 )
 auth_bearer = HTTPBearer(auto_error=False)
+SAFE_FILENAME_REGEX = re.compile(r"[^A-Za-z0-9._() -]+")
+DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES = {
+    "application/json",
+    "application/msword",
+    "application/pdf",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/zip",
+    "image/jpeg",
+    "image/png",
+    "text/csv",
+    "text/markdown",
+    "text/plain",
+}
+_login_rate_limit_lock = Lock()
+_login_rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 
 
 class RecipientCreateRequest(BaseModel):
@@ -126,6 +152,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 def get_cosmos_service(request: Request) -> CosmosService:
@@ -196,7 +235,7 @@ def _parse_iso_datetime(value: str) -> Optional[datetime]:
 
 
 def _build_attachment_headers(file_name: str) -> Dict[str, str]:
-    normalized_name = file_name.strip() or "download.bin"
+    normalized_name = sanitize_filename(file_name)
     fallback_name = normalized_name.encode("ascii", errors="ignore").decode("ascii") or "download.bin"
     fallback_name = fallback_name.replace('"', "")
     encoded_name = quote(normalized_name)
@@ -205,6 +244,125 @@ def _build_attachment_headers(file_name: str) -> Dict[str, str]:
             f'attachment; filename="{fallback_name}"; filename*=UTF-8\'\'{encoded_name}'
         )
     }
+
+
+def sanitize_filename(file_name: str) -> str:
+    base_name = os.path.basename(str(file_name or "")).strip()
+    normalized_name = base_name.replace("\x00", "")
+    normalized_name = SAFE_FILENAME_REGEX.sub("-", normalized_name)
+    normalized_name = re.sub(r"\s+", " ", normalized_name).strip(" .-_")
+
+    if not normalized_name:
+        normalized_name = f"upload-{uuid4().hex}.bin"
+
+    stem, suffix = os.path.splitext(normalized_name)
+    safe_stem = stem[:120] or f"upload-{uuid4().hex[:8]}"
+    safe_suffix = suffix[:20]
+    return f"{safe_stem}{safe_suffix}"[:160]
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default)).strip()
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _allowed_upload_content_types() -> set[str]:
+    configured = os.getenv("UPLOAD_ALLOWED_CONTENT_TYPES", "").strip()
+    if not configured:
+        return set(DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES)
+
+    values = {
+        item.strip().lower()
+        for item in configured.split(",")
+        if item.strip()
+    }
+    return values or set(DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES)
+
+
+def _resolve_upload_content_type(file: UploadFile, sanitized_file_name: str) -> str:
+    provided_type = str(file.content_type or "").strip().lower()
+    if provided_type:
+        return provided_type
+
+    guessed_type, _ = mimetypes.guess_type(sanitized_file_name)
+    return (guessed_type or "application/octet-stream").lower()
+
+
+def validate_upload(file: UploadFile, payload: bytes, sanitized_file_name: str) -> str:
+    max_upload_bytes = max(1, _env_int("MAX_UPLOAD_BYTES", 10 * 1024 * 1024))
+    payload_size = len(payload)
+    if payload_size > max_upload_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds the maximum allowed size of {max_upload_bytes} bytes.",
+        )
+
+    content_type = _resolve_upload_content_type(file, sanitized_file_name)
+    if content_type not in _allowed_upload_content_types():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type: {content_type}.",
+        )
+
+    return content_type
+
+
+def _login_rate_limit_key(request: Request, email: str) -> str:
+    client_host = request.client.host if request.client else "unknown"
+    return f"{client_host.lower()}|{email.lower()}"
+
+
+def enforce_login_rate_limit(request: Request, email: str) -> None:
+    max_attempts = max(1, _env_int("LOGIN_RATE_LIMIT_ATTEMPTS", 5))
+    window_seconds = max(1, _env_int("LOGIN_RATE_LIMIT_WINDOW_SECONDS", 300))
+    now_seconds = datetime.now(timezone.utc).timestamp()
+    bucket_key = _login_rate_limit_key(request, email)
+
+    with _login_rate_limit_lock:
+        attempts = _login_rate_limit_buckets[bucket_key]
+        while attempts and now_seconds - attempts[0] > window_seconds:
+            attempts.popleft()
+
+        if len(attempts) >= max_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many login attempts. Please try again later.",
+            )
+
+        attempts.append(now_seconds)
+
+
+def write_audit_event(
+    cosmos_service: CosmosService,
+    *,
+    event_type: str,
+    owner_user_id: str,
+    vault_id: Optional[str] = None,
+    actor_user_id: Optional[str] = None,
+    actor_email: Optional[str] = None,
+    source: str = "api",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    try:
+        cosmos_service.log_audit_event(
+            event_type=event_type,
+            owner_user_id=owner_user_id,
+            vault_id=vault_id,
+            actor_user_id=actor_user_id,
+            actor_email=actor_email,
+            source=source,
+            metadata=metadata,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to persist audit event. event_type=%s vault_id=%s owner_user_id=%s",
+            event_type,
+            vault_id,
+            owner_user_id,
+        )
 
 
 def _is_vault_recipient(vault_item: Dict[str, Any], recipient_email: str) -> bool:
@@ -349,6 +507,7 @@ def is_valid_email(email: str) -> bool:
 @app.on_event("startup")
 def startup_event() -> None:
     try:
+        configure_monitoring()
         local_dev_mode = os.getenv("LOCAL_DEV_MODE", "").strip().lower() in {
             "1",
             "true",
@@ -531,6 +690,8 @@ def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenRespo
             detail="A valid email is required.",
         )
 
+    enforce_login_rate_limit(request, normalized_email)
+
     try:
         user_item = cosmos_service.get_user_by_email(normalized_email)
     except Exception:
@@ -563,6 +724,14 @@ def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenRespo
         )
 
     token_payload = auth_service.issue_access_token(user_item)
+    write_audit_event(
+        cosmos_service,
+        event_type="login",
+        owner_user_id=str(user_item.get("id", "")),
+        actor_user_id=str(user_item.get("id", "")),
+        actor_email=normalized_email,
+        metadata={"email_verified": email_verified},
+    )
     return AuthTokenResponse(
         access_token=token_payload["access_token"],
         token_type=token_payload["token_type"],
@@ -605,6 +774,15 @@ def create_vault(
             vault_payload["recipients"] = normalize_recipients(recipients)
         vault_payload.update(vault_key_service.ensure_vault_key(vault_id))
         created_item = cosmos_service.create_vault(vault_payload)
+        write_audit_event(
+            cosmos_service,
+            event_type="vault_created",
+            owner_user_id=str(current_user.get("id", "")),
+            vault_id=vault_id,
+            actor_user_id=str(current_user.get("id", "")),
+            actor_email=str(current_user.get("email", "")).strip().lower() or None,
+            metadata={"recipient_count": len(created_item.get("recipients", []))},
+        )
         return VaultResponse(**created_item)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -846,6 +1024,15 @@ def check_in_vault(
             detail="Vault not found.",
         )
 
+    write_audit_event(
+        cosmos_service,
+        event_type="check_in",
+        owner_user_id=str(current_user.get("id", "")),
+        vault_id=vault_id,
+        actor_user_id=str(current_user.get("id", "")),
+        actor_email=str(current_user.get("email", "")).strip().lower() or None,
+    )
+
     return VaultResponse(**updated_vault)
 
 
@@ -970,6 +1157,18 @@ def submit_activation_request(
         )
 
     try:
+        existing_vault = cosmos_service.get_vault_by_id(vault_id)
+    except Exception:
+        logger.exception(
+            "Unhandled error while reading vault before activation request. vault_id=%s",
+            vault_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to submit activation request.",
+        ) from None
+
+    try:
         updated_vault, outcome = cosmos_service.add_activation_request(
             vault_id=vault_id,
             recipient_email=recipient_email,
@@ -1000,6 +1199,36 @@ def submit_activation_request(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This vault is no longer accepting activation requests.",
+        )
+
+    owner_user_id = str(updated_vault.get("user_id", "")).strip()
+    previous_status = str((existing_vault or {}).get("status", "")).strip().lower()
+    write_audit_event(
+        cosmos_service,
+        event_type="activation_requested",
+        owner_user_id=owner_user_id,
+        vault_id=vault_id,
+        actor_user_id=str(current_user.get("id", "")),
+        actor_email=recipient_email,
+        metadata={"outcome": outcome},
+    )
+    if (
+        owner_user_id
+        and previous_status != "grace_period"
+        and str(updated_vault.get("status", "")).strip().lower() == "grace_period"
+        and str(updated_vault.get("grace_period_started_at", "")).strip()
+    ):
+        write_audit_event(
+            cosmos_service,
+            event_type="grace_period_started",
+            owner_user_id=owner_user_id,
+            vault_id=vault_id,
+            actor_user_id=str(current_user.get("id", "")),
+            actor_email=recipient_email,
+            metadata={
+                "grace_period_started_at": updated_vault.get("grace_period_started_at"),
+                "grace_period_expires_at": updated_vault.get("grace_period_expires_at"),
+            },
         )
 
     return _build_recipient_vault_summary(updated_vault, recipient_email)
@@ -1224,6 +1453,34 @@ def list_vault_files(
     }
 
 
+@app.get("/vaults/{vault_id}/audit", response_model=List[AuditLogEntry])
+def list_vault_audit_logs(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> List[AuditLogEntry]:
+    cosmos_service = get_cosmos_service(request)
+    get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
+
+    try:
+        audit_items = cosmos_service.list_vault_audit_events(
+            vault_id=vault_id,
+            owner_user_id=str(current_user.get("id", "")),
+        )
+    except Exception:
+        logger.exception("Unhandled error while listing audit logs for vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve audit log.",
+        ) from None
+
+    return [AuditLogEntry(**audit_item) for audit_item in audit_items]
+
+
 @app.get("/vaults/{vault_id}/files/{file_id}/download")
 def download_vault_file(
     vault_id: str,
@@ -1384,6 +1641,8 @@ async def upload_vault_file(
             detail="File name is required.",
         )
 
+    sanitized_file_name = sanitize_filename(file.filename)
+
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
         vault_id=vault_id,
@@ -1399,6 +1658,7 @@ async def upload_vault_file(
         )
 
         plaintext_bytes = await file.read()
+        validated_content_type = validate_upload(file, plaintext_bytes, sanitized_file_name)
         encryption_payload = encrypt_file_bytes(
             plaintext_bytes,
             vault_item.get("public_jwk", {}),
@@ -1407,13 +1667,13 @@ async def upload_vault_file(
         uploaded_blob_metadata = blob_service.upload_bytes(
             vault_id=vault_id,
             payload=encryption_payload["ciphertext"],
-            file_name=file.filename,
-            content_type=file.content_type,
+            file_name=sanitized_file_name,
+            content_type=validated_content_type,
             blob_content_type="application/octet-stream",
         )
         uploaded_file_metadata = dict(uploaded_blob_metadata)
         uploaded_file_metadata.update(encryption_payload["metadata"])
-        uploaded_file_metadata["content_type"] = file.content_type
+        uploaded_file_metadata["content_type"] = validated_content_type
         uploaded_file_metadata["blob_content_type"] = "application/octet-stream"
         uploaded_file_metadata["size_bytes"] = len(plaintext_bytes)
         uploaded_file_metadata["ciphertext_size_bytes"] = len(encryption_payload["ciphertext"])

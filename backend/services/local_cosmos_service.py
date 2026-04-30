@@ -87,6 +87,13 @@ class LocalCosmosService:
         doc_type = str(item.get("doc_type", "vault")).strip().lower()
         return doc_type == "vault"
 
+    @staticmethod
+    def _audit_partition_key(vault_id: Optional[str], owner_user_id: str) -> str:
+        normalized_vault_id = str(vault_id or "").strip()
+        if normalized_vault_id:
+            return f"vault:{normalized_vault_id}"
+        return f"user:{owner_user_id}"
+
     def create_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
         items = self._read_items()
         payload = dict(user_data)
@@ -451,3 +458,53 @@ class LocalCosmosService:
             return updated_item
 
         return None
+
+    def log_audit_event(
+        self,
+        *,
+        event_type: str,
+        owner_user_id: str,
+        vault_id: Optional[str] = None,
+        actor_user_id: Optional[str] = None,
+        actor_email: Optional[str] = None,
+        source: str = "api",
+        metadata: Optional[Dict[str, Any]] = None,
+        event_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        items = self._read_items()
+        audit_item = {
+            "id": str(uuid4()),
+            "doc_type": "audit_log",
+            "partition_key": self._audit_partition_key(vault_id, owner_user_id),
+            "event_type": str(event_type).strip(),
+            "event_at": event_at or _now_iso(),
+            "owner_user_id": str(owner_user_id).strip(),
+            "vault_id": str(vault_id).strip() if vault_id is not None else None,
+            "actor_user_id": str(actor_user_id).strip() if actor_user_id else None,
+            "actor_email": str(actor_email).strip().lower() if actor_email else None,
+            "source": str(source).strip() or "api",
+            "metadata": metadata or {},
+        }
+        items.append(audit_item)
+        self._write_items(items)
+        return audit_item
+
+    def list_vault_audit_events(
+        self,
+        *,
+        vault_id: str,
+        owner_user_id: str,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        normalized_limit = max(1, min(int(limit), 500))
+        partition_key = self._audit_partition_key(vault_id, owner_user_id)
+        items = [
+            item
+            for item in self._read_items()
+            if str(item.get("doc_type", "")).strip().lower() == "audit_log"
+            and str(item.get("partition_key", "")) == partition_key
+            and str(item.get("owner_user_id", "")) == owner_user_id
+            and str(item.get("vault_id", "")) == vault_id
+        ]
+        items.sort(key=lambda item: str(item.get("event_at", "")), reverse=True)
+        return items[:normalized_limit]

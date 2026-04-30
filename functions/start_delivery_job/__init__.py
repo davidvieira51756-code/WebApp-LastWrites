@@ -14,6 +14,30 @@ from azure.identity import DefaultAzureCredential
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
+try:
+    from azure.monitor.opentelemetry import configure_azure_monitor
+except Exception:  # pragma: no cover - optional dependency resolution
+    configure_azure_monitor = None
+
+_monitoring_configured = False
+
+
+def _configure_monitoring() -> None:
+    global _monitoring_configured
+
+    if _monitoring_configured:
+        return
+
+    connection_string = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "").strip()
+    if not connection_string or configure_azure_monitor is None:
+        return
+
+    try:
+        configure_azure_monitor(connection_string=connection_string)
+        _monitoring_configured = True
+    except Exception:
+        logger.exception("Failed to configure Application Insights telemetry.")
+
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
 _credential: Optional[DefaultAzureCredential] = None
@@ -164,6 +188,7 @@ def _start_delivery_job(vault_id: str, event_id: str) -> Optional[str]:
 
 
 def main(event: func.EventGridEvent) -> None:
+    _configure_monitoring()
     logger.info(
         "GracePeriodExpired event received. id=%s type=%s subject=%s",
         event.id,
