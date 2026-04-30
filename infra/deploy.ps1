@@ -943,7 +943,7 @@ $containerAppsEnvironmentName = "cae-$prefixDashed-$token"
 $containerAppsJobName = "job-$prefixDashed-$token"
 $containerAppsJobContainerName = "delivery-worker"
 $pythonRuntime = "PYTHON:3.11"
-$nodeRuntime = "NODE:20-lts"
+$nodeRuntime = "NODE:22-lts"
 
 if ($containerAppsEnvironmentName.Length -gt 32) {
     $containerAppsEnvironmentName = $containerAppsEnvironmentName.Substring(0, 32).TrimEnd('-')
