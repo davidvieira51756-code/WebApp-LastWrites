@@ -1,8 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Location = "switzerlandnorth",
+    [string]$Location = "italynorth",
     [string]$Prefix = "lastwrites",
-    [string]$ResourceGroupName = "rg-lastwrites-516251",
+    [string]$ResourceGroupName = "",
     [string]$GithubRepo = "",
     [switch]$SetGithubSecrets,
     [switch]$RerunWorkflowRuns,
@@ -943,7 +943,7 @@ $containerAppsEnvironmentName = "cae-$prefixDashed-$token"
 $containerAppsJobName = "job-$prefixDashed-$token"
 $containerAppsJobContainerName = "delivery-worker"
 $pythonRuntime = "PYTHON:3.11"
-$nodeRuntime = "NODE:22-lts"
+$nodeRuntime = "NODE:20-lts"
 
 if ($containerAppsEnvironmentName.Length -gt 32) {
     $containerAppsEnvironmentName = $containerAppsEnvironmentName.Substring(0, 32).TrimEnd('-')
