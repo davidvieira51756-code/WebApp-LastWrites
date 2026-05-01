@@ -35,6 +35,7 @@ function Format-AzCliArgumentsForError {
     $sensitiveOptions = @("--account-key", "--connection-string", "--password", "--value")
     $sensitiveSettingNames = @(
         "ACR_PASSWORD",
+        "ACS_EMAIL_CONNECTION_STRING",
         "AUTH_SECRET_KEY",
         "BLOB_CONNECTION_STRING",
         "COSMOS_CONNECTION_STRING",
@@ -382,6 +383,46 @@ function Ensure-ProviderRegistered {
     if ($finalState -ne "Registered") {
         throw "Provider '$Namespace' registration state is '$finalState' after registration attempt."
     }
+}
+
+function Configure-AzCliForAutomation {
+    Invoke-AzCli -Arguments @(
+        "config", "set",
+        "core.only_show_errors=true",
+        "extension.use_dynamic_install=yes_without_prompt",
+        "extension.dynamic_install_allow_preview=true",
+        "-o", "none"
+    ) | Out-Null
+}
+
+function Ensure-AzCliExtension {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [switch]$AllowPreview
+    )
+
+    $extension = $null
+    try {
+        $extension = Get-AzCliJson -Arguments @("extension", "show", "--name", $Name, "-o", "json")
+    }
+    catch {
+        $extension = $null
+    }
+
+    $installArguments = @("extension", "add", "--name", $Name, "--upgrade", "--yes")
+    $updateArguments = @("extension", "update", "--name", $Name)
+    if ($AllowPreview) {
+        $installArguments += @("--allow-preview", "true")
+        $updateArguments += @("--allow-preview", "true")
+    }
+
+    if ($null -eq $extension) {
+        Invoke-AzCli -Arguments ($installArguments + @("-o", "none")) | Out-Null
+        return
+    }
+
+    Invoke-AzCli -Arguments ($updateArguments + @("-o", "none")) | Out-Null
 }
 
 function Test-IsGuid {
@@ -847,7 +888,83 @@ function Resolve-FlexConsumptionLocation {
     throw "Location '$RequestedLocation' does not support Azure Functions Flex Consumption, and no policy-allowed fallback region was found. Run 'az functionapp list-flexconsumption-locations --query ""sort_by(@, &name)[].{Region:name}"" -o table' to choose a supported region."
 }
 
+function Resolve-CommunicationDataLocation {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedLocation
+    )
+
+    $normalized = $RequestedLocation.ToLower()
+    $europeLocations = @(
+        "francecentral", "francesouth", "germanynorth", "germanywestcentral",
+        "italynorth", "northeurope", "norwayeast", "norwaywest", "polandcentral",
+        "spaincentral", "swedencentral", "swedensouth", "switzerlandnorth",
+        "switzerlandwest", "uksouth", "ukwest", "westeurope"
+    )
+    $unitedStatesLocations = @(
+        "centralus", "eastus", "eastus2", "northcentralus", "southcentralus",
+        "westcentralus", "westus", "westus2", "westus3"
+    )
+    $canadaLocations = @("canadacentral", "canadaeast")
+    $australiaLocations = @("australiacentral", "australiacentral2", "australiaeast", "australiasoutheast")
+    $indiaLocations = @("centralindia", "southindia", "westindia")
+    $asiaPacificLocations = @(
+        "eastasia", "japaneast", "japanwest", "koreacentral", "koreasouth",
+        "southeastasia", "uaecentral", "uaenorth"
+    )
+
+    if ($europeLocations -contains $normalized) { return "Europe" }
+    if ($unitedStatesLocations -contains $normalized) { return "UnitedStates" }
+    if ($canadaLocations -contains $normalized) { return "Canada" }
+    if ($australiaLocations -contains $normalized) { return "Australia" }
+    if ($indiaLocations -contains $normalized) { return "India" }
+    if ($asiaPacificLocations -contains $normalized) { return "AsiaPacific" }
+    if ($normalized.StartsWith("uk")) { return "UnitedKingdom" }
+
+    Write-Warning "No explicit ACS data-location mapping was found for '$RequestedLocation'. Falling back to 'Europe'."
+    return "Europe"
+}
+
+function Wait-CommunicationEmailDomainReady {
+    param(
+        [Parameter(Mandatory = $true)][string]$EmailServiceName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$DomainName,
+        [int]$Attempts = 30,
+        [int]$DelaySeconds = 10
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $domain = Get-AzCliJson -Arguments @(
+            "communication", "email", "domain", "show",
+            "--email-service-name", $EmailServiceName,
+            "--resource-group", $ResourceGroupName,
+            "--domain-name", $DomainName,
+            "-o", "json"
+        )
+
+        $provisioningState = [string]$domain.properties.provisioningState
+        $fromSenderDomain = [string]$domain.properties.fromSenderDomain
+        $mailFromSenderDomain = [string]$domain.properties.mailFromSenderDomain
+
+        if ($provisioningState -eq "Succeeded" -and (-not [string]::IsNullOrWhiteSpace($fromSenderDomain) -or -not [string]::IsNullOrWhiteSpace($mailFromSenderDomain))) {
+            return $domain
+        }
+
+        if ($attempt -lt $Attempts) {
+            Write-Warning "ACS email domain '$DomainName' is not ready yet (state='$provisioningState'). Retrying in $DelaySeconds seconds ($attempt/$Attempts)."
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    throw "ACS email domain '$DomainName' did not reach a ready state in time."
+}
+
 Ensure-Command -Name "az"
+Configure-AzCliForAutomation
+Write-Step "Ensuring required Azure CLI extensions are installed"
+Ensure-AzCliExtension -Name "application-insights"
+Ensure-AzCliExtension -Name "communication" -AllowPreview
 $account = Get-AzCliJson -Arguments @("account", "show", "-o", "json")
 $subscriptionId = [string]$account.id
 
@@ -861,7 +978,8 @@ foreach ($namespace in @(
     "Microsoft.KeyVault",
     "Microsoft.ContainerRegistry",
     "Microsoft.App",
-    "Microsoft.OperationalInsights"
+    "Microsoft.OperationalInsights",
+    "Microsoft.Communication"
 )) {
     Ensure-ProviderRegistered -Namespace $namespace
 }
@@ -929,11 +1047,15 @@ elseif ($token.Length -gt 12) {
 
 $Location = Resolve-DeploymentLocation -RequestedLocation $Location
 $Location = Resolve-FlexConsumptionLocation -RequestedLocation $Location
+$communicationDataLocation = Resolve-CommunicationDataLocation -RequestedLocation $Location
 
 $planName = "plan-$prefixDashed-$token"
 $backendAppName = "api-$prefixDashed-$token"
 $frontendAppName = "web-$prefixDashed-$token"
 $functionAppName = "func-$prefixDashed-$token"
+$communicationServiceName = "acs-$prefixDashed-$token"
+$emailServiceName = "acse-$prefixDashed-$token"
+$emailDomainName = "AzureManagedDomain"
 $cosmosAccountName = "cdb-$prefixDashed-$token"
 $cosmosDatabaseName = "last-writes-db"
 $cosmosContainerName = "vaults"
@@ -954,6 +1076,12 @@ if ($containerAppsEnvironmentName.Length -gt 32) {
 if ($containerAppsJobName.Length -gt 32) {
     $containerAppsJobName = $containerAppsJobName.Substring(0, 32).TrimEnd('-')
 }
+if ($communicationServiceName.Length -gt 63) {
+    $communicationServiceName = $communicationServiceName.Substring(0, 63).TrimEnd('-')
+}
+if ($emailServiceName.Length -gt 63) {
+    $emailServiceName = $emailServiceName.Substring(0, 63).TrimEnd('-')
+}
 
 if ($eventSubscriptionName.Length -gt 64) {
     $eventSubscriptionName = $eventSubscriptionName.Substring(0, 64).TrimEnd('-')
@@ -971,6 +1099,8 @@ $eventGridEndpoint = ""
 $eventGridKey = ""
 $appInsightsConnectionString = ""
 $keyVaultUrl = ""
+$communicationServiceConnectionString = ""
+$communicationEmailDomainResourceId = ""
 $acrLoginServer = ""
 $acrUsername = ""
 $acrPassword = ""
@@ -983,8 +1113,8 @@ $backendPrincipalId = ""
 $functionPrincipalId = ""
 $deliveryJobPrincipalId = ""
 $deliveryJobResourceId = ""
-$acsEmailConnectionString = [Environment]::GetEnvironmentVariable("ACS_EMAIL_CONNECTION_STRING")
-$acsEmailSender = [Environment]::GetEnvironmentVariable("ACS_EMAIL_SENDER")
+$acsEmailSenderDomain = ""
+$acsEmailSenderAddress = ""
 
 $deploymentStarted = $false
 
@@ -1003,6 +1133,56 @@ try {
     $appInsightsConnectionString = Get-AzCliTsv -Arguments @("monitor", "app-insights", "component", "show", "--app", $appInsightsName, "--resource-group", $ResourceGroupName, "--query", "connectionString", "-o", "tsv")
     if ([string]::IsNullOrWhiteSpace($appInsightsConnectionString)) {
         throw "Application Insights connection string retrieval returned empty output."
+    }
+
+    Write-Step "Creating Azure Communication Services resources for email"
+    Invoke-AzCli -Arguments @(
+        "communication", "email", "create",
+        "--name", $emailServiceName,
+        "--resource-group", $ResourceGroupName,
+        "--location", "global",
+        "--data-location", $communicationDataLocation,
+        "-o", "none"
+    ) | Out-Null
+    Invoke-AzCli -Arguments @(
+        "communication", "email", "domain", "create",
+        "--domain-name", $emailDomainName,
+        "--email-service-name", $emailServiceName,
+        "--resource-group", $ResourceGroupName,
+        "--location", "global",
+        "--domain-management", "AzureManaged",
+        "--user-engmnt-tracking", "Disabled",
+        "-o", "none"
+    ) | Out-Null
+    $acsDomain = Wait-CommunicationEmailDomainReady -EmailServiceName $emailServiceName -ResourceGroupName $ResourceGroupName -DomainName $emailDomainName
+    $communicationEmailDomainResourceId = [string]$acsDomain.id
+    $acsEmailSenderDomain = [string]$acsDomain.properties.fromSenderDomain
+    if ([string]::IsNullOrWhiteSpace($acsEmailSenderDomain)) {
+        $acsEmailSenderDomain = [string]$acsDomain.properties.mailFromSenderDomain
+    }
+    if ([string]::IsNullOrWhiteSpace($acsEmailSenderDomain)) {
+        throw "ACS email domain sender domain retrieval returned empty output."
+    }
+    $acsEmailSenderAddress = "donotreply@$acsEmailSenderDomain"
+
+    Invoke-AzCli -Arguments @(
+        "communication", "create",
+        "--name", $communicationServiceName,
+        "--resource-group", $ResourceGroupName,
+        "--location", "global",
+        "--data-location", $communicationDataLocation,
+        "--linked-domains", $communicationEmailDomainResourceId,
+        "-o", "none"
+    ) | Out-Null
+    $communicationServiceConnectionString = Get-AzCliTsv -Arguments @(
+        "communication", "list-key",
+        "--name", $communicationServiceName,
+        "--resource-group", $ResourceGroupName,
+        "--query", "primaryConnectionString",
+        "-o", "tsv"
+    )
+    if ([string]::IsNullOrWhiteSpace($communicationServiceConnectionString)) {
+        throw "Azure Communication Services connection string retrieval returned empty output."
     }
 
     Write-Step "Creating storage account for blobs and function host"
@@ -1153,8 +1333,8 @@ try {
         "KEY_VAULT_URL=$keyVaultUrl",
         "DELIVERIES_CONTAINER=deliveries",
         "FRONTEND_BASE_URL=https://$frontendAppName.azurewebsites.net",
-        "ACS_EMAIL_CONNECTION_STRING=$acsEmailConnectionString",
-        "ACS_EMAIL_SENDER=$acsEmailSender",
+        "ACS_EMAIL_CONNECTION_STRING=$communicationServiceConnectionString",
+        "ACS_EMAIL_SENDER=$acsEmailSenderAddress",
         "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString"
     )
     $createJobArguments = @(
@@ -1221,12 +1401,8 @@ try {
     $frontendVerifyEmailUrl = "$frontendUrl/verify-email"
     $authSecretKey = New-StrongSecret -ByteLength 48
 
-    if ([string]::IsNullOrWhiteSpace($acsEmailConnectionString) -or [string]::IsNullOrWhiteSpace($acsEmailSender)) {
-        Write-Warning "ACS email settings are missing in the local environment. Set ACS_EMAIL_CONNECTION_STRING and ACS_EMAIL_SENDER before rerunning deploy if you want delivery emails enabled."
-    }
-
     Write-Step "Applying runtime settings to backend, frontend, and function apps"
-    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "KEY_VAULT_RSA_KEY_SIZE=2048", "KEY_VAULT_RSA_HARDWARE_PROTECTED=false", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "COSMOS_AUDIT_CONTAINER=$cosmosAuditContainerName", "FRONTEND_ORIGINS=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "AUTH_SECRET_KEY=$authSecretKey", "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl", "AUTH_ACCESS_TOKEN_TTL_MINUTES=120", "AUTH_REQUIRE_EMAIL_VERIFICATION=true", "AUTH_EXPOSE_VERIFICATION_TOKEN=false", "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440", "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000", "LOGIN_RATE_LIMIT_ATTEMPTS=5", "LOGIN_RATE_LIMIT_WINDOW_SECONDS=300", "MAX_UPLOAD_BYTES=10485760", "UPLOAD_ALLOWED_CONTENT_TYPES=application/json,application/msword,application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,image/jpeg,image/png,text/csv,text/markdown,text/plain", "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "SCM_DO_BUILD_DURING_DEPLOYMENT=true", "ENABLE_ORYX_BUILD=true", "-o", "none") | Out-Null
+    Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--settings", "KEY_VAULT_URL=$keyVaultUrl", "KEY_VAULT_RSA_KEY_SIZE=2048", "KEY_VAULT_RSA_HARDWARE_PROTECTED=false", "COSMOS_DATABASE_NAME=$cosmosDatabaseName", "COSMOS_VAULTS_CONTAINER=$cosmosContainerName", "COSMOS_AUDIT_CONTAINER=$cosmosAuditContainerName", "FRONTEND_ORIGINS=$frontendUrl", "FRONTEND_BASE_URL=$frontendUrl", "COSMOS_CONNECTION_STRING_SECRET_NAME=COSMOS-CONNECTION-STRING", "BLOB_CONNECTION_STRING_SECRET_NAME=BLOB-CONNECTION-STRING", "AUTH_SECRET_KEY=$authSecretKey", "FRONTEND_VERIFY_EMAIL_URL=$frontendVerifyEmailUrl", "AUTH_ACCESS_TOKEN_TTL_MINUTES=120", "AUTH_REQUIRE_EMAIL_VERIFICATION=true", "AUTH_EXPOSE_VERIFICATION_TOKEN=false", "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES=1440", "AUTH_PASSWORD_PBKDF2_ITERATIONS=260000", "LOGIN_RATE_LIMIT_ATTEMPTS=5", "LOGIN_RATE_LIMIT_WINDOW_SECONDS=300", "MAX_UPLOAD_BYTES=10485760", "UPLOAD_ALLOWED_CONTENT_TYPES=application/json,application/msword,application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,image/jpeg,image/png,text/csv,text/markdown,text/plain", "ACS_EMAIL_CONNECTION_STRING=$communicationServiceConnectionString", "ACS_EMAIL_SENDER=$acsEmailSenderAddress", "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "SCM_DO_BUILD_DURING_DEPLOYMENT=true", "ENABLE_ORYX_BUILD=true", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "appsettings", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--settings", "NEXT_PUBLIC_API_URL=$backendUrl", "APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "NEXT_PUBLIC_APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $backendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "python -m uvicorn main:app --host 0.0.0.0 --port 8000", "-o", "none") | Out-Null
     Invoke-AzCli -Arguments @("webapp", "config", "set", "--name", $frontendAppName, "--resource-group", $ResourceGroupName, "--startup-file", "HOSTNAME=0.0.0.0 node /home/site/wwwroot/server.js", "-o", "none") | Out-Null
@@ -1240,6 +1416,8 @@ try {
             BLOB_CONNECTION_STRING = $blobConnectionString
             EVENT_GRID_ENDPOINT = $eventGridEndpoint
             EVENT_GRID_KEY = $eventGridKey
+            ACS_EMAIL_CONNECTION_STRING = $communicationServiceConnectionString
+            ACS_EMAIL_SENDER = $acsEmailSenderAddress
         }
         foreach ($entry in $requiredValues.GetEnumerator()) {
             if ([string]::IsNullOrWhiteSpace([string]$entry.Value)) {
@@ -1260,6 +1438,7 @@ COSMOS_AUDIT_CONTAINER=$cosmosAuditContainerName
 BLOB_CONNECTION_STRING=$blobConnectionString
 
 FRONTEND_ORIGINS=http://localhost:3000
+FRONTEND_BASE_URL=http://localhost:3000
 FRONTEND_VERIFY_EMAIL_URL=http://localhost:3000/verify-email
 
 AUTH_SECRET_KEY=local-dev-change-me-auth-secret
@@ -1272,6 +1451,8 @@ LOGIN_RATE_LIMIT_ATTEMPTS=5
 LOGIN_RATE_LIMIT_WINDOW_SECONDS=300
 MAX_UPLOAD_BYTES=10485760
 UPLOAD_ALLOWED_CONTENT_TYPES=application/json,application/msword,application/pdf,application/vnd.ms-excel,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/zip,image/jpeg,image/png,text/csv,text/markdown,text/plain
+ACS_EMAIL_CONNECTION_STRING=$communicationServiceConnectionString
+ACS_EMAIL_SENDER=$acsEmailSenderAddress
 APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString
 "@
         Set-Content -Path $backendEnvPath -Value $backendEnvContent -Encoding UTF8
@@ -1438,6 +1619,9 @@ NEXT_PUBLIC_APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString
     Write-Host "Function App:  $functionAppName"
     Write-Host "Job Env:       $containerAppsEnvironmentName"
     Write-Host "Delivery Job:  $containerAppsJobName"
+    Write-Host "ACS:           $communicationServiceName"
+    Write-Host "Email Service: $emailServiceName"
+    Write-Host "Email Sender:  $acsEmailSenderAddress"
     Write-Host "ACR:           $acrLoginServer"
     Write-Host "Portal:        $resourceGroupPortalUrl"
 }

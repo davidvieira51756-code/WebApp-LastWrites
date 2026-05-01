@@ -37,6 +37,7 @@ try:
     from backend.services.auth_service import AuthService
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
+    from backend.services.email_service import EmailService
     from backend.services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
     from backend.services.keyvault_service import KeyVaultService
     from backend.services.local_blob_service import LocalBlobService
@@ -63,6 +64,7 @@ except ModuleNotFoundError:
     from services.auth_service import AuthService
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
+    from services.email_service import EmailService
     from services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
     from services.keyvault_service import KeyVaultService
     from services.local_blob_service import LocalBlobService
@@ -195,6 +197,16 @@ def get_auth_service(request: Request) -> AuthService:
             detail="Auth service is not initialized.",
         )
     return auth_service
+
+
+def get_email_service(request: Request) -> EmailService:
+    email_service = getattr(request.app.state, "email_service", None)
+    if email_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email service is not initialized.",
+        )
+    return email_service
 
 
 def get_vault_key_service(request: Request):
@@ -521,6 +533,7 @@ def startup_event() -> None:
             blob_service = LocalBlobService()
             blob_service.initialize()
             auth_service = AuthService()
+            email_service = EmailService()
             vault_key_service = LocalVaultKeyService()
             app.state.keyvault_service = None
             logger.info("Application startup completed in LOCAL_DEV_MODE.")
@@ -537,6 +550,7 @@ def startup_event() -> None:
                 connection_string=secure_settings["blob_connection_string"]
             )
             auth_service = AuthService()
+            email_service = EmailService()
             key_vault_url = os.getenv("KEY_VAULT_URL", "").strip()
             if key_vault_url:
                 vault_key_service = AzureVaultKeyService(key_vault_url=key_vault_url)
@@ -553,6 +567,7 @@ def startup_event() -> None:
         app.state.cosmos_service = cosmos_service
         app.state.blob_service = blob_service
         app.state.auth_service = auth_service
+        app.state.email_service = email_service
         app.state.vault_key_service = vault_key_service
     except Exception:
         logger.exception("Application startup failed during service initialization.")
@@ -567,6 +582,7 @@ def startup_event() -> None:
 def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegisterResponse:
     cosmos_service = get_cosmos_service(request)
     auth_service = get_auth_service(request)
+    email_service = get_email_service(request)
 
     normalized_email = auth_service.normalize_email(payload.email)
     if not is_valid_email(normalized_email):
@@ -602,6 +618,35 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
 
     verification_token = verification_payload["token"]
     verification_url = auth_service.build_email_verification_url(verification_token)
+    verification_email_result = email_service.send_verification_email(
+        recipient=normalized_email,
+        verification_url=verification_url,
+    )
+    if verification_email_result.sent:
+        write_audit_event(
+            cosmos_service,
+            event_type="verification_email_sent",
+            owner_user_id=str(created_user.get("id", "")),
+            actor_user_id=str(created_user.get("id", "")),
+            actor_email=normalized_email,
+            metadata={
+                "recipient_email": normalized_email,
+                "message_id": verification_email_result.message_id,
+            },
+        )
+    elif verification_email_result.failed:
+        write_audit_event(
+            cosmos_service,
+            event_type="email_send_failed",
+            owner_user_id=str(created_user.get("id", "")),
+            actor_user_id=str(created_user.get("id", "")),
+            actor_email=normalized_email,
+            metadata={
+                "email_kind": "verification",
+                "recipient_email": normalized_email,
+                "error": verification_email_result.error,
+            },
+        )
     return AuthRegisterResponse(
         message="Account created. Verify your email before signing in.",
         user_id=str(created_user.get("id")),
@@ -1331,6 +1376,7 @@ def add_vault_recipient(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     cosmos_service = get_cosmos_service(request)
+    email_service = get_email_service(request)
     recipient_email = payload.email.strip().lower()
     get_owned_vault_or_404(
         cosmos_service=cosmos_service,
@@ -1370,6 +1416,42 @@ def add_vault_recipient(
     recipients = updated_vault.get("recipients", [])
     if not isinstance(recipients, list):
         recipients = []
+
+    owner_user_id = str(current_user.get("id", ""))
+    owner_email = str(current_user.get("email", "")).strip().lower()
+    invite_result = email_service.send_recipient_invited_email(
+        recipient=recipient_email,
+        vault_id=vault_id,
+        vault_name=str(updated_vault.get("name", "Unnamed Vault")).strip() or "Unnamed Vault",
+        owner_email=owner_email or "unknown",
+    )
+    if invite_result.sent:
+        write_audit_event(
+            cosmos_service,
+            event_type="recipient_invited_email_sent",
+            owner_user_id=owner_user_id,
+            vault_id=vault_id,
+            actor_user_id=owner_user_id,
+            actor_email=owner_email,
+            metadata={
+                "recipient_email": recipient_email,
+                "message_id": invite_result.message_id,
+            },
+        )
+    elif invite_result.failed:
+        write_audit_event(
+            cosmos_service,
+            event_type="email_send_failed",
+            owner_user_id=owner_user_id,
+            vault_id=vault_id,
+            actor_user_id=owner_user_id,
+            actor_email=owner_email,
+            metadata={
+                "email_kind": "recipient_invite",
+                "recipient_email": recipient_email,
+                "error": invite_result.error,
+            },
+        )
 
     return {
         "vault_id": vault_id,

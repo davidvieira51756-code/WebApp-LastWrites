@@ -14,7 +14,6 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from azure.communication.email import EmailClient
 from azure.core.exceptions import AzureError, ResourceExistsError
 from azure.cosmos import CosmosClient, exceptions
 from azure.identity import DefaultAzureCredential
@@ -27,6 +26,8 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+from email_service import EmailService
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -331,9 +332,8 @@ def _recipient_access_url(vault_id: str) -> Optional[str]:
 
 
 def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
-    connection_string = os.getenv("ACS_EMAIL_CONNECTION_STRING", "").strip()
-    sender_address = os.getenv("ACS_EMAIL_SENDER", "").strip()
-    if not connection_string or not sender_address:
+    email_service = EmailService()
+    if not email_service.is_configured():
         logger.warning("ACS email configuration is missing; delivery notification skipped.")
         return
 
@@ -364,27 +364,55 @@ def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
             f"<p>Access it here after signing in: <a href=\"{access_url}\">{access_url}</a></p>"
         )
 
-    email_client = EmailClient.from_connection_string(connection_string)
-    message = {
-        "senderAddress": sender_address,
-        "recipients": {
-            "to": [{"address": recipient} for recipient in recipients],
-        },
-        "content": {
-            "subject": f"[Last Writes] Delivery package available for '{vault_name}'",
-            "plainText": "\n".join(plain_text_lines),
-            "html": "".join(html_lines),
-        },
-    }
+    subject = f"[Last Writes] Delivery package available for '{vault_name}'"
+    plain_text = "\n".join(plain_text_lines)
+    html = "".join(html_lines)
+    owner_user_id = str(vault_document.get("user_id", "")).strip()
 
-    poller = email_client.begin_send(message)
-    result = poller.result()
-    logger.info(
-        "ACS email notification sent. vault_id=%s message_id=%s recipient_count=%s",
-        vault_id,
-        getattr(result, "id", None),
-        len(recipients),
-    )
+    for recipient in recipients:
+        send_result = email_service.send_email(
+            recipient=recipient,
+            subject=subject,
+            plain_text=plain_text,
+            html=html,
+        )
+        if send_result.sent:
+            logger.info(
+                "Delivery notification sent. vault_id=%s recipient=%s message_id=%s",
+                vault_id,
+                recipient,
+                send_result.message_id,
+            )
+            _record_audit_event(
+                event_type="delivery_email_sent",
+                owner_user_id=owner_user_id,
+                vault_id=vault_id,
+                actor_email=recipient,
+                source="worker",
+                metadata={
+                    "recipient_email": recipient,
+                    "message_id": send_result.message_id,
+                },
+            )
+        elif send_result.failed:
+            logger.warning(
+                "Delivery notification failed. vault_id=%s recipient=%s error=%s",
+                vault_id,
+                recipient,
+                send_result.error,
+            )
+            _record_audit_event(
+                event_type="email_send_failed",
+                owner_user_id=owner_user_id,
+                vault_id=vault_id,
+                actor_email=recipient,
+                source="worker",
+                metadata={
+                    "email_kind": "delivery",
+                    "recipient_email": recipient,
+                    "error": send_result.error,
+                },
+            )
 
 
 def _download_blob_bytes(container_name: str, blob_name: str) -> bytes:
