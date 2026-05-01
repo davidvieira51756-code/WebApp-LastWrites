@@ -25,8 +25,6 @@ type RegisterResponse = {
   user_id: string;
   email: string;
   email_verification_required: boolean;
-  verification_url: string;
-  verification_token?: string | null;
 };
 
 const EMAIL_REGEX =
@@ -53,8 +51,6 @@ function AuthPageContent() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [verificationUrl, setVerificationUrl] = useState<string | null>(null);
-  const [verificationToken, setVerificationToken] = useState<string | null>(null);
 
   useEffect(() => {
     const token = getAuthToken();
@@ -67,8 +63,6 @@ function AuthPageContent() {
     event.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
-    setVerificationUrl(null);
-    setVerificationToken(null);
 
     if (!apiUrl) {
       setErrorMessage("NEXT_PUBLIC_API_URL is not configured.");
@@ -138,9 +132,9 @@ function AuthPageContent() {
       }
 
       const payload = (await response.json()) as RegisterResponse;
-      setSuccessMessage(payload.message || "Account created successfully.");
-      setVerificationUrl(payload.verification_url || null);
-      setVerificationToken(payload.verification_token || null);
+      setSuccessMessage(
+        payload.message || "Account created successfully. Check your email for the verification link.",
+      );
       setMode("signin");
       setPassword("");
       setConfirmPassword("");
@@ -180,12 +174,13 @@ function AuthPageContent() {
         <section
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+            gridTemplateColumns: "minmax(320px, 1fr)",
             gap: t.space.m,
             alignItems: "start",
+            justifyItems: "center",
           }}
         >
-          <Card variant="elevated" style={{ gap: t.space.s }}>
+          <Card variant="elevated" style={{ gap: t.space.s, width: "100%", maxWidth: 520 }}>
             <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
               <Button
                 type="button"
@@ -260,50 +255,6 @@ function AuthPageContent() {
 
             {errorMessage ? <Alert variant="error" message={errorMessage} /> : null}
             {successMessage ? <Alert variant="success" message={successMessage} /> : null}
-          </Card>
-
-          <Card variant="secondary" style={{ gap: t.space.s }}>
-            <Text variant="h3">Email Verification</Text>
-            <Text variant="bodySmall" color="secondary">
-              After sign up, open your verification link. In local development, you can use the
-              generated token directly.
-            </Text>
-
-            {verificationUrl ? (
-              <Alert
-                variant="info"
-                title="Verification URL"
-                message={verificationUrl}
-                style={{ wordBreak: "break-all" }}
-              />
-            ) : null}
-
-            {verificationToken ? (
-              <Alert
-                variant="warning"
-                title="Local Development Token"
-                message={verificationToken}
-                style={{ wordBreak: "break-all" }}
-              />
-            ) : null}
-
-            <Button
-              type="button"
-              variant="Primary"
-              onClick={() => {
-                if (verificationToken) {
-                  router.push(`/verify-email?token=${encodeURIComponent(verificationToken)}`);
-                  return;
-                }
-                router.push("/verify-email");
-              }}
-            >
-              Open Verification Page
-            </Button>
-
-            <Text variant="caption" color="muted">
-              Next path after sign in: {nextPath}
-            </Text>
           </Card>
         </section>
       </div>
