@@ -701,6 +701,19 @@ function Wait-GithubWorkflowRun {
     throw "GitHub Actions workflow '$WorkflowName' did not complete in time."
 }
 
+function Wait-ForGithubActionsCredentialPropagation {
+    param(
+        [int]$DelaySeconds = 90
+    )
+
+    if ($DelaySeconds -le 0) {
+        return
+    }
+
+    Write-Warning "Waiting $DelaySeconds seconds for GitHub Actions Azure credentials and role assignments to propagate before starting workflow runs."
+    Start-Sleep -Seconds $DelaySeconds
+}
+
 function Wait-FunctionAvailable {
     param(
         [Parameter(Mandatory = $true)][string]$FunctionAppName,
@@ -1526,6 +1539,11 @@ NEXT_PUBLIC_APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString
         Set-OrUpdateGithubSecret -Name "ACR_PASSWORD" -Value $acrPassword -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_CONTAINERAPPS_RESOURCE_GROUP" -Value $ResourceGroupName -Repo $GithubRepo
         Set-OrUpdateGithubSecret -Name "AZURE_CONTAINERAPPS_JOB_NAME" -Value $containerAppsJobName -Repo $GithubRepo
+
+        if ($RerunWorkflowRuns) {
+            Write-Step "Waiting for GitHub secret and Azure RBAC propagation"
+            Wait-ForGithubActionsCredentialPropagation -DelaySeconds 90
+        }
     }
 
     if ($RerunWorkflowRuns) {
