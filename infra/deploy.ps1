@@ -943,9 +943,20 @@ function Wait-CommunicationEmailDomainReady {
             "-o", "json"
         )
 
-        $provisioningState = [string]$domain.properties.provisioningState
-        $fromSenderDomain = [string]$domain.properties.fromSenderDomain
-        $mailFromSenderDomain = [string]$domain.properties.mailFromSenderDomain
+        $provisioningState = [string]$domain.provisioningState
+        if ([string]::IsNullOrWhiteSpace($provisioningState) -and $null -ne $domain.properties) {
+            $provisioningState = [string]$domain.properties.provisioningState
+        }
+
+        $fromSenderDomain = [string]$domain.fromSenderDomain
+        if ([string]::IsNullOrWhiteSpace($fromSenderDomain) -and $null -ne $domain.properties) {
+            $fromSenderDomain = [string]$domain.properties.fromSenderDomain
+        }
+
+        $mailFromSenderDomain = [string]$domain.mailFromSenderDomain
+        if ([string]::IsNullOrWhiteSpace($mailFromSenderDomain) -and $null -ne $domain.properties) {
+            $mailFromSenderDomain = [string]$domain.properties.mailFromSenderDomain
+        }
 
         if ($provisioningState -eq "Succeeded" -and (-not [string]::IsNullOrWhiteSpace($fromSenderDomain) -or -not [string]::IsNullOrWhiteSpace($mailFromSenderDomain))) {
             return $domain
@@ -1156,8 +1167,14 @@ try {
     ) | Out-Null
     $acsDomain = Wait-CommunicationEmailDomainReady -EmailServiceName $emailServiceName -ResourceGroupName $ResourceGroupName -DomainName $emailDomainName
     $communicationEmailDomainResourceId = [string]$acsDomain.id
-    $acsEmailSenderDomain = [string]$acsDomain.properties.fromSenderDomain
+    $acsEmailSenderDomain = [string]$acsDomain.fromSenderDomain
     if ([string]::IsNullOrWhiteSpace($acsEmailSenderDomain)) {
+        $acsEmailSenderDomain = [string]$acsDomain.mailFromSenderDomain
+    }
+    if ([string]::IsNullOrWhiteSpace($acsEmailSenderDomain) -and $null -ne $acsDomain.properties) {
+        $acsEmailSenderDomain = [string]$acsDomain.properties.fromSenderDomain
+    }
+    if ([string]::IsNullOrWhiteSpace($acsEmailSenderDomain) -and $null -ne $acsDomain.properties) {
         $acsEmailSenderDomain = [string]$acsDomain.properties.mailFromSenderDomain
     }
     if ([string]::IsNullOrWhiteSpace($acsEmailSenderDomain)) {
