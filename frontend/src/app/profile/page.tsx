@@ -17,6 +17,10 @@ type ProfileResponse = {
   full_name: string;
   birth_date: string;
   display_name_preference: "username" | "real_name";
+  account_status: "active" | "pending_deletion";
+  last_activity_at?: string | null;
+  account_deletion_started_at?: string | null;
+  account_deletion_scheduled_at?: string | null;
 };
 
 const USERNAME_REGEX = /^[A-Za-z0-9_]{3,32}$/;
@@ -53,6 +57,10 @@ export default function ProfilePage() {
   const [fullName, setFullName] = useState("");
   const [birthDate, setBirthDate] = useState("");
   const [displayNamePreference, setDisplayNamePreference] = useState<"username" | "real_name">("username");
+  const [accountStatus, setAccountStatus] = useState<"active" | "pending_deletion">("active");
+  const [lastActivityAt, setLastActivityAt] = useState<string | null>(null);
+  const [accountDeletionStartedAt, setAccountDeletionStartedAt] = useState<string | null>(null);
+  const [accountDeletionScheduledAt, setAccountDeletionScheduledAt] = useState<string | null>(null);
 
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -110,6 +118,10 @@ export default function ProfilePage() {
       setFullName(payload.full_name);
       setBirthDate(payload.birth_date);
       setDisplayNamePreference(payload.display_name_preference);
+      setAccountStatus(payload.account_status);
+      setLastActivityAt(payload.last_activity_at || null);
+      setAccountDeletionStartedAt(payload.account_deletion_started_at || null);
+      setAccountDeletionScheduledAt(payload.account_deletion_scheduled_at || null);
     } catch (error) {
       setProfileError(error instanceof Error ? error.message : "Unexpected profile load error.");
     } finally {
@@ -261,6 +273,13 @@ export default function ProfilePage() {
     return <main style={{ minHeight: "100vh", background: mainBackground }} />;
   }
 
+  const formatIsoDate = (value: string | null): string => {
+    if (!value) return "Unavailable";
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleString();
+  };
+
   return (
     <main
       style={{
@@ -301,6 +320,24 @@ export default function ProfilePage() {
           >
             <Card variant="elevated" style={{ gap: t.space.s }}>
               <Text variant="h3">Public Profile</Text>
+              <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
+                <Text variant="label">
+                  {accountStatus === "pending_deletion" ? "Account deletion in progress" : "Account active"}
+                </Text>
+                <Text variant="caption" color="muted">
+                  Last activity: {formatIsoDate(lastActivityAt)}
+                </Text>
+                {accountDeletionStartedAt ? (
+                  <Text variant="caption" color="muted">
+                    Deletion process started: {formatIsoDate(accountDeletionStartedAt)}
+                  </Text>
+                ) : null}
+                {accountDeletionScheduledAt ? (
+                  <Text variant="caption" color="muted">
+                    Scheduled review: {formatIsoDate(accountDeletionScheduledAt)}
+                  </Text>
+                ) : null}
+              </Card>
               <form onSubmit={handleProfileSubmit} style={{ display: "grid", gap: t.space.s }}>
                 <Input id="profile-email" label="Email" value={email} disabled />
                 <Input id="profile-username" label="Username" value={username} onChange={(event) => setUsername(event.target.value)} required />
@@ -356,7 +393,7 @@ export default function ProfilePage() {
               <Card variant="elevated" style={{ gap: t.space.s }}>
                 <Text variant="h3">Delete Account</Text>
                 <Text variant="bodySmall" color="secondary">
-                  This removes your account and deletes vaults you own.
+                  This removes your account and deletes vaults you own. Accounts with vaults that are active or pending delivery cannot be deleted yet.
                 </Text>
                 <form onSubmit={handleDeleteAccount} style={{ display: "grid", gap: t.space.s }}>
                   <Input id="delete-password" type="password" label="Password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} required />

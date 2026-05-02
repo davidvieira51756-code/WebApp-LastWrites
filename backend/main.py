@@ -8,7 +8,7 @@ import re
 import secrets
 import string
 from collections import defaultdict, deque
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -94,6 +94,12 @@ SAFE_FILENAME_REGEX = re.compile(r"[^A-Za-z0-9._() -]+")
 SHORT_ID_ALPHABET = string.ascii_lowercase + string.digits
 FINAL_IMMUTABLE_VAULT_STATUSES = {"delivered", "delivered_archived"}
 FINAL_IMMUTABLE_VAULT_ERROR = "This vault has already been delivered and archived. It can no longer be modified."
+ACCOUNT_DELETION_BLOCKING_VAULT_STATUSES = {
+    "active",
+    "pending_activation",
+    "grace_period",
+    "delivery_initiated",
+}
 DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES = {
     "application/json",
     "application/msword",
@@ -418,6 +424,107 @@ def build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str
     return None
 
 
+def build_user_secondary_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not user_item:
+        return None
+
+    preference = str(user_item.get("display_name_preference", "username")).strip().lower()
+    username = str(user_item.get("username", "")).strip()
+
+    if preference == "real_name" and username:
+        return username
+    return None
+
+
+def normalize_grace_period_unit(value: str) -> str:
+    normalized_value = str(value or "").strip().lower()
+    if normalized_value not in {"hours", "days"}:
+        raise ValueError("Grace period unit must be either 'hours' or 'days'.")
+    return normalized_value
+
+
+def validate_grace_period(value: int, unit: str) -> tuple[int, str]:
+    normalized_unit = normalize_grace_period_unit(unit)
+    try:
+        normalized_value = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Grace period value must be a whole number.") from exc
+
+    if normalized_value < 1:
+        raise ValueError("Grace period value must be at least 1.")
+    if normalized_unit == "hours" and normalized_value > 24 * 3650:
+        raise ValueError("Grace period in hours is too large.")
+    if normalized_unit == "days" and normalized_value > 3650:
+        raise ValueError("Grace period in days is too large.")
+    return normalized_value, normalized_unit
+
+
+def compute_grace_period_timedelta(value: int, unit: str) -> timedelta:
+    normalized_value, normalized_unit = validate_grace_period(value, unit)
+    if normalized_unit == "hours":
+        return timedelta(hours=normalized_value)
+    return timedelta(days=normalized_value)
+
+
+def ensure_user_lifecycle_shape(cosmos_service: CosmosService) -> None:
+    for user_item in cosmos_service.list_users():
+        user_id = str(user_item.get("id", "")).strip()
+        update_data: Dict[str, Any] = {}
+        if str(user_item.get("account_status", "")).strip().lower() not in {"active", "pending_deletion"}:
+            update_data["account_status"] = "active"
+        if not str(user_item.get("last_activity_at", "")).strip():
+            update_data["last_activity_at"] = _now_iso()
+        if "account_deletion_started_at" not in user_item:
+            update_data["account_deletion_started_at"] = None
+        if "account_deletion_scheduled_at" not in user_item:
+            update_data["account_deletion_scheduled_at"] = None
+        if update_data:
+            cosmos_service.update_user(user_id, update_data)
+
+
+def touch_user_activity(
+    cosmos_service: CosmosService,
+    user_item: Dict[str, Any],
+    *,
+    min_interval_seconds: int = 900,
+) -> Dict[str, Any]:
+    user_id = str(user_item.get("id", "")).strip()
+    if not user_id:
+        return user_item
+
+    last_activity_at = _parse_iso_datetime(str(user_item.get("last_activity_at", "")).strip())
+    now = datetime.now(timezone.utc)
+    should_update = last_activity_at is None or (now - last_activity_at).total_seconds() >= min_interval_seconds
+    should_restore = str(user_item.get("account_status", "active")).strip().lower() == "pending_deletion"
+
+    if not should_update and not should_restore:
+        return user_item
+
+    update_data: Dict[str, Any] = {}
+    if should_update:
+        update_data["last_activity_at"] = now.isoformat()
+    if should_restore:
+        update_data["account_status"] = "active"
+        update_data["account_deletion_started_at"] = None
+        update_data["account_deletion_scheduled_at"] = None
+
+    try:
+        updated_user = cosmos_service.update_user(user_id, update_data)
+    except Exception:
+        logger.exception("Failed to persist last activity for user id=%s", user_id)
+        return user_item
+
+    return updated_user or user_item
+
+
+def user_has_deletion_blocking_vaults(cosmos_service: CosmosService, user_id: str) -> bool:
+    for vault_item in cosmos_service.list_vaults(user_id=user_id):
+        status_value = str(vault_item.get("status", "active")).strip().lower()
+        if status_value in ACCOUNT_DELETION_BLOCKING_VAULT_STATUSES:
+            return True
+    return False
+
+
 def _generate_short_id() -> str:
     return "".join(secrets.choice(SHORT_ID_ALPHABET) for _ in range(8))
 
@@ -447,6 +554,7 @@ def ensure_vault_short_ids(cosmos_service: CosmosService) -> None:
 def ensure_vault_access_shapes(cosmos_service: CosmosService) -> None:
     for vault_item in cosmos_service.list_vaults():
         internal_vault_id = str(vault_item.get("id", "")).strip()
+        update_data: Dict[str, Any] = {}
         recipients = vault_item.get("recipients", [])
         if not isinstance(recipients, list):
             recipients = []
@@ -473,20 +581,41 @@ def ensure_vault_access_shapes(cosmos_service: CosmosService) -> None:
             int(vault_item.get("activation_threshold", 1) or 1),
             normalized_recipients,
         )
+        try:
+            grace_period_value, grace_period_unit = validate_grace_period(
+                int(vault_item.get("grace_period_value", vault_item.get("grace_period_days", 1)) or 1),
+                str(vault_item.get("grace_period_unit", "days") or "days"),
+            )
+        except ValueError:
+            grace_period_value, grace_period_unit = 1, "days"
+
+        update_data.update(
+            {
+                "grace_period_value": grace_period_value,
+                "grace_period_unit": grace_period_unit,
+            }
+        )
+        if "grace_period_days" in vault_item:
+            update_data["grace_period_days"] = None
 
         if (
             normalized_recipients != recipients
             or files_changed
             or normalized_threshold != int(vault_item.get("activation_threshold", 1) or 1)
+            or int(vault_item.get("grace_period_value", vault_item.get("grace_period_days", 1)) or 1)
+            != grace_period_value
+            or str(vault_item.get("grace_period_unit", "days") or "days").strip().lower()
+            != grace_period_unit
+            or "grace_period_days" in vault_item
         ):
-            cosmos_service.update_vault(
-                internal_vault_id,
+            update_data.update(
                 {
                     "recipients": normalized_recipients,
                     "files": normalized_files,
                     "activation_threshold": normalized_threshold,
-                },
+                }
             )
+            cosmos_service.update_vault(internal_vault_id, update_data)
 
 
 def resolve_vault_by_public_id(cosmos_service: CosmosService, public_vault_id: str) -> Optional[Dict[str, Any]]:
@@ -803,7 +932,7 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return user
+    return touch_user_activity(cosmos_service, user)
 
 
 def get_owned_vault_or_404(
@@ -888,6 +1017,7 @@ def startup_event() -> None:
         app.state.vault_key_service = vault_key_service
         ensure_vault_short_ids(cosmos_service)
         ensure_vault_access_shapes(cosmos_service)
+        ensure_user_lifecycle_shape(cosmos_service)
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise
@@ -944,6 +1074,10 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
         "full_name": normalized_full_name,
         "birth_date": normalized_birth_date,
         "display_name_preference": "username",
+        "account_status": "active",
+        "last_activity_at": _now_iso(),
+        "account_deletion_started_at": None,
+        "account_deletion_scheduled_at": None,
         "password_hash": password_hash,
         "is_email_verified": False,
         "verification_token_hash": verification_payload["token_hash"],
@@ -1123,6 +1257,7 @@ def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenRespo
         actor_email=normalized_email,
         metadata={"email_verified": email_verified},
     )
+    user_item = touch_user_activity(cosmos_service, user_item, min_interval_seconds=0)
     return AuthTokenResponse(
         access_token=token_payload["access_token"],
         token_type=token_payload["token_type"],
@@ -1145,6 +1280,10 @@ def get_current_user_profile(current_user: Dict[str, Any] = Depends(get_current_
         display_name_preference=resolve_display_name_preference(
             str(current_user.get("display_name_preference", "username"))
         ),
+        account_status=str(current_user.get("account_status", "active")).strip().lower() or "active",
+        last_activity_at=str(current_user.get("last_activity_at", "")).strip() or None,
+        account_deletion_started_at=str(current_user.get("account_deletion_started_at", "")).strip() or None,
+        account_deletion_scheduled_at=str(current_user.get("account_deletion_scheduled_at", "")).strip() or None,
     )
 
 
@@ -1213,6 +1352,10 @@ def update_current_user_profile(
         display_name_preference=resolve_display_name_preference(
             str(updated_user.get("display_name_preference", "username"))
         ),
+        account_status=str(updated_user.get("account_status", "active")).strip().lower() or "active",
+        last_activity_at=str(updated_user.get("last_activity_at", "")).strip() or None,
+        account_deletion_started_at=str(updated_user.get("account_deletion_started_at", "")).strip() or None,
+        account_deletion_scheduled_at=str(updated_user.get("account_deletion_scheduled_at", "")).strip() or None,
     )
 
 
@@ -1319,6 +1462,12 @@ def delete_current_user_account(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    if user_has_deletion_blocking_vaults(cosmos_service, user_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account cannot be deleted while it still owns vaults that are active or pending delivery.",
+        )
+
     try:
         for vault_item in cosmos_service.list_vaults(user_id=user_id):
             _delete_vault_assets(blob_service, vault_item)
@@ -1380,6 +1529,12 @@ def create_vault(
         recipients = vault_payload.get("recipients", [])
         if recipients is not None:
             vault_payload["recipients"] = normalize_recipients(recipients)
+        grace_period_value, grace_period_unit = validate_grace_period(
+            int(vault_payload.get("grace_period_value", 1) or 1),
+            str(vault_payload.get("grace_period_unit", "days") or "days"),
+        )
+        vault_payload["grace_period_value"] = grace_period_value
+        vault_payload["grace_period_unit"] = grace_period_unit
         vault_payload["activation_threshold"] = validate_activation_threshold_for_recipients(
             int(vault_payload.get("activation_threshold", 1) or 1),
             vault_payload.get("recipients", []),
@@ -1448,9 +1603,10 @@ def _build_recipient_vault_summary(
         threshold_value = 1
 
     try:
-        grace_period_days_value = max(0, int(vault_item.get("grace_period_days", 0)))
+        grace_period_value = max(1, int(vault_item.get("grace_period_value", 1)))
     except (TypeError, ValueError):
-        grace_period_days_value = 0
+        grace_period_value = 1
+    grace_period_unit = str(vault_item.get("grace_period_unit", "days")).strip().lower() or "days"
 
     delivery_packages = vault_item.get("delivery_packages", [])
     if not isinstance(delivery_packages, list):
@@ -1464,12 +1620,15 @@ def _build_recipient_vault_summary(
     )
 
     owner_display_name = build_user_display_name(vault_item.get("owner_profile"))
+    owner_username = build_user_secondary_name(vault_item.get("owner_profile"))
     return RecipientVaultSummary(
         id=str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")),
         name=str(vault_item.get("name", "")),
         owner_display_name=owner_display_name,
+        owner_username=owner_username,
         status=str(vault_item.get("status", "active")),
-        grace_period_days=grace_period_days_value,
+        grace_period_value=grace_period_value,
+        grace_period_unit=grace_period_unit,
         activation_threshold=threshold_value,
         activation_requests_count=len(activation_requests),
         has_requested_activation=has_requested,
@@ -1563,6 +1722,15 @@ def update_vault(
             update_data["recipients"] = normalize_recipients(update_data["recipients"])
         if "owner_message" in update_data:
             update_data["owner_message"] = str(update_data.get("owner_message", "")).strip() or None
+        grace_period_value = update_data.get("grace_period_value", existing_vault.get("grace_period_value", 1))
+        grace_period_unit = update_data.get("grace_period_unit", existing_vault.get("grace_period_unit", "days"))
+        if "grace_period_value" in update_data or "grace_period_unit" in update_data:
+            normalized_grace_period_value, normalized_grace_period_unit = validate_grace_period(
+                int(grace_period_value or 1),
+                str(grace_period_unit or "days"),
+            )
+            update_data["grace_period_value"] = normalized_grace_period_value
+            update_data["grace_period_unit"] = normalized_grace_period_unit
         recipients_for_validation = update_data.get("recipients", existing_vault.get("recipients", []))
         if "activation_threshold" in update_data and update_data["activation_threshold"] is not None:
             update_data["activation_threshold"] = validate_activation_threshold_for_recipients(
@@ -2068,6 +2236,7 @@ def add_vault_recipient(
         public_vault_id=str(updated_vault.get("short_id", "")).strip() or vault_id,
         vault_name=str(updated_vault.get("name", "Unnamed Vault")).strip() or "Unnamed Vault",
         owner_label=build_user_display_name(current_user) or owner_email or "unknown",
+        owner_secondary_label=build_user_secondary_name(current_user),
     )
     if invite_result.sent:
         write_audit_event(

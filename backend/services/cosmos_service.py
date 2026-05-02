@@ -18,6 +18,40 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _normalized_grace_period(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    unit = str(vault_document.get("grace_period_unit", "")).strip().lower()
+    value_raw = vault_document.get("grace_period_value")
+    legacy_days_raw = vault_document.get("grace_period_days")
+
+    if value_raw is None:
+        value_raw = legacy_days_raw
+    try:
+        value = max(1, int(value_raw))
+    except (TypeError, ValueError):
+        value = 1
+
+    if unit not in {"hours", "days"}:
+        unit = "days"
+    if unit == "hours":
+        value = min(value, 24 * 3650)
+    else:
+        value = min(value, 3650)
+
+    vault_document["grace_period_value"] = value
+    vault_document["grace_period_unit"] = unit
+    vault_document.pop("grace_period_days", None)
+    return vault_document
+
+
+def _grace_period_delta(vault_document: Dict[str, Any]) -> timedelta:
+    normalized_document = _normalized_grace_period(vault_document)
+    grace_period_value = int(normalized_document.get("grace_period_value", 1))
+    grace_period_unit = str(normalized_document.get("grace_period_unit", "days")).strip().lower()
+    if grace_period_unit == "hours":
+        return timedelta(hours=grace_period_value)
+    return timedelta(days=grace_period_value)
+
+
 def _recipient_email(recipient: Any) -> str:
     if isinstance(recipient, dict):
         return str(recipient.get("email", "")).strip().lower()
@@ -140,6 +174,7 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
     if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
         return vault_document
 
+    _normalized_grace_period(vault_document)
     vault_document["recipients"] = _normalize_recipients(vault_document.get("recipients", []))
     _normalize_files_for_recipients(vault_document)
     _clamp_activation_threshold(vault_document)
@@ -155,12 +190,6 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
         threshold = max(1, int(threshold_raw))
     except (TypeError, ValueError):
         threshold = 1
-
-    grace_period_days_raw = vault_document.get("grace_period_days", 0)
-    try:
-        grace_period_days = max(0, int(grace_period_days_raw))
-    except (TypeError, ValueError):
-        grace_period_days = 0
 
     if requests_count == 0:
         vault_document["status"] = "active"
@@ -179,7 +208,7 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
     # Threshold reached or exceeded.
     if current_status != "grace_period":
         started_at = datetime.now(timezone.utc)
-        expires_at = started_at + timedelta(days=grace_period_days)
+        expires_at = started_at + _grace_period_delta(vault_document)
         vault_document["status"] = "grace_period"
         vault_document["grace_period_started_at"] = started_at.isoformat()
         vault_document["grace_period_expires_at"] = expires_at.isoformat()
@@ -349,6 +378,21 @@ class CosmosService:
             return None
         return items[0]
 
+    def list_users(self) -> List[Dict[str, Any]]:
+        container = self._get_container()
+        query = "SELECT * FROM c WHERE c.doc_type = 'user'"
+
+        try:
+            return list(
+                container.query_items(
+                    query=query,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB read failed while listing users.")
+            raise
+
     def get_user_by_verification_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
         container = self._get_container()
         query = (
@@ -415,6 +459,7 @@ class CosmosService:
         payload = dict(vault_data)
         payload["id"] = payload.get("id") or str(uuid4())
         payload["doc_type"] = "vault"
+        _normalized_grace_period(payload)
         payload["recipients"] = _normalize_recipients(payload.get("recipients", []))
         payload.setdefault("files", [])
         _normalize_files_for_recipients(payload)
@@ -661,6 +706,7 @@ class CosmosService:
 
         merged_item = dict(existing_item)
         merged_item.update(update_data)
+        _normalized_grace_period(merged_item)
         merged_item["id"] = existing_item["id"]
         merged_item["user_id"] = existing_item["user_id"]
         merged_item["recipients"] = _normalize_recipients(merged_item.get("recipients", []))

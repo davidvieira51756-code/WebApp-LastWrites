@@ -49,6 +49,10 @@ class AuthMeResponse(BaseModel):
     full_name: str
     birth_date: str
     display_name_preference: Literal["username", "real_name"]
+    account_status: Literal["active", "pending_deletion"]
+    last_activity_at: str | None = None
+    account_deletion_started_at: str | None = None
+    account_deletion_scheduled_at: str | None = None
 
 
 class AuthProfileUpdateRequest(BaseModel):

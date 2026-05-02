@@ -218,6 +218,19 @@ def _get_local_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     )
 
 
+def _get_local_user(user_id: str) -> Optional[Dict[str, Any]]:
+    items = _load_local_items()
+    return next(
+        (
+            item
+            for item in items
+            if str(item.get("doc_type", "")).strip().lower() == "user"
+            and str(item.get("id", "")) == user_id
+        ),
+        None,
+    )
+
+
 def _update_local_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     items = _load_local_items()
     for index, item in enumerate(items):
@@ -289,6 +302,20 @@ def _get_azure_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     return items[0] if items else None
 
 
+def _get_azure_user(user_id: str) -> Optional[Dict[str, Any]]:
+    container = _get_azure_cosmos_container()
+    query = "SELECT * FROM c WHERE c.id = @user_id AND c.doc_type = 'user'"
+    parameters = [{"name": "@user_id", "value": user_id}]
+    items = list(
+        container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        )
+    )
+    return items[0] if items else None
+
+
 def _update_azure_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     container = _get_azure_cosmos_container()
     existing_item = _get_azure_vault(vault_id)
@@ -304,6 +331,12 @@ def _load_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     if _is_local_dev_mode():
         return _get_local_vault(vault_id)
     return _get_azure_vault(vault_id)
+
+
+def _load_user(user_id: str) -> Optional[Dict[str, Any]]:
+    if _is_local_dev_mode():
+        return _get_local_user(user_id)
+    return _get_azure_user(user_id)
 
 
 def _update_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -374,6 +407,25 @@ def _recipient_access_url(public_vault_id: str) -> Optional[str]:
     return f"{frontend_base_url}/incoming/{public_vault_id}"
 
 
+def _owner_labels(vault_document: Dict[str, Any]) -> tuple[str, Optional[str]]:
+    owner_user_id = str(vault_document.get("user_id", "")).strip()
+    owner_profile = _load_user(owner_user_id) if owner_user_id else None
+    if not owner_profile:
+        return "Unknown", None
+
+    preference = str(owner_profile.get("display_name_preference", "username")).strip().lower()
+    full_name = str(owner_profile.get("full_name", "")).strip()
+    username = str(owner_profile.get("username", "")).strip()
+
+    if preference == "real_name" and full_name:
+        return full_name, (username or None)
+    if username:
+        return username, None
+    if full_name:
+        return full_name, None
+    return "Unknown", None
+
+
 def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
     email_service = EmailService()
     if not email_service.is_configured():
@@ -392,16 +444,22 @@ def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
     vault_id = str(vault_document.get("id", "")).strip()
     public_vault_id = str(vault_document.get("short_id", "")).strip()
     vault_name = str(vault_document.get("name", "Unnamed Vault")).strip() or "Unnamed Vault"
+    owner_label, owner_secondary_label = _owner_labels(vault_document)
     access_url = _recipient_access_url(public_vault_id) if public_vault_id else None
     delivered_at = str(vault_document.get("delivered_at", "")).strip() or _now_iso()
     plain_text_lines = [
         f"The delivery package for vault '{vault_name}' is now available.",
+        f"From {owner_label}",
         f"Delivered at: {delivered_at}",
     ]
     html_lines = [
         f"<p>The delivery package for vault <strong>{vault_name}</strong> is now available.</p>",
+        f"<p>From <strong>{owner_label}</strong></p>",
         f"<p>Delivered at: {delivered_at}</p>",
     ]
+    if owner_secondary_label:
+        plain_text_lines.append(f"Username: {owner_secondary_label}")
+        html_lines.append(f"<p><small>Username: {owner_secondary_label}</small></p>")
     if access_url:
         plain_text_lines.append(f"Access it here after signing in: {access_url}")
         html_lines.append(
@@ -606,10 +664,14 @@ def _generate_cover_pdf(
 ) -> None:
     styles = getSampleStyleSheet()
     story: List[Any] = []
+    owner_label, owner_secondary_label = _owner_labels(vault_document)
 
     story.append(Paragraph("Last Writes Delivery Package", styles["Title"]))
     story.append(Spacer(1, 12))
     story.append(Paragraph(f"Vault: {vault_document.get('name', 'Unnamed Vault')}", styles["Heading2"]))
+    story.append(Paragraph(f"From {owner_label}", styles["BodyText"]))
+    if owner_secondary_label:
+        story.append(Paragraph(f"Username: {owner_secondary_label}", styles["BodyText"]))
     story.append(Paragraph(f"Delivered: {_date_from_iso(delivered_at)}", styles["BodyText"]))
     story.append(Spacer(1, 12))
 

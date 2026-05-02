@@ -237,7 +237,7 @@ def main(event: func.EventGridEvent) -> None:
         return
 
     current_status = str(vault_document.get("status", "active")).strip().lower()
-    if current_status == "delivered":
+    if current_status in {"delivered", "delivered_archived"}:
         logger.info("Vault already delivered. event_id=%s vault_id=%s", event.id, vault_id)
         return
 

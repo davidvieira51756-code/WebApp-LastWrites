@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import azure.functions as func
@@ -180,7 +180,8 @@ def _publish_expiration_event(
     event_grid_client = _get_event_grid_client()
     vault_id = str(vault_document.get("id"))
     user_id = vault_document.get("user_id")
-    grace_period_days = int(vault_document.get("grace_period_days", 0))
+    grace_period_value = int(vault_document.get("grace_period_value", vault_document.get("grace_period_days", 0)) or 0)
+    grace_period_unit = str(vault_document.get("grace_period_unit", "days") or "days").strip().lower()
     activation_requests = vault_document.get("activation_requests", [])
     if not isinstance(activation_requests, list):
         activation_requests = []
@@ -192,7 +193,8 @@ def _publish_expiration_event(
         data={
             "vault_id": vault_id,
             "user_id": user_id,
-            "grace_period_days": grace_period_days,
+            "grace_period_value": grace_period_value,
+            "grace_period_unit": grace_period_unit,
             "grace_period_expires_at": expires_at.isoformat(),
             "detected_at": detected_at.isoformat(),
             "activation_request_count": len(activation_requests),

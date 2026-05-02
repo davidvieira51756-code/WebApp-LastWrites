@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import ApplicationInsightsBootstrap from "@/components/ApplicationInsights";
+import ThemeToggle from "@/components/ThemeToggle";
 import { CatmaguiThemeProvider } from "@/components/catmagui";
 import "./globals.css";
 
@@ -31,7 +32,10 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col">
         <ApplicationInsightsBootstrap />
-        <CatmaguiThemeProvider>{children}</CatmaguiThemeProvider>
+        <CatmaguiThemeProvider>
+          <ThemeToggle />
+          {children}
+        </CatmaguiThemeProvider>
       </body>
     </html>
   );

@@ -42,7 +42,8 @@ type VaultDetail = {
   user_id: string;
   name: string;
   owner_message?: string | null;
-  grace_period_days: number;
+  grace_period_value: number;
+  grace_period_unit: "hours" | "days";
   status: string;
   recipients: VaultRecipient[];
   activation_threshold?: number;
@@ -133,6 +134,10 @@ function formatIsoDate(value: string | null | undefined): string {
   return parsed.toLocaleString();
 }
 
+function formatGracePeriod(value: number, unit: "hours" | "days"): string {
+  return `${value} ${value === 1 ? unit.slice(0, -1) : unit}`;
+}
+
 function getDownloadFileName(response: Response, fallbackName: string): string {
   const contentDisposition = response.headers.get("content-disposition") || "";
   const encodedMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
@@ -219,7 +224,8 @@ export default function VaultDetailsPage() {
 
   const [editableName, setEditableName] = useState("");
   const [editableOwnerMessage, setEditableOwnerMessage] = useState("");
-  const [editableGracePeriod, setEditableGracePeriod] = useState(30);
+  const [editableGracePeriodValue, setEditableGracePeriodValue] = useState(30);
+  const [editableGracePeriodUnit, setEditableGracePeriodUnit] = useState<"hours" | "days">("days");
   const [editableThreshold, setEditableThreshold] = useState(1);
   const [isUpdatingVault, setIsUpdatingVault] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
@@ -316,7 +322,8 @@ export default function VaultDetailsPage() {
         setVault(vaultPayload);
         setEditableName(vaultPayload.name || "");
         setEditableOwnerMessage(vaultPayload.owner_message || "");
-        setEditableGracePeriod(Number(vaultPayload.grace_period_days || 1));
+        setEditableGracePeriodValue(Number(vaultPayload.grace_period_value || 1));
+        setEditableGracePeriodUnit(vaultPayload.grace_period_unit || "days");
         setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
         setSelectedRecipientEmails((currentSelection) => {
@@ -679,8 +686,8 @@ export default function VaultDetailsPage() {
       return;
     }
 
-    if (!Number.isFinite(editableGracePeriod) || editableGracePeriod < 1) {
-      setUpdateError("Grace period must be at least 1 day.");
+    if (!Number.isFinite(editableGracePeriodValue) || editableGracePeriodValue < 1) {
+      setUpdateError("Grace period must be at least 1.");
       return;
     }
 
@@ -701,7 +708,8 @@ export default function VaultDetailsPage() {
         body: JSON.stringify({
           name: normalizedName,
           owner_message: editableOwnerMessage.trim() || null,
-          grace_period_days: Number(editableGracePeriod),
+          grace_period_value: Number(editableGracePeriodValue),
+          grace_period_unit: editableGracePeriodUnit,
           activation_threshold:
             activatableRecipientsCount > 0
               ? Math.min(Math.floor(Number(editableThreshold)), activatableRecipientsCount)
@@ -921,7 +929,7 @@ export default function VaultDetailsPage() {
               </Card>
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Grace Period</Text>
-                <Text variant="label">{vault.grace_period_days} days</Text>
+                <Text variant="label">{formatGracePeriod(vault.grace_period_value, vault.grace_period_unit)}</Text>
               </Card>
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Recipients</Text>
@@ -1053,13 +1061,42 @@ export default function VaultDetailsPage() {
                     id="vault-grace"
                     type="number"
                     min={1}
-                    max={3650}
-                    label="Grace Period (days)"
-                    value={editableGracePeriod}
-                    onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
+                    max={editableGracePeriodUnit === "hours" ? 24 * 3650 : 3650}
+                    label="Grace Period"
+                    value={editableGracePeriodValue}
+                    onChange={(event) => setEditableGracePeriodValue(Number(event.target.value))}
                     disabled={isArchivedFinal}
                     required
                   />
+                  <label
+                    htmlFor="vault-grace-unit"
+                    style={{
+                      display: "grid",
+                      gap: t.space.xxs,
+                      color: t.colors.text.secondary,
+                      fontSize: t.typography.bodySmall.fontSize,
+                    }}
+                  >
+                    Grace Period Unit
+                    <select
+                      id="vault-grace-unit"
+                      value={editableGracePeriodUnit}
+                      onChange={(event) => setEditableGracePeriodUnit(event.target.value as "hours" | "days")}
+                      disabled={isArchivedFinal}
+                      style={{
+                        width: "100%",
+                        border: `1px solid ${t.colors.components.input.border}`,
+                        borderRadius: t.radius.l,
+                        backgroundColor: t.colors.components.input.bg,
+                        color: t.colors.text.primary,
+                        padding: `${t.space.s}px ${t.space.s}px`,
+                        fontFamily: "var(--font-geist-sans), sans-serif",
+                      }}
+                    >
+                      <option value="hours">Hours</option>
+                      <option value="days">Days</option>
+                    </select>
+                  </label>
 
                   <Input
                     id="vault-owner-message"
