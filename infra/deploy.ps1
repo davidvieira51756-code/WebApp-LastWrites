@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Location = "italynorth",
+    [string]$Location = "switzerlandnorth",
     [string]$Prefix = "lastwrites",
     [string]$ResourceGroupName = "",
     [string]$GithubRepo = "",
@@ -719,7 +719,7 @@ function Wait-FunctionAvailable {
         [Parameter(Mandatory = $true)][string]$FunctionAppName,
         [Parameter(Mandatory = $true)][string]$ResourceGroupName,
         [Parameter(Mandatory = $true)][string]$FunctionName,
-        [int]$Attempts = 18,
+        [int]$Attempts = 36,
         [int]$DelaySeconds = 10
     )
 
@@ -735,6 +735,42 @@ function Wait-FunctionAvailable {
     }
 
     return $false
+}
+
+function Sync-FunctionTriggers {
+    param(
+        [Parameter(Mandatory = $true)][string]$SubscriptionId,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$FunctionAppName,
+        [int]$Attempts = 6,
+        [int]$DelaySeconds = 10
+    )
+
+    $syncUri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/$FunctionAppName/syncfunctiontriggers?api-version=2024-04-01"
+    $lastError = $null
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Invoke-AzCli -Arguments @(
+                "rest",
+                "--method", "post",
+                "--uri", $syncUri,
+                "-o", "none"
+            ) | Out-Null
+            return
+        }
+        catch {
+            $lastError = $_
+            if ($attempt -lt $Attempts) {
+                Write-Warning "Function trigger sync for '$FunctionAppName' failed on attempt $attempt/$Attempts. Retrying in $DelaySeconds seconds."
+                Start-Sleep -Seconds $DelaySeconds
+            }
+        }
+    }
+
+    if ($null -ne $lastError) {
+        throw $lastError
+    }
 }
 
 function Set-ContainerAppJobRegistry {
@@ -1578,8 +1614,13 @@ NEXT_PUBLIC_APPLICATIONINSIGHTS_CONNECTION_STRING=$appInsightsConnectionString
     }
 
     Write-Step "Ensuring Event Grid subscription to start_delivery_job function"
+    Sync-FunctionTriggers -SubscriptionId $subscriptionId -ResourceGroupName $ResourceGroupName -FunctionAppName $functionAppName
     if (-not (Wait-FunctionAvailable -FunctionAppName $functionAppName -ResourceGroupName $ResourceGroupName -FunctionName "start_delivery_job")) {
-        throw "Azure Function 'start_delivery_job' was not detected in '$functionAppName' after deployment."
+        Write-Warning "Azure Function 'start_delivery_job' is still not visible after the first trigger sync. Retrying trigger synchronization once more."
+        Sync-FunctionTriggers -SubscriptionId $subscriptionId -ResourceGroupName $ResourceGroupName -FunctionAppName $functionAppName
+        if (-not (Wait-FunctionAvailable -FunctionAppName $functionAppName -ResourceGroupName $ResourceGroupName -FunctionName "start_delivery_job")) {
+            throw "Azure Function 'start_delivery_job' was not detected in '$functionAppName' after deployment."
+        }
     }
 
     $eventGridTopicId = Get-AzCliTsv -Arguments @(
