@@ -96,7 +96,11 @@ function statusBadgeVariant(
   if (normalized === "active") return "success";
   if (normalized === "pending_activation") return "warning";
   if (normalized === "grace_period") return "warning";
-  if (normalized === "delivery_initiated" || normalized === "delivered") return "error";
+  if (
+    normalized === "delivery_initiated" ||
+    normalized === "delivered" ||
+    normalized === "delivered_archived"
+  ) return "error";
   if (normalized === "disabled") return "default";
   return "default";
 }
@@ -712,6 +716,8 @@ export default function VaultDetailsPage() {
   const activationThreshold = vault?.activation_threshold ?? 1;
   const activationCount = activationRequests.length;
   const normalizedStatus = (vault?.status || "active").toLowerCase();
+  const isArchivedFinal =
+    normalizedStatus === "delivered" || normalizedStatus === "delivered_archived";
   const isPendingOrGrace =
     normalizedStatus === "pending_activation" || normalizedStatus === "grace_period";
 
@@ -842,6 +848,13 @@ export default function VaultDetailsPage() {
             </div>
           ) : null}
 
+          {vault && isArchivedFinal ? (
+            <Alert
+              variant="info"
+              message="This vault has already been delivered and archived. Vault settings, recipients, and files are now locked."
+            />
+          ) : null}
+
           {vault && isPendingOrGrace ? (
             <Card
               variant="secondary"
@@ -934,6 +947,7 @@ export default function VaultDetailsPage() {
                     label="Vault Name"
                     value={editableName}
                     onChange={(event) => setEditableName(event.target.value)}
+                    disabled={isArchivedFinal}
                     required
                   />
 
@@ -945,6 +959,7 @@ export default function VaultDetailsPage() {
                     label="Grace Period (days)"
                     value={editableGracePeriod}
                     onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
+                    disabled={isArchivedFinal}
                     required
                   />
 
@@ -955,6 +970,7 @@ export default function VaultDetailsPage() {
                     onChange={(event) => setEditableOwnerMessage(event.target.value)}
                     placeholder="This message appears on the generated cover PDF."
                     maxLength={4000}
+                    disabled={isArchivedFinal}
                     multiline
                   />
 
@@ -966,6 +982,7 @@ export default function VaultDetailsPage() {
                     label="Activation Threshold (recipient votes)"
                     value={editableThreshold}
                     onChange={(event) => setEditableThreshold(Number(event.target.value))}
+                    disabled={isArchivedFinal}
                     required
                   />
 
@@ -978,7 +995,7 @@ export default function VaultDetailsPage() {
                     type="submit"
                     size="full"
                     variant="SolidPrimary"
-                    disabled={isUpdatingVault}
+                    disabled={isUpdatingVault || isArchivedFinal}
                   >
                     {isUpdatingVault ? "Updating Vault..." : "Save Vault Settings"}
                   </Button>
@@ -1107,13 +1124,14 @@ export default function VaultDetailsPage() {
                     value={recipientEmail}
                     onChange={(event) => setRecipientEmail(event.target.value)}
                     placeholder="recipient@example.com"
+                    disabled={isArchivedFinal}
                     required
                   />
                   <Button
                     type="submit"
                     size="full"
                     variant="SolidPrimary"
-                    disabled={isAddingRecipient}
+                    disabled={isAddingRecipient || isArchivedFinal}
                   >
                     {isAddingRecipient ? "Adding Recipient..." : "Add Recipient"}
                   </Button>
@@ -1140,7 +1158,7 @@ export default function VaultDetailsPage() {
                             type="button"
                             size="default"
                             variant="Destructive"
-                            disabled={isDeletingRecipient === recipient}
+                            disabled={isDeletingRecipient === recipient || isArchivedFinal}
                             onClick={() => void handleDeleteRecipient(recipient)}
                           >
                             {isDeletingRecipient === recipient ? "Removing..." : "Remove"}
@@ -1167,6 +1185,7 @@ export default function VaultDetailsPage() {
                   <input
                     type="file"
                     onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                    disabled={isArchivedFinal}
                     style={{
                       width: "100%",
                       border: `1px solid ${t.colors.components.input.border}`,
@@ -1181,7 +1200,7 @@ export default function VaultDetailsPage() {
                     type="submit"
                     size="full"
                     variant="SolidPrimary"
-                    disabled={isUploadingFile}
+                    disabled={isUploadingFile || isArchivedFinal}
                   >
                     {isUploadingFile ? "Uploading..." : "Upload File"}
                   </Button>
@@ -1237,7 +1256,7 @@ export default function VaultDetailsPage() {
                         <Button
                           type="button"
                           onClick={() => void handleDeleteFile(fileItem.id)}
-                          disabled={isDeletingFileId === fileItem.id}
+                          disabled={isDeletingFileId === fileItem.id || isArchivedFinal}
                           variant="Destructive"
                         >
                           {isDeletingFileId === fileItem.id ? "Removing..." : "Delete"}

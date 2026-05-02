@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 
-VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "disabled"}
+VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "delivered_archived", "disabled"}
 
 
 def _now_iso() -> str:

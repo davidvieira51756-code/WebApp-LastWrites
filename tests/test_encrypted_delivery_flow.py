@@ -99,6 +99,23 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["file"]
 
+    def _deliver_vault(self, vault_id: str) -> dict:
+        internal_vault_id = self.backend_main.app.state.cosmos_service.get_vault_by_short_id(vault_id)["id"]
+        updated_vault = self.backend_main.app.state.cosmos_service.update_vault(
+            internal_vault_id,
+            {"status": "delivery_initiated"},
+        )
+        self.assertIsNotNone(updated_vault)
+
+        os.environ["VAULT_ID"] = internal_vault_id
+        os.environ["DELIVERIES_CONTAINER"] = "deliveries"
+        sys.modules.pop("worker_container.app", None)
+        worker_app = importlib.import_module("worker_container.app")
+
+        exit_code = worker_app.run()
+        self.assertEqual(exit_code, 0)
+        return {"internal_vault_id": internal_vault_id}
+
     def test_encrypted_upload_and_owner_download_round_trip(self) -> None:
         email = f"owner-{uuid4().hex[:8]}@example.com"
         token = self._register_and_login(email)
@@ -148,7 +165,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             owner_message="Final instructions for the recipients.",
         )
         vault_id = vault["id"]
-        internal_vault_id = self.backend_main.app.state.cosmos_service.get_vault_by_short_id(vault_id)["id"]
 
         add_recipient_response = self.client.post(
             f"/vaults/{vault_id}/recipients",
@@ -160,19 +176,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         first_file = self._upload_file(token, vault_id, "letter.txt", b"first encrypted file")
         second_file = self._upload_file(token, vault_id, "notes.txt", b"second encrypted file")
 
-        updated_vault = self.backend_main.app.state.cosmos_service.update_vault(
-            internal_vault_id,
-            {"status": "delivery_initiated"},
-        )
-        self.assertIsNotNone(updated_vault)
-
-        os.environ["VAULT_ID"] = internal_vault_id
-        os.environ["DELIVERIES_CONTAINER"] = "deliveries"
-        sys.modules.pop("worker_container.app", None)
-        worker_app = importlib.import_module("worker_container.app")
-
-        exit_code = worker_app.run()
-        self.assertEqual(exit_code, 0)
+        self._deliver_vault(vault_id)
 
         vault_response = self.client.get(
             f"/vaults/{vault_id}",
@@ -180,7 +184,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         )
         self.assertEqual(vault_response.status_code, 200, vault_response.text)
         delivered_vault = vault_response.json()
-        self.assertEqual(delivered_vault["status"], "delivered")
+        self.assertEqual(delivered_vault["status"], "delivered_archived")
         self.assertEqual(delivered_vault["delivery_container_name"], "deliveries")
         self.assertTrue(delivered_vault["delivery_blob_name"])
         self.assertTrue(delivered_vault["delivered_at"])
@@ -257,6 +261,67 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         incoming_payload = incoming_response.json()
         self.assertEqual(incoming_payload[0]["id"], vault["id"])
         self.assertEqual(incoming_payload[0]["owner_display_name"], "Owner Public Name")
+
+    def test_delivered_archived_vault_blocks_mutations(self) -> None:
+        email = f"archived-owner-{uuid4().hex[:8]}@example.com"
+        token = self._register_and_login(email)
+
+        vault = self._create_vault(
+            token,
+            name="Archived Vault",
+            owner_message="Archive mutation lock test.",
+        )
+        vault_id = vault["id"]
+
+        add_recipient_response = self.client.post(
+            f"/vaults/{vault_id}/recipients",
+            headers=self._auth_headers(token),
+            json={"email": f"recipient-{uuid4().hex[:8]}@example.com"},
+        )
+        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        uploaded_file = self._upload_file(token, vault_id, "archive.txt", b"archived content")
+        self._deliver_vault(vault_id)
+
+        expected_error = "This vault has already been delivered and archived. It can no longer be modified."
+
+        update_response = self.client.patch(
+            f"/vaults/{vault_id}",
+            headers=self._auth_headers(token),
+            json={"name": "Should Not Change"},
+        )
+        self.assertEqual(update_response.status_code, 409, update_response.text)
+        self.assertEqual(update_response.json()["detail"], expected_error)
+
+        add_recipient_again_response = self.client.post(
+            f"/vaults/{vault_id}/recipients",
+            headers=self._auth_headers(token),
+            json={"email": f"second-{uuid4().hex[:8]}@example.com"},
+        )
+        self.assertEqual(add_recipient_again_response.status_code, 409, add_recipient_again_response.text)
+        self.assertEqual(add_recipient_again_response.json()["detail"], expected_error)
+
+        remove_recipient_response = self.client.delete(
+            f"/vaults/{vault_id}/recipients/{add_recipient_response.json()['recipients'][0]}",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(remove_recipient_response.status_code, 409, remove_recipient_response.text)
+        self.assertEqual(remove_recipient_response.json()["detail"], expected_error)
+
+        upload_after_archive_response = self.client.post(
+            f"/vaults/{vault_id}/files",
+            headers=self._auth_headers(token),
+            files={"file": ("blocked.txt", b"blocked content", "text/plain")},
+        )
+        self.assertEqual(upload_after_archive_response.status_code, 409, upload_after_archive_response.text)
+        self.assertEqual(upload_after_archive_response.json()["detail"], expected_error)
+
+        delete_file_response = self.client.delete(
+            f"/vaults/{vault_id}/files/{uploaded_file['id']}",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(delete_file_response.status_code, 409, delete_file_response.text)
+        self.assertEqual(delete_file_response.json()["detail"], expected_error)
 
 
 if __name__ == "__main__":

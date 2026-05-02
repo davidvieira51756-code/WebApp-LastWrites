@@ -12,6 +12,7 @@ class VaultStatus(str, Enum):
     GRACE_PERIOD = "grace_period"
     DELIVERY_INITIATED = "delivery_initiated"
     DELIVERED = "delivered"
+    DELIVERED_ARCHIVED = "delivered_archived"
     DISABLED = "disabled"
 
 

@@ -91,6 +91,8 @@ SHORT_ID_REGEX = re.compile(r"^[a-z0-9]{8}$")
 auth_bearer = HTTPBearer(auto_error=False)
 SAFE_FILENAME_REGEX = re.compile(r"[^A-Za-z0-9._() -]+")
 SHORT_ID_ALPHABET = string.ascii_lowercase + string.digits
+FINAL_IMMUTABLE_VAULT_STATUSES = {"delivered", "delivered_archived"}
+FINAL_IMMUTABLE_VAULT_ERROR = "This vault has already been delivered and archived. It can no longer be modified."
 DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES = {
     "application/json",
     "application/msword",
@@ -362,6 +364,18 @@ def build_public_vault_payload(vault_item: Dict[str, Any]) -> Dict[str, Any]:
     if str(public_payload.get("delivery_blob_name", "")).strip():
         public_payload["delivery_file_name"] = "last-writes-delivery.zip"
     return public_payload
+
+
+def is_vault_immutable(vault_item: Dict[str, Any]) -> bool:
+    return str(vault_item.get("status", "")).strip().lower() in FINAL_IMMUTABLE_VAULT_STATUSES
+
+
+def ensure_vault_is_mutable(vault_item: Dict[str, Any]) -> None:
+    if is_vault_immutable(vault_item):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=FINAL_IMMUTABLE_VAULT_ERROR,
+        )
 
 
 def _build_attachment_headers(file_name: str) -> Dict[str, str]:
@@ -1312,6 +1326,7 @@ def update_vault(
         public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    ensure_vault_is_mutable(existing_vault)
     internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     try:
@@ -1389,6 +1404,7 @@ def check_in_vault(
         public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    ensure_vault_is_mutable(existing_vault)
     internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     try:
@@ -1742,6 +1758,7 @@ def add_vault_recipient(
         public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    ensure_vault_is_mutable(existing_vault)
     internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     if not is_valid_email(recipient_email):
@@ -1833,6 +1850,7 @@ def delete_vault_recipient(
         public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    ensure_vault_is_mutable(existing_vault)
     internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     if not is_valid_email(normalized_email):
@@ -2006,6 +2024,7 @@ def delete_vault_file(
         public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    ensure_vault_is_mutable(vault_item)
     internal_vault_id = str(vault_item.get("id", "")).strip()
 
     file_metadata = get_vault_file_metadata(vault_item, file_id)
@@ -2093,6 +2112,7 @@ async def upload_vault_file(
         public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    ensure_vault_is_mutable(vault_item)
     internal_vault_id = str(vault_item.get("id", "")).strip()
 
     uploaded_file_metadata = None

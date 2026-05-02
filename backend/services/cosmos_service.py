@@ -11,7 +11,7 @@ from azure.cosmos import CosmosClient, PartitionKey, exceptions
 logger = logging.getLogger(__name__)
 
 
-VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "disabled"}
+VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "delivered_archived", "disabled"}
 
 
 def _now_iso() -> str:
@@ -22,7 +22,7 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
     """Given a vault document, recompute status / grace period based on activation requests.
 
     Rules:
-    - If current status is terminal (delivery_initiated, delivered, disabled), do not mutate.
+    - If current status is terminal (delivery_initiated, delivered, delivered_archived, disabled), do not mutate.
     - If requests count >= threshold and status not already grace_period, transition to grace_period
       and set grace_period_started_at / grace_period_expires_at.
     - If requests count > 0 and < threshold, status becomes pending_activation and any grace period

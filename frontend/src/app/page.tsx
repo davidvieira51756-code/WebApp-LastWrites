@@ -38,7 +38,11 @@ function statusBadgeVariant(
     if (normalized === "active") return "success";
     if (normalized === "pending_activation") return "warning";
     if (normalized === "grace_period") return "warning";
-    if (normalized === "delivery_initiated" || normalized === "delivered") return "error";
+    if (
+        normalized === "delivery_initiated" ||
+        normalized === "delivered" ||
+        normalized === "delivered_archived"
+    ) return "error";
     if (normalized === "disabled") return "default";
     return "default";
 }

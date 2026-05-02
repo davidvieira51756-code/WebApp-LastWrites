@@ -64,6 +64,9 @@ def _env_to_bool(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+FINAL_DELIVERY_STATUSES = {"delivered", "delivered_archived"}
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -629,7 +632,7 @@ def run() -> int:
         return 1
 
     if (
-        str(vault_document.get("status", "")).strip().lower() == "delivered"
+        str(vault_document.get("status", "")).strip().lower() in FINAL_DELIVERY_STATUSES
         and str(vault_document.get("delivery_blob_name", "")).strip()
     ):
         logger.info("Vault already delivered. Nothing to do. vault_id=%s", vault_id)
@@ -674,7 +677,7 @@ def run() -> int:
             updated_vault = _update_vault(
                 vault_id,
                 {
-                    "status": "delivered",
+                    "status": "delivered_archived",
                     "delivery_container_name": upload_result["container_name"],
                     "delivery_blob_name": upload_result["blob_name"],
                     "delivery_file_name": upload_result["file_name"],
