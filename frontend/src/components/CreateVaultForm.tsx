@@ -23,6 +23,9 @@ export type Vault = {
     name: string;
     owner_message?: string | null;
     grace_period_days: number;
+    grace_period_value?: number;
+    grace_period_unit?: "days" | "hours";
+    grace_period_hours?: number;
     status: string;
     recipients: VaultRecipient[];
     files?: Array<Record<string, unknown>>;
@@ -54,7 +57,8 @@ export default function CreateVaultForm({
     const t = useCatTheme();
     const [name, setName] = useState("");
     const [ownerMessage, setOwnerMessage] = useState("");
-    const [gracePeriodDays, setGracePeriodDays] = useState(30);
+    const [gracePeriodValue, setGracePeriodValue] = useState(30);
+    const [gracePeriodUnit, setGracePeriodUnit] = useState<"days" | "hours">("days");
     const [activationThreshold, setActivationThreshold] = useState(1);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -91,7 +95,8 @@ export default function CreateVaultForm({
                 body: JSON.stringify({
                     name: normalizedName,
                     owner_message: ownerMessage.trim() || null,
-                    grace_period_days: Number(gracePeriodDays),
+                    grace_period_value: Number(gracePeriodValue),
+                    grace_period_unit: gracePeriodUnit,
                     recipients: [],
                     activation_threshold: normalizedThreshold,
                 }),
@@ -119,7 +124,8 @@ export default function CreateVaultForm({
             onCreated(createdVault);
             setName("");
             setOwnerMessage("");
-            setGracePeriodDays(30);
+            setGracePeriodValue(30);
+            setGracePeriodUnit("days");
             setActivationThreshold(1);
             setSuccessMessage("Vault created successfully.");
         } catch (error) {
@@ -165,14 +171,43 @@ export default function CreateVaultForm({
 
                 <Input
                     id="grace-period"
-                    label="Grace Period (days)"
+                    label={`Grace Period (${gracePeriodUnit})`}
                     type="number"
                     min={1}
-                    max={3650}
-                    value={gracePeriodDays}
-                    onChange={(event) => setGracePeriodDays(Number(event.target.value))}
+                    max={gracePeriodUnit === "days" ? 3650 : 87600}
+                    value={gracePeriodValue}
+                    onChange={(event) => setGracePeriodValue(Number(event.target.value))}
                     required
                 />
+
+                <label
+                    htmlFor="grace-period-unit"
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: t.space.xs,
+                    }}
+                >
+                    <Text variant="label" color="secondary">Grace Period Unit</Text>
+                    <select
+                        id="grace-period-unit"
+                        value={gracePeriodUnit}
+                        onChange={(event) => setGracePeriodUnit(event.target.value as "days" | "hours")}
+                        style={{
+                            width: "100%",
+                            border: `1px solid ${t.colors.components.input.border}`,
+                            backgroundColor: t.colors.components.input.bg,
+                            color: t.colors.text.primary,
+                            borderRadius: t.radius.full,
+                            padding: `${t.space.s}px ${t.space.m}px`,
+                            fontFamily: "var(--font-geist-sans), sans-serif",
+                            fontSize: t.typography.body.fontSize,
+                        }}
+                    >
+                        <option value="days">Days</option>
+                        <option value="hours">Hours</option>
+                    </select>
+                </label>
 
                 <Input
                     id="owner-message"

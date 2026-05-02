@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -418,6 +419,42 @@ def build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str
     return None
 
 
+def resolve_grace_period_fields(vault_item: Dict[str, Any]) -> Dict[str, object]:
+    raw_unit = str(vault_item.get("grace_period_unit", "")).strip().lower()
+    raw_value = vault_item.get("grace_period_value")
+    raw_hours = vault_item.get("grace_period_hours")
+    raw_days = vault_item.get("grace_period_days", 1)
+
+    unit = raw_unit if raw_unit in {"days", "hours"} else ""
+
+    try:
+        if raw_value is not None and unit in {"days", "hours"}:
+            value = max(1, int(raw_value))
+            hours = value * 24 if unit == "days" else value
+        elif raw_hours is not None:
+            hours = max(1, int(raw_hours))
+            unit = "hours"
+            value = hours
+        else:
+            value = max(1, int(raw_days))
+            unit = "days"
+            hours = value * 24
+    except (TypeError, ValueError):
+        value = 1
+        unit = "days"
+        hours = 24
+
+    if hours > 3650 * 24:
+        raise ValueError("Grace period cannot exceed 3650 days.")
+
+    return {
+        "grace_period_value": value,
+        "grace_period_unit": unit,
+        "grace_period_hours": hours,
+        "grace_period_days": max(1, math.ceil(hours / 24)),
+    }
+
+
 def _generate_short_id() -> str:
     return "".join(secrets.choice(SHORT_ID_ALPHABET) for _ in range(8))
 
@@ -498,6 +535,7 @@ def resolve_vault_by_public_id(cosmos_service: CosmosService, public_vault_id: s
 
 def build_public_vault_payload(vault_item: Dict[str, Any]) -> Dict[str, Any]:
     public_payload = dict(vault_item)
+    public_payload.update(resolve_grace_period_fields(vault_item))
     public_payload["id"] = str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")).strip()
     if str(public_payload.get("delivery_blob_name", "")).strip():
         public_payload["delivery_file_name"] = build_delivery_zip_file_name(vault_item)
@@ -1377,6 +1415,7 @@ def create_vault(
     )
 
     try:
+        vault_payload.update(resolve_grace_period_fields(vault_payload))
         recipients = vault_payload.get("recipients", [])
         if recipients is not None:
             vault_payload["recipients"] = normalize_recipients(recipients)
@@ -1447,10 +1486,7 @@ def _build_recipient_vault_summary(
     except (TypeError, ValueError):
         threshold_value = 1
 
-    try:
-        grace_period_days_value = max(0, int(vault_item.get("grace_period_days", 0)))
-    except (TypeError, ValueError):
-        grace_period_days_value = 0
+    grace_period_fields = resolve_grace_period_fields(vault_item)
 
     delivery_packages = vault_item.get("delivery_packages", [])
     if not isinstance(delivery_packages, list):
@@ -1469,7 +1505,10 @@ def _build_recipient_vault_summary(
         name=str(vault_item.get("name", "")),
         owner_display_name=owner_display_name,
         status=str(vault_item.get("status", "active")),
-        grace_period_days=grace_period_days_value,
+        grace_period_days=int(grace_period_fields["grace_period_days"]),
+        grace_period_value=int(grace_period_fields["grace_period_value"]),
+        grace_period_unit=str(grace_period_fields["grace_period_unit"]),
+        grace_period_hours=int(grace_period_fields["grace_period_hours"]),
         activation_threshold=threshold_value,
         activation_requests_count=len(activation_requests),
         has_requested_activation=has_requested,
@@ -1563,6 +1602,11 @@ def update_vault(
             update_data["recipients"] = normalize_recipients(update_data["recipients"])
         if "owner_message" in update_data:
             update_data["owner_message"] = str(update_data.get("owner_message", "")).strip() or None
+        if any(
+            field in update_data
+            for field in ("grace_period_days", "grace_period_value", "grace_period_unit", "grace_period_hours")
+        ):
+            update_data.update(resolve_grace_period_fields({**existing_vault, **update_data}))
         recipients_for_validation = update_data.get("recipients", existing_vault.get("recipients", []))
         if "activation_threshold" in update_data and update_data["activation_threshold"] is not None:
             update_data["activation_threshold"] = validate_activation_threshold_for_recipients(

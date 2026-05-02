@@ -13,6 +13,7 @@ import {
     useCatTheme,
 } from "@/components/catmagui";
 import BrandLogo from "@/components/BrandLogo";
+import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import CreateVaultForm, { type Vault } from "../components/CreateVaultForm";
@@ -23,6 +24,8 @@ type IncomingVaultSummary = {
     owner_display_name?: string | null;
     status: string;
     grace_period_days: number;
+    grace_period_value: number;
+    grace_period_unit: "days" | "hours";
     activation_threshold: number;
     activation_requests_count: number;
     has_requested_activation: boolean;
@@ -49,6 +52,13 @@ function statusBadgeVariant(
 
 function formatStatusLabel(status: string): string {
     return status.replace(/_/g, " ");
+}
+
+function formatGracePeriod(value?: number, unit?: "days" | "hours"): string {
+    const normalizedValue = Number(value || 0);
+    const normalizedUnit = unit === "hours" ? "hours" : "days";
+    const suffix = normalizedValue === 1 ? normalizedUnit.slice(0, -1) : normalizedUnit;
+    return `${normalizedValue} ${suffix}`;
 }
 
 export default function DashboardPage() {
@@ -255,6 +265,7 @@ export default function DashboardPage() {
                         <ButtonLink href="/profile" variant="Primary">
                             Profile
                         </ButtonLink>
+                        <ThemeToggleButton />
                         <Button
                             type="button"
                             onClick={() => {
@@ -374,7 +385,7 @@ export default function DashboardPage() {
                                             }}
                                         >
                                             <Text variant="bodySmall" color="secondary">
-                                                Grace Period: {vault.grace_period_days} days
+                                                Grace Period: {formatGracePeriod(vault.grace_period_value, vault.grace_period_unit)}
                                             </Text>
                                             <Text variant="bodySmall" color="secondary">
                                                 Recipients: {vault.recipients.length}
@@ -485,7 +496,7 @@ export default function DashboardPage() {
                                             Votes: {incoming.activation_requests_count}/{incoming.activation_threshold}
                                         </Text>
                                         <Text variant="bodySmall" color="secondary">
-                                            Grace Period: {incoming.grace_period_days} days
+                                            Grace Period: {formatGracePeriod(incoming.grace_period_value, incoming.grace_period_unit)}
                                         </Text>
                                         {incoming.delivery_available ? (
                                             <Text variant="bodySmall" color="secondary">

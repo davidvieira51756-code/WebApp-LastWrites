@@ -124,6 +124,23 @@ def _normalize_files_for_recipients(vault_document: Dict[str, Any]) -> Dict[str,
     return vault_document
 
 
+def _resolve_grace_period_hours(vault_document: Dict[str, Any]) -> int:
+    raw_unit = str(vault_document.get("grace_period_unit", "")).strip().lower()
+    raw_value = vault_document.get("grace_period_value")
+    raw_hours = vault_document.get("grace_period_hours")
+    raw_days = vault_document.get("grace_period_days", 0)
+
+    try:
+        if raw_value is not None and raw_unit in {"days", "hours"}:
+            value = max(1, int(raw_value))
+            return value * 24 if raw_unit == "days" else value
+        if raw_hours is not None:
+            return max(1, int(raw_hours))
+        return max(0, int(raw_days)) * 24
+    except (TypeError, ValueError):
+        return 0
+
+
 def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any]:
     """Given a vault document, recompute status / grace period based on activation requests.
 
@@ -156,11 +173,7 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
     except (TypeError, ValueError):
         threshold = 1
 
-    grace_period_days_raw = vault_document.get("grace_period_days", 0)
-    try:
-        grace_period_days = max(0, int(grace_period_days_raw))
-    except (TypeError, ValueError):
-        grace_period_days = 0
+    grace_period_hours = _resolve_grace_period_hours(vault_document)
 
     if requests_count == 0:
         vault_document["status"] = "active"
@@ -179,7 +192,7 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
     # Threshold reached or exceeded.
     if current_status != "grace_period":
         started_at = datetime.now(timezone.utc)
-        expires_at = started_at + timedelta(days=grace_period_days)
+        expires_at = started_at + timedelta(hours=grace_period_hours)
         vault_document["status"] = "grace_period"
         vault_document["grace_period_started_at"] = started_at.isoformat()
         vault_document["grace_period_expires_at"] = expires_at.isoformat()

@@ -15,6 +15,7 @@ import {
   useCatTheme,
 } from "@/components/catmagui";
 import BrandLogo from "@/components/BrandLogo";
+import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 
@@ -43,6 +44,9 @@ type VaultDetail = {
   name: string;
   owner_message?: string | null;
   grace_period_days: number;
+  grace_period_value?: number;
+  grace_period_unit?: "days" | "hours";
+  grace_period_hours?: number;
   status: string;
   recipients: VaultRecipient[];
   activation_threshold?: number;
@@ -181,6 +185,13 @@ function describeCountdown(expiresAt: string | null | undefined): string {
   return `${minutes}m remaining`;
 }
 
+function formatGracePeriod(value?: number, unit?: "days" | "hours"): string {
+  const normalizedValue = Number(value || 0);
+  const normalizedUnit = unit === "hours" ? "hours" : "days";
+  const suffix = normalizedValue === 1 ? normalizedUnit.slice(0, -1) : normalizedUnit;
+  return `${normalizedValue} ${suffix}`;
+}
+
 export default function VaultDetailsPage() {
   const t = useCatTheme();
   const router = useRouter();
@@ -220,6 +231,7 @@ export default function VaultDetailsPage() {
   const [editableName, setEditableName] = useState("");
   const [editableOwnerMessage, setEditableOwnerMessage] = useState("");
   const [editableGracePeriod, setEditableGracePeriod] = useState(30);
+  const [editableGracePeriodUnit, setEditableGracePeriodUnit] = useState<"days" | "hours">("days");
   const [editableThreshold, setEditableThreshold] = useState(1);
   const [isUpdatingVault, setIsUpdatingVault] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
@@ -316,7 +328,8 @@ export default function VaultDetailsPage() {
         setVault(vaultPayload);
         setEditableName(vaultPayload.name || "");
         setEditableOwnerMessage(vaultPayload.owner_message || "");
-        setEditableGracePeriod(Number(vaultPayload.grace_period_days || 1));
+        setEditableGracePeriod(Number(vaultPayload.grace_period_value || vaultPayload.grace_period_days || 1));
+        setEditableGracePeriodUnit(vaultPayload.grace_period_unit === "hours" ? "hours" : "days");
         setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
         setSelectedRecipientEmails((currentSelection) => {
@@ -680,7 +693,7 @@ export default function VaultDetailsPage() {
     }
 
     if (!Number.isFinite(editableGracePeriod) || editableGracePeriod < 1) {
-      setUpdateError("Grace period must be at least 1 day.");
+      setUpdateError(`Grace period must be at least 1 ${editableGracePeriodUnit === "hours" ? "hour" : "day"}.`);
       return;
     }
 
@@ -701,7 +714,8 @@ export default function VaultDetailsPage() {
         body: JSON.stringify({
           name: normalizedName,
           owner_message: editableOwnerMessage.trim() || null,
-          grace_period_days: Number(editableGracePeriod),
+          grace_period_value: Number(editableGracePeriod),
+          grace_period_unit: editableGracePeriodUnit,
           activation_threshold:
             activatableRecipientsCount > 0
               ? Math.min(Math.floor(Number(editableThreshold)), activatableRecipientsCount)
@@ -889,6 +903,7 @@ export default function VaultDetailsPage() {
               <ButtonLink href="/profile" variant="Primary">
                 Profile
               </ButtonLink>
+              <ThemeToggleButton />
               <Button
                 type="button"
                 onClick={() => void fetchVaultData(false)}
@@ -921,7 +936,7 @@ export default function VaultDetailsPage() {
               </Card>
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Grace Period</Text>
-                <Text variant="label">{vault.grace_period_days} days</Text>
+                <Text variant="label">{formatGracePeriod(vault.grace_period_value, vault.grace_period_unit)}</Text>
               </Card>
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Recipients</Text>
@@ -1053,13 +1068,43 @@ export default function VaultDetailsPage() {
                     id="vault-grace"
                     type="number"
                     min={1}
-                    max={3650}
-                    label="Grace Period (days)"
+                    max={editableGracePeriodUnit === "days" ? 3650 : 87600}
+                    label={`Grace Period (${editableGracePeriodUnit})`}
                     value={editableGracePeriod}
                     onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
                     disabled={isArchivedFinal}
                     required
                   />
+
+                  <label
+                    htmlFor="vault-grace-unit"
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: t.space.xs,
+                    }}
+                  >
+                    <Text variant="label" color="secondary">Grace Period Unit</Text>
+                    <select
+                      id="vault-grace-unit"
+                      value={editableGracePeriodUnit}
+                      onChange={(event) => setEditableGracePeriodUnit(event.target.value as "days" | "hours")}
+                      disabled={isArchivedFinal}
+                      style={{
+                        width: "100%",
+                        border: `1px solid ${t.colors.components.input.border}`,
+                        backgroundColor: t.colors.components.input.bg,
+                        color: t.colors.text.primary,
+                        borderRadius: t.radius.full,
+                        padding: `${t.space.s}px ${t.space.m}px`,
+                        fontFamily: "var(--font-geist-sans), sans-serif",
+                        fontSize: t.typography.body.fontSize,
+                      }}
+                    >
+                      <option value="days">Days</option>
+                      <option value="hours">Hours</option>
+                    </select>
+                  </label>
 
                   <Input
                     id="vault-owner-message"

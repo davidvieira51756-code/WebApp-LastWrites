@@ -234,6 +234,19 @@ def _update_local_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[
     return None
 
 
+def _get_local_user(user_id: str) -> Optional[Dict[str, Any]]:
+    items = _load_local_items()
+    return next(
+        (
+            item
+            for item in items
+            if str(item.get("doc_type", "")).strip().lower() == "user"
+            and str(item.get("id", "")) == user_id
+        ),
+        None,
+    )
+
+
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
 _audit_container = None
@@ -289,6 +302,20 @@ def _get_azure_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     return items[0] if items else None
 
 
+def _get_azure_user(user_id: str) -> Optional[Dict[str, Any]]:
+    container = _get_azure_cosmos_container()
+    query = "SELECT * FROM c WHERE c.id = @user_id AND c.doc_type = 'user'"
+    parameters = [{"name": "@user_id", "value": user_id}]
+    items = list(
+        container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+        )
+    )
+    return items[0] if items else None
+
+
 def _update_azure_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     container = _get_azure_cosmos_container()
     existing_item = _get_azure_vault(vault_id)
@@ -310,6 +337,31 @@ def _update_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[s
     if _is_local_dev_mode():
         return _update_local_vault(vault_id, update_data)
     return _update_azure_vault(vault_id, update_data)
+
+
+def _load_user(user_id: str) -> Optional[Dict[str, Any]]:
+    if not user_id:
+        return None
+    if _is_local_dev_mode():
+        return _get_local_user(user_id)
+    return _get_azure_user(user_id)
+
+
+def _build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not user_item:
+        return None
+
+    preference = str(user_item.get("display_name_preference", "username")).strip().lower()
+    full_name = str(user_item.get("full_name", "")).strip()
+    username = str(user_item.get("username", "")).strip()
+
+    if preference == "real_name" and full_name:
+        return full_name
+    if username:
+        return username
+    if full_name:
+        return full_name
+    return None
 
 
 def _audit_partition_key(vault_id: Optional[str], owner_user_id: str) -> str:
@@ -599,10 +651,10 @@ def _decrypt_vault_file(file_metadata: Dict[str, Any]) -> bytes:
 
 def _generate_cover_pdf(
     vault_document: Dict[str, Any],
-    recipient_email: str,
     file_items: List[Dict[str, Any]],
     output_path: Path,
     delivered_at: str,
+    owner_display_name: Optional[str],
 ) -> None:
     styles = getSampleStyleSheet()
     story: List[Any] = []
@@ -623,10 +675,8 @@ def _generate_cover_pdf(
     )
     story.append(Spacer(1, 12))
 
-    story.append(Paragraph("Recipient", styles["Heading3"]))
-    story.append(
-        Paragraph(recipient_email.strip() or "Unknown recipient", styles["BodyText"])
-    )
+    story.append(Paragraph("From", styles["Heading3"]))
+    story.append(Paragraph(owner_display_name or "Unknown owner", styles["BodyText"]))
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("Included Files", styles["Heading3"]))
@@ -706,6 +756,8 @@ def run() -> int:
         recipients = _normalized_recipients(vault_document)
         if not recipients:
             raise ValueError("Vault has no recipients configured for delivery.")
+        owner_profile = _load_user(str(vault_document.get("user_id", "")).strip())
+        owner_display_name = _build_user_display_name(owner_profile)
 
         with tempfile.TemporaryDirectory(prefix=f"last-writes-{vault_id[:12]}-") as temp_dir:
             temp_root = Path(temp_dir)
@@ -754,10 +806,10 @@ def run() -> int:
 
                 _generate_cover_pdf(
                     vault_document=vault_document,
-                    recipient_email=recipient_email,
                     file_items=[payload["metadata"] for payload in recipient_files],
                     output_path=cover_pdf_path,
                     delivered_at=delivered_at,
+                    owner_display_name=owner_display_name,
                 )
                 _build_zip_archive(
                     cover_pdf_path=cover_pdf_path,
