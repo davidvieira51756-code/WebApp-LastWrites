@@ -20,6 +20,7 @@ import CreateVaultForm, { type Vault } from "../components/CreateVaultForm";
 type IncomingVaultSummary = {
     id: string;
     name: string;
+    owner_display_name?: string | null;
     status: string;
     grace_period_days: number;
     activation_threshold: number;
@@ -247,6 +248,9 @@ export default function DashboardPage() {
                     </div>
 
                     <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+                        <ButtonLink href="/profile" variant="Primary">
+                            Profile
+                        </ButtonLink>
                         <Button
                             type="button"
                             onClick={() => {
@@ -348,7 +352,7 @@ export default function DashboardPage() {
                                                     {vault.name}
                                                 </Text>
                                                 <Text variant="caption" color="muted">
-                                                    Vault ID: {vault.id}
+                                                    Vault Ref: {vault.id}
                                                 </Text>
                                             </div>
                                             <Badge
@@ -446,14 +450,19 @@ export default function DashboardPage() {
                                             flexWrap: "wrap",
                                         }}
                                     >
-                                        <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
-                                            <Text variant="label" weight="semibold">
-                                                {incoming.name}
-                                            </Text>
-                                            <Text variant="caption" color="muted">
-                                                Vault ID: {incoming.id}
-                                            </Text>
-                                        </div>
+                                            <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
+                                                <Text variant="label" weight="semibold">
+                                                    {incoming.name}
+                                                </Text>
+                                                {incoming.owner_display_name ? (
+                                                    <Text variant="caption" color="muted">
+                                                        Owner: {incoming.owner_display_name}
+                                                    </Text>
+                                                ) : null}
+                                                <Text variant="caption" color="muted">
+                                                Vault Ref: {incoming.id}
+                                                </Text>
+                                            </div>
                                         <Badge
                                             label={formatStatusLabel(incoming.status)}
                                             variant={statusBadgeVariant(incoming.status)}

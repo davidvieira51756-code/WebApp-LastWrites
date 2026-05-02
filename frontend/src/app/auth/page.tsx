@@ -24,11 +24,31 @@ type RegisterResponse = {
   message: string;
   user_id: string;
   email: string;
+  username: string;
   email_verification_required: boolean;
 };
 
 const EMAIL_REGEX =
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+const USERNAME_REGEX = /^[A-Za-z0-9_]{3,32}$/;
+
+function isAtLeast13YearsOld(birthDate: string): boolean {
+  const parsedBirthDate = new Date(`${birthDate}T00:00:00`);
+  if (Number.isNaN(parsedBirthDate.getTime())) {
+    return false;
+  }
+
+  const today = new Date();
+  let age = today.getFullYear() - parsedBirthDate.getFullYear();
+  const monthDifference = today.getMonth() - parsedBirthDate.getMonth();
+  if (
+    monthDifference < 0 ||
+    (monthDifference === 0 && today.getDate() < parsedBirthDate.getDate())
+  ) {
+    age -= 1;
+  }
+  return age >= 13;
+}
 
 function AuthPageContent() {
   const t = useCatTheme();
@@ -46,6 +66,9 @@ function AuthPageContent() {
 
   const [mode, setMode] = useState<AuthMode>("signin");
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [birthDate, setBirthDate] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -81,6 +104,22 @@ function AuthPageContent() {
     }
 
     if (mode === "signup") {
+      if (!USERNAME_REGEX.test(username.trim().toLowerCase())) {
+        setErrorMessage("Username must be 3-32 characters and use only letters, numbers, or underscores.");
+        return;
+      }
+      if (!fullName.trim()) {
+        setErrorMessage("Full name is required.");
+        return;
+      }
+      if (!birthDate) {
+        setErrorMessage("Birth date is required.");
+        return;
+      }
+      if (!isAtLeast13YearsOld(birthDate)) {
+        setErrorMessage("You must be at least 13 years old.");
+        return;
+      }
       if (password.length < 8) {
         setErrorMessage("Password must be at least 8 characters.");
         return;
@@ -123,7 +162,13 @@ function AuthPageContent() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ email: normalizedEmail, password }),
+        body: JSON.stringify({
+          email: normalizedEmail,
+          username: username.trim().toLowerCase(),
+          full_name: fullName.trim(),
+          birth_date: birthDate,
+          password,
+        }),
       });
 
       if (!response.ok) {
@@ -136,6 +181,9 @@ function AuthPageContent() {
         payload.message || "Account created successfully. Check your email for the verification link.",
       );
       setMode("signin");
+      setUsername("");
+      setFullName("");
+      setBirthDate("");
       setPassword("");
       setConfirmPassword("");
     } catch (error) {
@@ -219,6 +267,39 @@ function AuthPageContent() {
                 placeholder="you@example.com"
                 required
               />
+
+              {mode === "signup" ? (
+                <>
+                  <Input
+                    id="auth-username"
+                    type="text"
+                    label="Username"
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                    placeholder="your_username"
+                    required
+                  />
+
+                  <Input
+                    id="auth-full-name"
+                    type="text"
+                    label="Full Name"
+                    value={fullName}
+                    onChange={(event) => setFullName(event.target.value)}
+                    placeholder="Your full name"
+                    required
+                  />
+
+                  <Input
+                    id="auth-birth-date"
+                    type="date"
+                    label="Birth Date"
+                    value={birthDate}
+                    onChange={(event) => setBirthDate(event.target.value)}
+                    required
+                  />
+                </>
+              ) : null}
 
               <Input
                 id="auth-password"

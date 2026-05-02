@@ -67,6 +67,7 @@ class VaultUpdate(BaseModel):
 
 class Vault(VaultBase):
     id: str = Field(..., min_length=1)
+    short_id: Optional[str] = Field(default=None, min_length=8, max_length=8)
     user_id: str = Field(..., min_length=1, max_length=128)
     key_kid: Optional[str] = None
     key_version: Optional[str] = None
@@ -101,6 +102,7 @@ class RecipientVaultSummary(BaseModel):
 
     id: str
     name: str
+    owner_display_name: Optional[str] = Field(default=None, max_length=120)
     status: VaultStatus
     grace_period_days: int
     activation_threshold: int

@@ -125,6 +125,19 @@ class LocalCosmosService:
             None,
         )
 
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        normalized_username = username.strip().lower()
+        items = self._read_items()
+        return next(
+            (
+                item
+                for item in items
+                if str(item.get("doc_type", "")).strip().lower() == "user"
+                and str(item.get("username", "")).strip().lower() == normalized_username
+            ),
+            None,
+        )
+
     def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         items = self._read_items()
         return next(
@@ -192,6 +205,18 @@ class LocalCosmosService:
                 item
                 for item in items
                 if self._is_vault_document(item) and str(item.get("id")) == vault_id
+            ),
+            None,
+        )
+
+    def get_vault_by_short_id(self, short_id: str) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+        return next(
+            (
+                item
+                for item in items
+                if self._is_vault_document(item)
+                and str(item.get("short_id", "")).strip() == short_id
             ),
             None,
         )
@@ -458,6 +483,22 @@ class LocalCosmosService:
             return updated_item
 
         return None
+
+    def delete_user(self, user_id: str) -> bool:
+        items = self._read_items()
+        remaining = [
+            item
+            for item in items
+            if not (
+                str(item.get("doc_type", "")).strip().lower() == "user"
+                and str(item.get("id")) == user_id
+            )
+        ]
+        if len(remaining) == len(items):
+            return False
+
+        self._write_items(remaining)
+        return True
 
     def log_audit_event(
         self,

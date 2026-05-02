@@ -46,7 +46,13 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
     def _register_and_login(self, email: str, password: str = "Password123!") -> str:
         register_response = self.client.post(
             "/auth/register",
-            json={"email": email, "password": password},
+            json={
+                "email": email,
+                "username": f"user_{uuid4().hex[:8]}",
+                "full_name": "Integration Test User",
+                "birth_date": "2000-01-01",
+                "password": password,
+            },
         )
         self.assertEqual(register_response.status_code, 201, register_response.text)
         verification_token = register_response.json().get("verification_token")
@@ -103,6 +109,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             owner_message="This should appear on the delivery cover.",
         )
         self.assertEqual(vault["owner_message"], "This should appear on the delivery cover.")
+        self.assertRegex(vault["id"], r"^[a-z0-9]{8}$")
         self.assertTrue(str(vault["key_kid"]).startswith("local://"))
         self.assertIn("public_jwk", vault)
 
@@ -141,6 +148,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             owner_message="Final instructions for the recipients.",
         )
         vault_id = vault["id"]
+        internal_vault_id = self.backend_main.app.state.cosmos_service.get_vault_by_short_id(vault_id)["id"]
 
         add_recipient_response = self.client.post(
             f"/vaults/{vault_id}/recipients",
@@ -153,12 +161,12 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         second_file = self._upload_file(token, vault_id, "notes.txt", b"second encrypted file")
 
         updated_vault = self.backend_main.app.state.cosmos_service.update_vault(
-            vault_id,
+            internal_vault_id,
             {"status": "delivery_initiated"},
         )
         self.assertIsNotNone(updated_vault)
 
-        os.environ["VAULT_ID"] = vault_id
+        os.environ["VAULT_ID"] = internal_vault_id
         os.environ["DELIVERIES_CONTAINER"] = "deliveries"
         sys.modules.pop("worker_container.app", None)
         worker_app = importlib.import_module("worker_container.app")
@@ -183,6 +191,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         )
         self.assertEqual(package_response.status_code, 200, package_response.text)
         self.assertEqual(package_response.headers.get("content-type"), "application/zip")
+        self.assertIn("last-writes-delivery.zip", package_response.headers.get("content-disposition", ""))
 
         archive = ZipFile(io.BytesIO(package_response.content))
         archive_names = set(archive.namelist())
@@ -190,6 +199,64 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertNotIn("00-cover.pdf", archive_names)
         self.assertIn(first_file["file_name"], archive_names)
         self.assertIn(second_file["file_name"], archive_names)
+
+    def test_profile_update_and_short_id_public_access(self) -> None:
+        email = f"profile-owner-{uuid4().hex[:8]}@example.com"
+        token = self._register_and_login(email)
+
+        me_response = self.client.get("/auth/me", headers=self._auth_headers(token))
+        self.assertEqual(me_response.status_code, 200, me_response.text)
+        self.assertEqual(me_response.json()["display_name_preference"], "username")
+
+        update_response = self.client.patch(
+            "/auth/me",
+            headers=self._auth_headers(token),
+            json={
+                "username": "owner_public",
+                "full_name": "Owner Public Name",
+                "birth_date": "1995-05-05",
+                "display_name_preference": "real_name",
+            },
+        )
+        self.assertEqual(update_response.status_code, 200, update_response.text)
+        self.assertEqual(update_response.json()["full_name"], "Owner Public Name")
+
+        underage_response = self.client.post(
+            "/auth/register",
+            json={
+                "email": f"underage-{uuid4().hex[:8]}@example.com",
+                "username": f"teen_{uuid4().hex[:6]}",
+                "full_name": "Too Young",
+                "birth_date": "2018-01-01",
+                "password": "Password123!",
+            },
+        )
+        self.assertEqual(underage_response.status_code, 400, underage_response.text)
+
+        vault = self._create_vault(
+            token,
+            name="Public Id Vault",
+            owner_message="Public identifier test.",
+        )
+        self.assertRegex(vault["id"], r"^[a-z0-9]{8}$")
+
+        recipient_email = f"recipient-{uuid4().hex[:8]}@example.com"
+        add_recipient_response = self.client.post(
+            f"/vaults/{vault['id']}/recipients",
+            headers=self._auth_headers(token),
+            json={"email": recipient_email},
+        )
+        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        recipient_token = self._register_and_login(recipient_email)
+        incoming_response = self.client.get(
+            "/vaults/incoming",
+            headers=self._auth_headers(recipient_token),
+        )
+        self.assertEqual(incoming_response.status_code, 200, incoming_response.text)
+        incoming_payload = incoming_response.json()
+        self.assertEqual(incoming_payload[0]["id"], vault["id"])
+        self.assertEqual(incoming_payload[0]["owner_display_name"], "Owner Public Name")
 
 
 if __name__ == "__main__":

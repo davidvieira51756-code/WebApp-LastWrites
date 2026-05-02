@@ -4,8 +4,10 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
+import string
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from threading import Lock
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
@@ -19,8 +21,11 @@ from pydantic import BaseModel, Field
 
 try:
     from backend.models.auth import (
+        AuthChangePasswordRequest,
+        AuthDeleteAccountRequest,
         AuthLoginRequest,
         AuthMeResponse,
+        AuthProfileUpdateRequest,
         AuthRegisterRequest,
         AuthRegisterResponse,
         AuthTokenResponse,
@@ -46,8 +51,11 @@ try:
     from backend.services.vault_key_service import AzureVaultKeyService, LocalVaultKeyService
 except ModuleNotFoundError:
     from models.auth import (
+        AuthChangePasswordRequest,
+        AuthDeleteAccountRequest,
         AuthLoginRequest,
         AuthMeResponse,
+        AuthProfileUpdateRequest,
         AuthRegisterRequest,
         AuthRegisterResponse,
         AuthTokenResponse,
@@ -78,8 +86,11 @@ logger = logging.getLogger(__name__)
 EMAIL_ADDRESS_REGEX = re.compile(
     r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$"
 )
+USERNAME_REGEX = re.compile(r"^[A-Za-z0-9_]{3,32}$")
+SHORT_ID_REGEX = re.compile(r"^[a-z0-9]{8}$")
 auth_bearer = HTTPBearer(auto_error=False)
 SAFE_FILENAME_REGEX = re.compile(r"[^A-Za-z0-9._() -]+")
+SHORT_ID_ALPHABET = string.ascii_lowercase + string.digits
 DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES = {
     "application/json",
     "application/msword",
@@ -244,6 +255,113 @@ def _parse_iso_datetime(value: str) -> Optional[datetime]:
     if parsed_value.tzinfo is None:
         return parsed_value.replace(tzinfo=timezone.utc)
     return parsed_value.astimezone(timezone.utc)
+
+
+def _parse_iso_date(value: str) -> Optional[date]:
+    normalized_value = str(value or "").strip()
+    if not normalized_value:
+        return None
+
+    try:
+        return date.fromisoformat(normalized_value)
+    except ValueError:
+        return None
+
+
+def validate_birth_date(value: str) -> str:
+    parsed_birth_date = _parse_iso_date(value)
+    if parsed_birth_date is None:
+        raise ValueError("Birth date must use the YYYY-MM-DD format.")
+
+    today = datetime.now(timezone.utc).date()
+    age = today.year - parsed_birth_date.year - (
+        (today.month, today.day) < (parsed_birth_date.month, parsed_birth_date.day)
+    )
+    if age < 13:
+        raise ValueError("You must be at least 13 years old.")
+
+    return parsed_birth_date.isoformat()
+
+
+def normalize_username(value: str) -> str:
+    normalized_value = str(value or "").strip().lower()
+    if not USERNAME_REGEX.fullmatch(normalized_value):
+        raise ValueError("Username must be 3-32 characters and use only letters, numbers, or underscores.")
+    return normalized_value
+
+
+def normalize_full_name(value: str) -> str:
+    normalized_value = " ".join(str(value or "").strip().split())
+    if not normalized_value:
+        raise ValueError("Full name is required.")
+    if len(normalized_value) > 120:
+        raise ValueError("Full name must be 120 characters or fewer.")
+    return normalized_value
+
+
+def resolve_display_name_preference(value: str) -> str:
+    normalized_value = str(value or "").strip().lower()
+    if normalized_value not in {"username", "real_name"}:
+        raise ValueError("Display name preference must be either 'username' or 'real_name'.")
+    return normalized_value
+
+
+def build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not user_item:
+        return None
+
+    preference = str(user_item.get("display_name_preference", "username")).strip().lower()
+    full_name = str(user_item.get("full_name", "")).strip()
+    username = str(user_item.get("username", "")).strip()
+
+    if preference == "real_name" and full_name:
+        return full_name
+    if username:
+        return username
+    if full_name:
+        return full_name
+    return None
+
+
+def _generate_short_id() -> str:
+    return "".join(secrets.choice(SHORT_ID_ALPHABET) for _ in range(8))
+
+
+def generate_unique_short_id(cosmos_service: CosmosService) -> str:
+    for _ in range(64):
+        candidate = _generate_short_id()
+        if cosmos_service.get_vault_by_short_id(candidate) is None:
+            return candidate
+    raise RuntimeError("Failed to generate a unique public vault identifier.")
+
+
+def ensure_vault_short_ids(cosmos_service: CosmosService) -> None:
+    seen_short_ids: set[str] = set()
+    for vault_item in cosmos_service.list_vaults():
+        internal_vault_id = str(vault_item.get("id", "")).strip()
+        short_id = str(vault_item.get("short_id", "")).strip().lower()
+        if SHORT_ID_REGEX.fullmatch(short_id) and short_id not in seen_short_ids:
+            seen_short_ids.add(short_id)
+            continue
+
+        new_short_id = generate_unique_short_id(cosmos_service)
+        cosmos_service.update_vault(internal_vault_id, {"short_id": new_short_id})
+        seen_short_ids.add(new_short_id)
+
+
+def resolve_vault_by_public_id(cosmos_service: CosmosService, public_vault_id: str) -> Optional[Dict[str, Any]]:
+    normalized_id = str(public_vault_id or "").strip().lower()
+    if not normalized_id:
+        return None
+    return cosmos_service.get_vault_by_short_id(normalized_id)
+
+
+def build_public_vault_payload(vault_item: Dict[str, Any]) -> Dict[str, Any]:
+    public_payload = dict(vault_item)
+    public_payload["id"] = str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")).strip()
+    if str(public_payload.get("delivery_blob_name", "")).strip():
+        public_payload["delivery_file_name"] = "last-writes-delivery.zip"
+    return public_payload
 
 
 def _build_attachment_headers(file_name: str) -> Dict[str, str]:
@@ -491,13 +609,13 @@ def get_current_user(
 
 def get_owned_vault_or_404(
     cosmos_service: CosmosService,
-    vault_id: str,
+    public_vault_id: str,
     user_id: str,
 ) -> Dict[str, Any]:
     try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
+        vault_item = resolve_vault_by_public_id(cosmos_service, public_vault_id)
     except Exception:
-        logger.exception("Unhandled error while retrieving vault id=%s", vault_id)
+        logger.exception("Unhandled error while retrieving vault public_id=%s", public_vault_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve vault.",
@@ -569,6 +687,7 @@ def startup_event() -> None:
         app.state.auth_service = auth_service
         app.state.email_service = email_service
         app.state.vault_key_service = vault_key_service
+        ensure_vault_short_ids(cosmos_service)
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise
@@ -592,6 +711,28 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
         )
 
     try:
+        normalized_username = normalize_username(payload.username)
+        normalized_full_name = normalize_full_name(payload.full_name)
+        normalized_birth_date = validate_birth_date(payload.birth_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    try:
+        existing_username_owner = cosmos_service.get_user_by_username(normalized_username)
+    except Exception:
+        logger.exception("Failed to validate username uniqueness. username=%s", normalized_username)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to register account.",
+        ) from None
+
+    if existing_username_owner is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this username already exists.",
+        )
+
+    try:
         password_hash = auth_service.hash_password(payload.password)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -599,6 +740,10 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
     verification_payload = auth_service.issue_email_verification()
     user_document = {
         "email": normalized_email,
+        "username": normalized_username,
+        "full_name": normalized_full_name,
+        "birth_date": normalized_birth_date,
+        "display_name_preference": "username",
         "password_hash": password_hash,
         "is_email_verified": False,
         "verification_token_hash": verification_payload["token_hash"],
@@ -651,6 +796,7 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
         message="Account created. Verify your email before signing in.",
         user_id=str(created_user.get("id")),
         email=str(created_user.get("email", normalized_email)),
+        username=str(created_user.get("username", normalized_username)),
         email_verification_required=auth_service.should_require_email_verification(),
         verification_url=verification_url,
         verification_token=verification_token if _should_expose_verification_token() else None,
@@ -793,7 +939,202 @@ def get_current_user_profile(current_user: Dict[str, Any] = Depends(get_current_
         user_id=str(current_user.get("id", "")),
         email=str(current_user.get("email", "")),
         email_verified=bool(current_user.get("is_email_verified", False)),
+        username=str(current_user.get("username", "")),
+        full_name=str(current_user.get("full_name", "")),
+        birth_date=str(current_user.get("birth_date", "")),
+        display_name_preference=resolve_display_name_preference(
+            str(current_user.get("display_name_preference", "username"))
+        ),
     )
+
+
+@app.patch("/auth/me", response_model=AuthMeResponse)
+def update_current_user_profile(
+    payload: AuthProfileUpdateRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> AuthMeResponse:
+    cosmos_service = get_cosmos_service(request)
+    user_id = str(current_user.get("id", "")).strip()
+
+    try:
+        normalized_username = normalize_username(payload.username)
+        normalized_full_name = normalize_full_name(payload.full_name)
+        normalized_birth_date = validate_birth_date(payload.birth_date)
+        display_name_preference = resolve_display_name_preference(payload.display_name_preference)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    try:
+        existing_username_owner = cosmos_service.get_user_by_username(normalized_username)
+    except Exception:
+        logger.exception("Failed to validate username uniqueness for update. user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update profile.",
+        ) from None
+
+    if existing_username_owner is not None and str(existing_username_owner.get("id")) != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this username already exists.",
+        )
+
+    try:
+        updated_user = cosmos_service.update_user(
+            user_id,
+            {
+                "username": normalized_username,
+                "full_name": normalized_full_name,
+                "birth_date": normalized_birth_date,
+                "display_name_preference": display_name_preference,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to update profile. user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update profile.",
+        ) from None
+
+    if updated_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account was not found.",
+        )
+
+    return AuthMeResponse(
+        user_id=user_id,
+        email=str(updated_user.get("email", "")),
+        email_verified=bool(updated_user.get("is_email_verified", False)),
+        username=str(updated_user.get("username", "")),
+        full_name=str(updated_user.get("full_name", "")),
+        birth_date=str(updated_user.get("birth_date", "")),
+        display_name_preference=resolve_display_name_preference(
+            str(updated_user.get("display_name_preference", "username"))
+        ),
+    )
+
+
+@app.post("/auth/change-password")
+def change_password(
+    payload: AuthChangePasswordRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    auth_service = get_auth_service(request)
+    user_id = str(current_user.get("id", "")).strip()
+    password_hash = str(current_user.get("password_hash", ""))
+
+    if not auth_service.verify_password(payload.current_password, password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        new_password_hash = auth_service.hash_password(payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    try:
+        updated_user = cosmos_service.update_user(user_id, {"password_hash": new_password_hash})
+    except Exception:
+        logger.exception("Failed to change password. user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to change password.",
+        ) from None
+
+    if updated_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account was not found.",
+        )
+
+    return {"message": "Password updated successfully."}
+
+
+def _delete_vault_assets(blob_service: BlobService, vault_item: Dict[str, Any]) -> None:
+    files = vault_item.get("files", [])
+    if not isinstance(files, list):
+        files = []
+
+    for file_item in files:
+        if not isinstance(file_item, dict):
+            continue
+        container_name = file_item.get("container_name")
+        blob_name = file_item.get("blob_name")
+        if container_name and blob_name:
+            blob_service.delete_blob(container_name=container_name, blob_name=blob_name)
+
+    delivery_container_name = vault_item.get("delivery_container_name")
+    delivery_blob_name = vault_item.get("delivery_blob_name")
+    if delivery_container_name and delivery_blob_name:
+        blob_service.delete_blob(
+            container_name=str(delivery_container_name),
+            blob_name=str(delivery_blob_name),
+        )
+
+
+@app.delete("/auth/me")
+def delete_current_user_account(
+    payload: AuthDeleteAccountRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    blob_service = get_blob_service(request)
+    auth_service = get_auth_service(request)
+    user_id = str(current_user.get("id", "")).strip()
+    email = str(current_user.get("email", "")).strip().lower()
+
+    if not auth_service.verify_password(payload.password, str(current_user.get("password_hash", ""))):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Password is incorrect.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        for vault_item in cosmos_service.list_vaults(user_id=user_id):
+            _delete_vault_assets(blob_service, vault_item)
+            cosmos_service.delete_vault(str(vault_item.get("id", "")))
+
+        for vault_item in cosmos_service.list_vaults():
+            internal_vault_id = str(vault_item.get("id", "")).strip()
+            recipients = vault_item.get("recipients", [])
+            if isinstance(recipients, list) and any(
+                isinstance(recipient, str) and recipient.strip().lower() == email
+                for recipient in recipients
+            ):
+                vault_item = cosmos_service.remove_recipient_from_vault(internal_vault_id, email) or vault_item
+
+            activation_requests = vault_item.get("activation_requests", [])
+            if isinstance(activation_requests, list) and any(
+                isinstance(activation_request, dict)
+                and str(activation_request.get("recipient_email", "")).strip().lower() == email
+                for activation_request in activation_requests
+            ):
+                cosmos_service.remove_activation_request(internal_vault_id, email)
+
+        deleted = cosmos_service.delete_user(user_id)
+    except Exception:
+        logger.exception("Failed to delete account. user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete account.",
+        ) from None
+
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account was not found.",
+        )
+
+    return {"message": "Account deleted successfully."}
 
 
 @app.post("/vaults", response_model=VaultResponse, status_code=status.HTTP_201_CREATED)
@@ -807,6 +1148,7 @@ def create_vault(
     vault_payload = vault.model_dump(exclude_unset=True)
     vault_id = str(uuid4())
     vault_payload["id"] = vault_id
+    vault_payload["short_id"] = generate_unique_short_id(cosmos_service)
     vault_payload["user_id"] = str(current_user.get("id", ""))
     vault_payload["status"] = "active"
     vault_payload["owner_message"] = (
@@ -828,7 +1170,7 @@ def create_vault(
             actor_email=str(current_user.get("email", "")).strip().lower() or None,
             metadata={"recipient_count": len(created_item.get("recipients", []))},
         )
-        return VaultResponse(**created_item)
+        return VaultResponse(**build_public_vault_payload(created_item))
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except Exception:
@@ -849,7 +1191,7 @@ def list_vaults(
 
     try:
         vault_items = cosmos_service.list_vaults(user_id=user_id)
-        return [VaultResponse(**vault_item) for vault_item in vault_items]
+        return [VaultResponse(**build_public_vault_payload(vault_item)) for vault_item in vault_items]
     except Exception:
         logger.exception("Unhandled error while listing vaults.")
         raise HTTPException(
@@ -883,9 +1225,11 @@ def _build_recipient_vault_summary(
     except (TypeError, ValueError):
         grace_period_days_value = 0
 
+    owner_display_name = build_user_display_name(vault_item.get("owner_profile"))
     return RecipientVaultSummary(
-        id=str(vault_item.get("id", "")),
+        id=str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")),
         name=str(vault_item.get("name", "")),
+        owner_display_name=owner_display_name,
         status=str(vault_item.get("status", "active")),
         grace_period_days=grace_period_days_value,
         activation_threshold=threshold_value,
@@ -910,6 +1254,15 @@ def list_incoming_vaults(
 
     try:
         vault_items = cosmos_service.list_vaults_for_recipient(recipient_email)
+        owner_ids = {
+            str(vault_item.get("user_id", "")).strip()
+            for vault_item in vault_items
+            if str(vault_item.get("user_id", "")).strip()
+        }
+        owner_profiles = {
+            owner_id: cosmos_service.get_user_by_id(owner_id)
+            for owner_id in owner_ids
+        }
     except Exception:
         logger.exception(
             "Unhandled error while listing incoming vaults for recipient=%s",
@@ -921,7 +1274,10 @@ def list_incoming_vaults(
         ) from None
 
     return [
-        _build_recipient_vault_summary(vault_item, recipient_email)
+        _build_recipient_vault_summary(
+            {**vault_item, "owner_profile": owner_profiles.get(str(vault_item.get("user_id", "")).strip())},
+            recipient_email,
+        )
         for vault_item in vault_items
     ]
 
@@ -935,11 +1291,11 @@ def get_vault(
     cosmos_service = get_cosmos_service(request)
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
 
-    return VaultResponse(**vault_item)
+    return VaultResponse(**build_public_vault_payload(vault_item))
 
 
 @app.patch("/vaults/{vault_id}", response_model=VaultResponse)
@@ -951,11 +1307,12 @@ def update_vault(
 ) -> VaultResponse:
     cosmos_service = get_cosmos_service(request)
     update_data = payload.model_dump(exclude_unset=True)
-    get_owned_vault_or_404(
+    existing_vault = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     try:
         if "status" in update_data and update_data["status"] is not None:
@@ -967,7 +1324,7 @@ def update_vault(
         if "owner_message" in update_data:
             update_data["owner_message"] = str(update_data.get("owner_message", "")).strip() or None
 
-        updated_vault = cosmos_service.update_vault(vault_id, update_data)
+        updated_vault = cosmos_service.update_vault(internal_vault_id, update_data)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except Exception:
@@ -983,7 +1340,7 @@ def update_vault(
             detail="Vault not found.",
         )
 
-    return VaultResponse(**updated_vault)
+    return VaultResponse(**build_public_vault_payload(updated_vault))
 
 
 @app.delete("/vaults/{vault_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -996,33 +1353,14 @@ def delete_vault(
     blob_service = get_blob_service(request)
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
-
-    files = vault_item.get("files", [])
-    if not isinstance(files, list):
-        files = []
+    internal_vault_id = str(vault_item.get("id", "")).strip()
 
     try:
-        for file_item in files:
-            if not isinstance(file_item, dict):
-                continue
-
-            container_name = file_item.get("container_name")
-            blob_name = file_item.get("blob_name")
-            if container_name and blob_name:
-                blob_service.delete_blob(container_name=container_name, blob_name=blob_name)
-
-        delivery_container_name = vault_item.get("delivery_container_name")
-        delivery_blob_name = vault_item.get("delivery_blob_name")
-        if delivery_container_name and delivery_blob_name:
-            blob_service.delete_blob(
-                container_name=str(delivery_container_name),
-                blob_name=str(delivery_blob_name),
-            )
-
-        deleted = cosmos_service.delete_vault(vault_id)
+        _delete_vault_assets(blob_service, vault_item)
+        deleted = cosmos_service.delete_vault(internal_vault_id)
     except Exception:
         logger.exception("Unhandled error while deleting vault id=%s", vault_id)
         raise HTTPException(
@@ -1046,14 +1384,15 @@ def check_in_vault(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> VaultResponse:
     cosmos_service = get_cosmos_service(request)
-    get_owned_vault_or_404(
+    existing_vault = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     try:
-        updated_vault = cosmos_service.check_in_vault(vault_id)
+        updated_vault = cosmos_service.check_in_vault(internal_vault_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception:
@@ -1073,12 +1412,12 @@ def check_in_vault(
         cosmos_service,
         event_type="check_in",
         owner_user_id=str(current_user.get("id", "")),
-        vault_id=vault_id,
+        vault_id=internal_vault_id,
         actor_user_id=str(current_user.get("id", "")),
         actor_email=str(current_user.get("email", "")).strip().lower() or None,
     )
 
-    return VaultResponse(**updated_vault)
+    return VaultResponse(**build_public_vault_payload(updated_vault))
 
 
 @app.get(
@@ -1094,7 +1433,12 @@ def get_vault_activation_summary(
     recipient_email = str(current_user.get("email", "")).strip().lower()
 
     try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
+        vault_item = resolve_vault_by_public_id(cosmos_service, vault_id)
+        owner_profile = (
+            None
+            if vault_item is None
+            else cosmos_service.get_user_by_id(str(vault_item.get("user_id", "")).strip())
+        )
     except Exception:
         logger.exception(
             "Unhandled error while reading vault for activation summary id=%s",
@@ -1117,7 +1461,10 @@ def get_vault_activation_summary(
             detail="Vault not found.",
         )
 
-    return _build_recipient_vault_summary(vault_item, recipient_email)
+    return _build_recipient_vault_summary(
+        {**vault_item, "owner_profile": owner_profile},
+        recipient_email,
+    )
 
 
 @app.get("/vaults/{vault_id}/delivery-package")
@@ -1130,7 +1477,7 @@ def download_delivery_package(
     blob_service = get_blob_service(request)
 
     try:
-        vault_item = cosmos_service.get_vault_by_id(vault_id)
+        vault_item = resolve_vault_by_public_id(cosmos_service, vault_id)
     except Exception:
         logger.exception("Unhandled error while reading delivery package for vault id=%s", vault_id)
         raise HTTPException(
@@ -1173,7 +1520,7 @@ def download_delivery_package(
             detail="Failed to download delivery package.",
         ) from None
 
-    file_name = str(vault_item.get("delivery_file_name", "")).strip() or f"{vault_id}-delivery.zip"
+    file_name = "last-writes-delivery.zip"
     return Response(
         content=payload,
         media_type="application/zip",
@@ -1202,7 +1549,7 @@ def submit_activation_request(
         )
 
     try:
-        existing_vault = cosmos_service.get_vault_by_id(vault_id)
+        existing_vault = resolve_vault_by_public_id(cosmos_service, vault_id)
     except Exception:
         logger.exception(
             "Unhandled error while reading vault before activation request. vault_id=%s",
@@ -1213,9 +1560,11 @@ def submit_activation_request(
             detail="Failed to submit activation request.",
         ) from None
 
+    internal_vault_id = "" if existing_vault is None else str(existing_vault.get("id", "")).strip()
+
     try:
         updated_vault, outcome = cosmos_service.add_activation_request(
-            vault_id=vault_id,
+            vault_id=internal_vault_id,
             recipient_email=recipient_email,
             reason=payload.reason,
         )
@@ -1252,7 +1601,7 @@ def submit_activation_request(
         cosmos_service,
         event_type="activation_requested",
         owner_user_id=owner_user_id,
-        vault_id=vault_id,
+        vault_id=internal_vault_id,
         actor_user_id=str(current_user.get("id", "")),
         actor_email=recipient_email,
         metadata={"outcome": outcome},
@@ -1267,7 +1616,7 @@ def submit_activation_request(
             cosmos_service,
             event_type="grace_period_started",
             owner_user_id=owner_user_id,
-            vault_id=vault_id,
+            vault_id=internal_vault_id,
             actor_user_id=str(current_user.get("id", "")),
             actor_email=recipient_email,
             metadata={
@@ -1276,7 +1625,11 @@ def submit_activation_request(
             },
         )
 
-    return _build_recipient_vault_summary(updated_vault, recipient_email)
+    owner_profile = cosmos_service.get_user_by_id(owner_user_id) if owner_user_id else None
+    return _build_recipient_vault_summary(
+        {**updated_vault, "owner_profile": owner_profile},
+        recipient_email,
+    )
 
 
 @app.delete(
@@ -1292,7 +1645,7 @@ def withdraw_activation_request(
     recipient_email = str(current_user.get("email", "")).strip().lower()
 
     try:
-        existing_vault = cosmos_service.get_vault_by_id(vault_id)
+        existing_vault = resolve_vault_by_public_id(cosmos_service, vault_id)
     except Exception:
         logger.exception("Unhandled error while reading vault id=%s", vault_id)
         raise HTTPException(
@@ -1321,9 +1674,11 @@ def withdraw_activation_request(
             detail="Vault not found.",
         )
 
+    internal_vault_id = str(existing_vault.get("id", "")).strip()
+
     try:
         updated_vault = cosmos_service.remove_activation_request(
-            vault_id=vault_id,
+            vault_id=internal_vault_id,
             recipient_email=recipient_email,
         )
     except Exception:
@@ -1342,7 +1697,11 @@ def withdraw_activation_request(
             detail="Vault not found.",
         )
 
-    return _build_recipient_vault_summary(updated_vault, recipient_email)
+    owner_profile = cosmos_service.get_user_by_id(str(updated_vault.get("user_id", "")).strip())
+    return _build_recipient_vault_summary(
+        {**updated_vault, "owner_profile": owner_profile},
+        recipient_email,
+    )
 
 
 @app.get("/vaults/{vault_id}/recipients")
@@ -1354,7 +1713,7 @@ def list_vault_recipients(
     cosmos_service = get_cosmos_service(request)
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
 
@@ -1363,7 +1722,7 @@ def list_vault_recipients(
         recipients = []
 
     return {
-        "vault_id": vault_id,
+        "vault_id": str(vault_item.get("short_id", "")).strip() or vault_id,
         "recipients": recipients,
     }
 
@@ -1378,11 +1737,12 @@ def add_vault_recipient(
     cosmos_service = get_cosmos_service(request)
     email_service = get_email_service(request)
     recipient_email = payload.email.strip().lower()
-    get_owned_vault_or_404(
+    existing_vault = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     if not is_valid_email(recipient_email):
         raise HTTPException(
@@ -1391,7 +1751,7 @@ def add_vault_recipient(
         )
 
     try:
-        updated_vault = cosmos_service.add_recipient_to_vault(vault_id, recipient_email)
+        updated_vault = cosmos_service.add_recipient_to_vault(internal_vault_id, recipient_email)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1421,16 +1781,16 @@ def add_vault_recipient(
     owner_email = str(current_user.get("email", "")).strip().lower()
     invite_result = email_service.send_recipient_invited_email(
         recipient=recipient_email,
-        vault_id=vault_id,
+        public_vault_id=str(updated_vault.get("short_id", "")).strip() or vault_id,
         vault_name=str(updated_vault.get("name", "Unnamed Vault")).strip() or "Unnamed Vault",
-        owner_email=owner_email or "unknown",
+        owner_label=build_user_display_name(current_user) or owner_email or "unknown",
     )
     if invite_result.sent:
         write_audit_event(
             cosmos_service,
             event_type="recipient_invited_email_sent",
             owner_user_id=owner_user_id,
-            vault_id=vault_id,
+            vault_id=internal_vault_id,
             actor_user_id=owner_user_id,
             actor_email=owner_email,
             metadata={
@@ -1443,7 +1803,7 @@ def add_vault_recipient(
             cosmos_service,
             event_type="email_send_failed",
             owner_user_id=owner_user_id,
-            vault_id=vault_id,
+            vault_id=internal_vault_id,
             actor_user_id=owner_user_id,
             actor_email=owner_email,
             metadata={
@@ -1454,7 +1814,7 @@ def add_vault_recipient(
         )
 
     return {
-        "vault_id": vault_id,
+        "vault_id": str(updated_vault.get("short_id", "")).strip() or vault_id,
         "recipients": recipients,
     }
 
@@ -1468,11 +1828,12 @@ def delete_vault_recipient(
 ):
     cosmos_service = get_cosmos_service(request)
     normalized_email = recipient_email.strip().lower()
-    get_owned_vault_or_404(
+    existing_vault = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     if not is_valid_email(normalized_email):
         raise HTTPException(
@@ -1481,7 +1842,7 @@ def delete_vault_recipient(
         )
 
     try:
-        updated_vault = cosmos_service.remove_recipient_from_vault(vault_id, normalized_email)
+        updated_vault = cosmos_service.remove_recipient_from_vault(internal_vault_id, normalized_email)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1508,7 +1869,7 @@ def delete_vault_recipient(
         recipients = []
 
     return {
-        "vault_id": vault_id,
+        "vault_id": str(updated_vault.get("short_id", "")).strip() or vault_id,
         "recipients": recipients,
     }
 
@@ -1522,7 +1883,7 @@ def list_vault_files(
     cosmos_service = get_cosmos_service(request)
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
     files = vault_item.get("files", [])
@@ -1530,7 +1891,7 @@ def list_vault_files(
         files = []
 
     return {
-        "vault_id": vault_id,
+        "vault_id": str(vault_item.get("short_id", "")).strip() or vault_id,
         "files": files,
     }
 
@@ -1542,15 +1903,16 @@ def list_vault_audit_logs(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> List[AuditLogEntry]:
     cosmos_service = get_cosmos_service(request)
-    get_owned_vault_or_404(
+    existing_vault = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    internal_vault_id = str(existing_vault.get("id", "")).strip()
 
     try:
         audit_items = cosmos_service.list_vault_audit_events(
-            vault_id=vault_id,
+            vault_id=internal_vault_id,
             owner_user_id=str(current_user.get("id", "")),
         )
     except Exception:
@@ -1575,7 +1937,7 @@ def download_vault_file(
     vault_key_service = get_vault_key_service(request)
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
 
@@ -1641,9 +2003,10 @@ def delete_vault_file(
     blob_service = get_blob_service(request)
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    internal_vault_id = str(vault_item.get("id", "")).strip()
 
     file_metadata = get_vault_file_metadata(vault_item, file_id)
     if file_metadata is None:
@@ -1662,7 +2025,7 @@ def delete_vault_file(
 
     try:
         blob_service.delete_blob(container_name=container_name, blob_name=blob_name)
-        updated_vault = cosmos_service.remove_file_from_vault(vault_id, file_id)
+        updated_vault = cosmos_service.remove_file_from_vault(internal_vault_id, file_id)
     except Exception:
         logger.exception(
             "Unhandled error while deleting file. vault_id=%s file_id=%s",
@@ -1727,9 +2090,10 @@ async def upload_vault_file(
 
     vault_item = get_owned_vault_or_404(
         cosmos_service=cosmos_service,
-        vault_id=vault_id,
+        public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    internal_vault_id = str(vault_item.get("id", "")).strip()
 
     uploaded_file_metadata = None
     try:
@@ -1747,7 +2111,7 @@ async def upload_vault_file(
         )
 
         uploaded_blob_metadata = blob_service.upload_bytes(
-            vault_id=vault_id,
+            vault_id=internal_vault_id,
             payload=encryption_payload["ciphertext"],
             file_name=sanitized_file_name,
             content_type=validated_content_type,
@@ -1767,7 +2131,7 @@ async def upload_vault_file(
             existing_files = []
         updated_files = existing_files + [uploaded_file_metadata]
 
-        updated_vault = cosmos_service.update_vault(vault_id, {"files": updated_files})
+        updated_vault = cosmos_service.update_vault(internal_vault_id, {"files": updated_files})
         if updated_vault is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1775,7 +2139,7 @@ async def upload_vault_file(
             )
 
         return {
-            "vault_id": vault_id,
+            "vault_id": str(updated_vault.get("short_id", "")).strip() or vault_id,
             "file": uploaded_file_metadata,
         }
     except HTTPException:

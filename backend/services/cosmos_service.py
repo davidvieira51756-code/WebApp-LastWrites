@@ -192,6 +192,31 @@ class CosmosService:
             return None
         return items[0]
 
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        normalized_username = username.strip().lower()
+        query = (
+            "SELECT * FROM c WHERE c.doc_type = 'user' "
+            "AND LOWER(c.username) = @username"
+        )
+        parameters = [{"name": "@username", "value": normalized_username}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB read failed for username=%s", normalized_username)
+            raise
+
+        if not items:
+            return None
+        return items[0]
+
     def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
         container = self._get_container()
         query = "SELECT * FROM c WHERE c.doc_type = 'user' AND c.id = @id"
@@ -257,6 +282,23 @@ class CosmosService:
             logger.exception("Cosmos DB update failed for user id=%s", user_id)
             raise
 
+    def delete_user(self, user_id: str) -> bool:
+        container = self._get_container()
+        existing_item = self.get_user_by_id(user_id)
+        if existing_item is None:
+            return False
+
+        try:
+            container.delete_item(
+                item=existing_item["id"],
+                partition_key=existing_item["user_id"],
+            )
+            logger.info("Deleted user id=%s", existing_item["id"])
+            return True
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB delete failed for user id=%s", user_id)
+            raise
+
     def create_vault(self, vault_data: Dict[str, Any]) -> Dict[str, Any]:
         container = self._get_container()
         payload = dict(vault_data)
@@ -300,6 +342,26 @@ class CosmosService:
             return items[0]
         except exceptions.CosmosHttpResponseError:
             logger.exception("Cosmos DB read failed for vault id=%s", vault_id)
+            raise
+
+    def get_vault_by_short_id(self, short_id: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        query = "SELECT * FROM c WHERE c.short_id = @short_id AND c.doc_type = 'vault'"
+        parameters = [{"name": "@short_id", "value": short_id}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+            if not items:
+                return None
+            return items[0]
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB read failed for vault short_id=%s", short_id)
             raise
 
     def list_vaults(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:

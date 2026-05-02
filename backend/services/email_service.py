@@ -119,8 +119,8 @@ class EmailService:
                 error=str(exc),
             )
 
-    def build_recipient_access_url(self, vault_id: str) -> str:
-        return f"{self._frontend_base_url}/incoming/{vault_id.strip()}"
+    def build_recipient_access_url(self, public_vault_id: str) -> str:
+        return f"{self._frontend_base_url}/incoming/{public_vault_id.strip()}"
 
     def send_verification_email(
         self,
@@ -154,23 +154,23 @@ class EmailService:
         self,
         *,
         recipient: str,
-        vault_id: str,
+        public_vault_id: str,
         vault_name: str,
-        owner_email: str,
+        owner_label: str,
     ) -> EmailSendResult:
-        access_url = self.build_recipient_access_url(vault_id)
+        access_url = self.build_recipient_access_url(public_vault_id)
         subject = f"[Last Writes] You were added to vault '{vault_name}'"
         plain_text = "\n".join(
             [
                 f"You were added as a recipient to the vault '{vault_name}'.",
-                f"Vault owner: {owner_email}",
+                f"Vault owner: {owner_label}",
                 f"Access the vault after signing in: {access_url}",
             ]
         )
         html = "".join(
             [
                 f"<p>You were added as a recipient to the vault <strong>{vault_name}</strong>.</p>",
-                f"<p>Vault owner: {owner_email}</p>",
+                f"<p>Vault owner: {owner_label}</p>",
                 f'<p>Access the vault after signing in: <a href="{access_url}">{access_url}</a></p>',
             ]
         )

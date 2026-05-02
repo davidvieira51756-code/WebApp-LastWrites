@@ -522,7 +522,7 @@ export default function VaultDetailsPage() {
       const blob = await response.blob();
       triggerBrowserDownload(
         blob,
-        getDownloadFileName(response, vault?.delivery_file_name || `${vaultId}-delivery.zip`),
+        getDownloadFileName(response, vault?.delivery_file_name || "last-writes-delivery.zip"),
       );
     } catch (error) {
       const message =
@@ -767,10 +767,10 @@ export default function VaultDetailsPage() {
             }}
           >
             <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
-              <Text variant="h2">{vault ? vault.name : "Vault Details"}</Text>
-              <Text variant="bodySmall" color="secondary">
-                Vault ID: {vaultId || "Unavailable"}
-              </Text>
+                <Text variant="h2">{vault ? vault.name : "Vault Details"}</Text>
+                <Text variant="bodySmall" color="secondary">
+                  Vault Ref: {vaultId || "Unavailable"}
+                </Text>
               {signedInEmail ? (
                 <Text variant="caption" color="muted">
                   Signed in as {signedInEmail}
@@ -781,6 +781,9 @@ export default function VaultDetailsPage() {
             <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
               <ButtonLink href="/" variant="Primary">
                 Back to Dashboard
+              </ButtonLink>
+              <ButtonLink href="/profile" variant="Primary">
+                Profile
               </ButtonLink>
               <Button
                 type="button"

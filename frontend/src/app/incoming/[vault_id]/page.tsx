@@ -21,6 +21,7 @@ import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 type RecipientVaultSummary = {
   id: string;
   name: string;
+  owner_display_name?: string | null;
   status: string;
   grace_period_days: number;
   activation_threshold: number;
@@ -318,7 +319,7 @@ export default function RecipientActivationPage() {
       const blob = await response.blob();
       triggerBrowserDownload(
         blob,
-        getDownloadFileName(response, `${vaultId}-delivery.zip`),
+        getDownloadFileName(response, "last-writes-delivery.zip"),
       );
     } catch (error) {
       const message =
@@ -391,8 +392,13 @@ export default function RecipientActivationPage() {
           >
             <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
               <Text variant="h2">{summary ? summary.name : "Incoming Vault"}</Text>
+              {summary?.owner_display_name ? (
+                <Text variant="bodySmall" color="secondary">
+                  Owner: {summary.owner_display_name}
+                </Text>
+              ) : null}
               <Text variant="bodySmall" color="secondary">
-                Vault ID: {vaultId || "Unavailable"}
+                Vault Ref: {vaultId || "Unavailable"}
               </Text>
               {signedInEmail ? (
                 <Text variant="caption" color="muted">
@@ -404,6 +410,9 @@ export default function RecipientActivationPage() {
             <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
               <ButtonLink href="/" variant="Primary">
                 Back to Dashboard
+              </ButtonLink>
+              <ButtonLink href="/profile" variant="Primary">
+                Profile
               </ButtonLink>
               <Button
                 type="button"

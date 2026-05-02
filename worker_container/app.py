@@ -324,11 +324,11 @@ def _record_audit_event(
         )
 
 
-def _recipient_access_url(vault_id: str) -> Optional[str]:
+def _recipient_access_url(public_vault_id: str) -> Optional[str]:
     frontend_base_url = os.getenv("FRONTEND_BASE_URL", "").strip().rstrip("/")
     if not frontend_base_url:
         return None
-    return f"{frontend_base_url}/incoming/{vault_id}"
+    return f"{frontend_base_url}/incoming/{public_vault_id}"
 
 
 def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
@@ -347,8 +347,9 @@ def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
         return
 
     vault_id = str(vault_document.get("id", "")).strip()
+    public_vault_id = str(vault_document.get("short_id", "")).strip()
     vault_name = str(vault_document.get("name", "Unnamed Vault")).strip() or "Unnamed Vault"
-    access_url = _recipient_access_url(vault_id)
+    access_url = _recipient_access_url(public_vault_id) if public_vault_id else None
     delivered_at = str(vault_document.get("delivered_at", "")).strip() or _now_iso()
     plain_text_lines = [
         f"The delivery package for vault '{vault_name}' is now available.",
@@ -435,7 +436,7 @@ def _upload_delivery_zip(vault_id: str, zip_path: Path) -> Dict[str, Any]:
     deliveries_container_name = os.getenv("DELIVERIES_CONTAINER", "deliveries")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     blob_name = f"{vault_id}/{timestamp}-delivery.zip"
-    delivery_file_name = f"{vault_id}-delivery.zip"
+    delivery_file_name = "last-writes-delivery.zip"
 
     if _is_local_dev_mode():
         root_dir = _get_local_blob_root()
@@ -644,7 +645,7 @@ def run() -> int:
             extracted_dir = temp_root / "decrypted_files"
             extracted_dir.mkdir(parents=True, exist_ok=True)
             cover_pdf_path = temp_root / "cover.pdf"
-            output_zip = temp_root / f"{vault_id}-delivery.zip"
+            output_zip = temp_root / "last-writes-delivery.zip"
             delivered_at = _now_iso()
 
             extracted_files: List[Path] = []
