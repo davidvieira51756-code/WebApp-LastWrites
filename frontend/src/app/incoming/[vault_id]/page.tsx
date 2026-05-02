@@ -27,6 +27,7 @@ type RecipientVaultSummary = {
   activation_threshold: number;
   activation_requests_count: number;
   has_requested_activation: boolean;
+  can_activate: boolean;
   grace_period_expires_at?: string | null;
   delivered_at?: string | null;
   delivery_available?: boolean;
@@ -371,6 +372,7 @@ export default function RecipientActivationPage() {
     normalizedStatus === "delivered" ||
     normalizedStatus === "delivered_archived" ||
     normalizedStatus === "disabled";
+  const isActivationBlocked = isTerminal || !summary?.can_activate;
 
   return (
     <main
@@ -504,7 +506,7 @@ export default function RecipientActivationPage() {
               <Card variant="secondary" style={{ padding: t.space.m, gap: t.space.xs }}>
                 <Text variant="label">The delivery package is ready.</Text>
                 <Text variant="bodySmall" color="secondary">
-                  The vault has already been processed into a final ZIP package. You can download
+                  The vault has already been processed into your final ZIP package. You can download
                   it directly from here.
                 </Text>
                 <Button
@@ -516,6 +518,13 @@ export default function RecipientActivationPage() {
                   {isDownloadingPackage ? "Downloading..." : "Download delivery ZIP"}
                 </Button>
               </Card>
+            ) : null}
+
+            {!summary.can_activate && !summary.delivery_available ? (
+              <Alert
+                variant="info"
+                message="The owner has not allowed this recipient to request activation for this vault."
+              />
             ) : null}
 
             {isTerminal ? (
@@ -541,7 +550,7 @@ export default function RecipientActivationPage() {
                   type="button"
                   variant="Destructive"
                   onClick={() => void handleWithdrawRequest()}
-                  disabled={isWithdrawing || isTerminal}
+                  disabled={isWithdrawing || isActivationBlocked}
                 >
                   {isWithdrawing ? "Withdrawing..." : "Withdraw my request"}
                 </Button>
@@ -563,7 +572,7 @@ export default function RecipientActivationPage() {
                   type="submit"
                   size="full"
                   variant="SolidPrimary"
-                  disabled={isSubmitting || isTerminal}
+                  disabled={isSubmitting || isActivationBlocked}
                 >
                   {isSubmitting ? "Submitting..." : "Request activation"}
                 </Button>

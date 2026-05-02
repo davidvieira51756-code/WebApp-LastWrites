@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -117,6 +118,45 @@ def _get_local_keys_dir() -> Path:
 def _safe_file_name(file_name: str) -> str:
     safe_name = Path(file_name).name.strip()
     return safe_name or f"file-{uuid4().hex}.bin"
+
+
+def _recipient_email(recipient: Any) -> str:
+    if isinstance(recipient, dict):
+        return str(recipient.get("email", "")).strip().lower()
+    if isinstance(recipient, str):
+        return recipient.strip().lower()
+    return ""
+
+
+def _normalized_recipients(vault_document: Dict[str, Any]) -> List[Dict[str, Any]]:
+    recipients = vault_document.get("recipients", [])
+    if not isinstance(recipients, list):
+        recipients = []
+
+    normalized_recipients: List[Dict[str, Any]] = []
+    seen_recipients = set()
+    for recipient in recipients:
+        normalized_email = _recipient_email(recipient)
+        if not normalized_email or normalized_email in seen_recipients:
+            continue
+        seen_recipients.add(normalized_email)
+        normalized_recipients.append(
+            {
+                "email": normalized_email,
+                "can_activate": bool(recipient.get("can_activate", True)) if isinstance(recipient, dict) else True,
+            }
+        )
+    return normalized_recipients
+
+
+def _build_delivery_zip_name(vault_document: Dict[str, Any]) -> str:
+    vault_name = str(vault_document.get("name", "vault")).strip() or "vault"
+    short_id = str(vault_document.get("short_id", "")).strip().lower()
+    base_name = f"{vault_name}-{short_id}" if short_id else vault_name
+    normalized_base_name = unicodedata.normalize("NFKD", base_name).encode("ascii", errors="ignore").decode("ascii")
+    normalized_base_name = re.sub(r"[^A-Za-z0-9._() -]+", "-", normalized_base_name)
+    normalized_base_name = re.sub(r"\s+", " ", normalized_base_name).strip(" .-_") or "vault-delivery"
+    return f"{normalized_base_name[:140]}.zip"
 
 
 def _resolve_unique_path(base_dir: Path, file_name: str) -> Path:
@@ -341,9 +381,9 @@ def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
         return
 
     recipients = [
-        str(recipient).strip()
-        for recipient in vault_document.get("recipients", [])
-        if str(recipient).strip()
+        recipient["email"]
+        for recipient in _normalized_recipients(vault_document)
+        if recipient["email"]
     ]
     if not recipients:
         logger.warning("Delivery notification skipped because recipients list is empty.")
@@ -435,21 +475,25 @@ def _download_blob_bytes(container_name: str, blob_name: str) -> bytes:
     return blob_client.download_blob().readall()
 
 
-def _upload_delivery_zip(vault_id: str, zip_path: Path) -> Dict[str, Any]:
+def _upload_delivery_zip(vault_document: Dict[str, Any], recipient_email: str, zip_path: Path) -> Dict[str, Any]:
+    vault_id = str(vault_document.get("id", "")).strip()
     deliveries_container_name = os.getenv("DELIVERIES_CONTAINER", "deliveries")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    blob_name = f"{vault_id}/{timestamp}-delivery.zip"
-    delivery_file_name = "last-writes-delivery.zip"
+    normalized_recipient_email = recipient_email.strip().lower()
+    recipient_slug = re.sub(r"[^a-z0-9]+", "-", normalized_recipient_email).strip("-") or "recipient"
+    blob_name = f"{vault_id}/{recipient_slug}/{timestamp}-delivery.zip"
+    delivery_file_name = _build_delivery_zip_name(vault_document)
 
     if _is_local_dev_mode():
         root_dir = _get_local_blob_root()
-        target_dir = root_dir / deliveries_container_name / vault_id
+        target_dir = root_dir / deliveries_container_name / vault_id / recipient_slug
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{timestamp}-delivery.zip"
         target_path.write_bytes(zip_path.read_bytes())
         return {
+            "recipient_email": normalized_recipient_email,
             "container_name": deliveries_container_name,
-            "blob_name": f"{vault_id}/{target_path.name}",
+            "blob_name": f"{vault_id}/{recipient_slug}/{target_path.name}",
             "file_name": delivery_file_name,
             "size_bytes": target_path.stat().st_size,
             "checksum_sha256": _sha256_hexdigest(target_path.read_bytes()),
@@ -473,11 +517,16 @@ def _upload_delivery_zip(vault_id: str, zip_path: Path) -> Dict[str, Any]:
             zip_stream,
             overwrite=True,
             content_settings=ContentSettings(content_type="application/zip"),
-            metadata={"vault_id": vault_id, "generated_by": "worker_container"},
+            metadata={
+                "vault_id": vault_id,
+                "recipient_email": normalized_recipient_email,
+                "generated_by": "worker_container",
+            },
         )
 
     zip_bytes = zip_path.read_bytes()
     return {
+        "recipient_email": normalized_recipient_email,
         "container_name": deliveries_container_name,
         "blob_name": blob_name,
         "file_name": delivery_file_name,
@@ -550,6 +599,7 @@ def _decrypt_vault_file(file_metadata: Dict[str, Any]) -> bytes:
 
 def _generate_cover_pdf(
     vault_document: Dict[str, Any],
+    recipient_email: str,
     file_items: List[Dict[str, Any]],
     output_path: Path,
     delivered_at: str,
@@ -573,11 +623,9 @@ def _generate_cover_pdf(
     )
     story.append(Spacer(1, 12))
 
-    recipients = vault_document.get("recipients", [])
-    recipient_text = ", ".join(str(recipient).strip() for recipient in recipients if str(recipient).strip())
-    story.append(Paragraph("Recipients", styles["Heading3"]))
+    story.append(Paragraph("Recipient", styles["Heading3"]))
     story.append(
-        Paragraph(recipient_text if recipient_text else "No recipients were listed.", styles["BodyText"])
+        Paragraph(recipient_email.strip() or "Unknown recipient", styles["BodyText"])
     )
     story.append(Spacer(1, 12))
 
@@ -631,9 +679,21 @@ def run() -> int:
         logger.error("Vault was not found. vault_id=%s", vault_id)
         return 1
 
+    existing_delivery_packages = vault_document.get("delivery_packages", [])
+    if not isinstance(existing_delivery_packages, list):
+        existing_delivery_packages = []
+
     if (
         str(vault_document.get("status", "")).strip().lower() in FINAL_DELIVERY_STATUSES
-        and str(vault_document.get("delivery_blob_name", "")).strip()
+        and (
+            str(vault_document.get("delivery_blob_name", "")).strip()
+            or any(
+                isinstance(package, dict)
+                and str(package.get("container_name", "")).strip()
+                and str(package.get("blob_name", "")).strip()
+                for package in existing_delivery_packages
+            )
+        )
     ):
         logger.info("Vault already delivered. Nothing to do. vault_id=%s", vault_id)
         return 0
@@ -643,46 +703,87 @@ def run() -> int:
         files = []
 
     try:
+        recipients = _normalized_recipients(vault_document)
+        if not recipients:
+            raise ValueError("Vault has no recipients configured for delivery.")
+
         with tempfile.TemporaryDirectory(prefix=f"last-writes-{vault_id[:12]}-") as temp_dir:
             temp_root = Path(temp_dir)
-            extracted_dir = temp_root / "decrypted_files"
-            extracted_dir.mkdir(parents=True, exist_ok=True)
-            cover_pdf_path = temp_root / "cover.pdf"
-            output_zip = temp_root / "last-writes-delivery.zip"
             delivered_at = _now_iso()
-
-            extracted_files: List[Path] = []
+            decrypted_payloads: List[Dict[str, Any]] = []
             for file_item in files:
                 if not isinstance(file_item, dict):
                     continue
+                decrypted_payloads.append(
+                    {
+                        "metadata": file_item,
+                        "plaintext": _decrypt_vault_file(file_item),
+                    }
+                )
 
-                plaintext = _decrypt_vault_file(file_item)
-                target_path = _resolve_unique_path(extracted_dir, str(file_item.get("file_name", "")))
-                target_path.write_bytes(plaintext)
-                extracted_files.append(target_path)
+            delivery_packages: List[Dict[str, Any]] = []
+            for recipient in recipients:
+                recipient_email = recipient["email"]
+                recipient_dir = temp_root / re.sub(r"[^a-z0-9]+", "-", recipient_email).strip("-")
+                extracted_dir = recipient_dir / "decrypted_files"
+                extracted_dir.mkdir(parents=True, exist_ok=True)
+                cover_pdf_path = recipient_dir / "cover.pdf"
+                output_zip = recipient_dir / "delivery.zip"
 
-            _generate_cover_pdf(
-                vault_document=vault_document,
-                file_items=files,
-                output_path=cover_pdf_path,
-                delivered_at=delivered_at,
-            )
-            _build_zip_archive(
-                cover_pdf_path=cover_pdf_path,
-                extracted_files=extracted_files,
-                output_zip=output_zip,
-            )
+                recipient_files = [
+                    payload
+                    for payload in decrypted_payloads
+                    if recipient_email in (
+                        [
+                            str(candidate).strip().lower()
+                            for candidate in payload["metadata"].get("recipient_emails", [])
+                        ]
+                        if isinstance(payload["metadata"].get("recipient_emails"), list)
+                        else []
+                    )
+                ]
 
-            upload_result = _upload_delivery_zip(vault_id=vault_id, zip_path=output_zip)
+                extracted_files: List[Path] = []
+                for payload in recipient_files:
+                    target_path = _resolve_unique_path(
+                        extracted_dir,
+                        str(payload["metadata"].get("file_name", "")),
+                    )
+                    target_path.write_bytes(payload["plaintext"])
+                    extracted_files.append(target_path)
+
+                _generate_cover_pdf(
+                    vault_document=vault_document,
+                    recipient_email=recipient_email,
+                    file_items=[payload["metadata"] for payload in recipient_files],
+                    output_path=cover_pdf_path,
+                    delivered_at=delivered_at,
+                )
+                _build_zip_archive(
+                    cover_pdf_path=cover_pdf_path,
+                    extracted_files=extracted_files,
+                    output_zip=output_zip,
+                )
+
+                upload_result = _upload_delivery_zip(
+                    vault_document=vault_document,
+                    recipient_email=recipient_email,
+                    zip_path=output_zip,
+                )
+                upload_result["delivered_at"] = delivered_at
+                delivery_packages.append(upload_result)
+
+            primary_package = delivery_packages[0] if delivery_packages else {}
             updated_vault = _update_vault(
                 vault_id,
                 {
                     "status": "delivered_archived",
-                    "delivery_container_name": upload_result["container_name"],
-                    "delivery_blob_name": upload_result["blob_name"],
-                    "delivery_file_name": upload_result["file_name"],
-                    "delivery_size_bytes": upload_result["size_bytes"],
-                    "delivery_checksum_sha256": upload_result["checksum_sha256"],
+                    "delivery_container_name": primary_package.get("container_name"),
+                    "delivery_blob_name": primary_package.get("blob_name"),
+                    "delivery_file_name": primary_package.get("file_name"),
+                    "delivery_size_bytes": primary_package.get("size_bytes"),
+                    "delivery_checksum_sha256": primary_package.get("checksum_sha256"),
+                    "delivery_packages": delivery_packages,
                     "delivery_error": None,
                     "delivered_at": delivered_at,
                     "delivery_job_execution_name": execution_name,
@@ -698,9 +799,10 @@ def run() -> int:
                 actor_email=None,
                 source="worker",
                 metadata={
-                    "delivery_blob_name": upload_result["blob_name"],
-                    "delivery_container_name": upload_result["container_name"],
-                    "delivery_size_bytes": upload_result["size_bytes"],
+                    "delivery_package_count": len(delivery_packages),
+                    "delivery_blob_name": primary_package.get("blob_name"),
+                    "delivery_container_name": primary_package.get("container_name"),
+                    "delivery_size_bytes": primary_package.get("size_bytes"),
                 },
                 event_at=delivered_at,
             )
@@ -713,9 +815,10 @@ def run() -> int:
                 )
 
             logger.info(
-                "Worker completed successfully. vault_id=%s delivery_blob=%s",
+                "Worker completed successfully. vault_id=%s delivery_packages=%s primary_delivery_blob=%s",
                 vault_id,
-                upload_result["blob_name"],
+                len(delivery_packages),
+                primary_package.get("blob_name"),
             )
             return 0
     except Exception as exc:

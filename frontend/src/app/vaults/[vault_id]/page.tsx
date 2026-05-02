@@ -24,6 +24,19 @@ type ActivationRequestItem = {
   reason?: string | null;
 };
 
+type VaultRecipient = {
+  email: string;
+  can_activate: boolean;
+};
+
+type DeliveryPackage = {
+  recipient_email: string;
+  file_name: string;
+  container_name?: string | null;
+  blob_name?: string | null;
+  delivered_at?: string | null;
+};
+
 type VaultDetail = {
   id: string;
   user_id: string;
@@ -31,7 +44,7 @@ type VaultDetail = {
   owner_message?: string | null;
   grace_period_days: number;
   status: string;
-  recipients: string[];
+  recipients: VaultRecipient[];
   activation_threshold?: number;
   activation_requests?: ActivationRequestItem[];
   grace_period_started_at?: string | null;
@@ -42,6 +55,7 @@ type VaultDetail = {
   delivery_file_name?: string | null;
   delivered_at?: string | null;
   delivery_error?: string | null;
+  delivery_packages?: DeliveryPackage[];
 };
 
 type VaultFile = {
@@ -54,6 +68,7 @@ type VaultFile = {
   uploaded_at?: string;
   encrypted?: boolean;
   algorithm?: string | null;
+  recipient_emails?: string[];
 };
 
 type VaultFilesResponse = {
@@ -184,11 +199,14 @@ export default function VaultDetailsPage() {
   const [pageError, setPageError] = useState<string | null>(null);
 
   const [recipientEmail, setRecipientEmail] = useState("");
+  const [newRecipientCanActivate, setNewRecipientCanActivate] = useState(true);
   const [isAddingRecipient, setIsAddingRecipient] = useState(false);
   const [recipientMessage, setRecipientMessage] = useState<string | null>(null);
   const [recipientError, setRecipientError] = useState<string | null>(null);
+  const [isUpdatingRecipientPermission, setIsUpdatingRecipientPermission] = useState<string | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedRecipientEmails, setSelectedRecipientEmails] = useState<string[]>([]);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -213,6 +231,7 @@ export default function VaultDetailsPage() {
 
   const [isDeletingVault, setIsDeletingVault] = useState(false);
   const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
+  const [downloadingPackageRecipient, setDownloadingPackageRecipient] = useState<string | null>(null);
 
   const authRedirectPath = useMemo(() => {
     if (!vaultId) {
@@ -300,6 +319,10 @@ export default function VaultDetailsPage() {
         setEditableGracePeriod(Number(vaultPayload.grace_period_days || 1));
         setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
+        setSelectedRecipientEmails((currentSelection) => {
+          const availableEmails = new Set((vaultPayload.recipients || []).map((recipient) => recipient.email));
+          return currentSelection.filter((email) => availableEmails.has(email));
+        });
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Unexpected error while loading vault details.";
@@ -344,7 +367,7 @@ export default function VaultDetailsPage() {
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/recipients`, {
         method: "POST",
         headers: buildAuthHeaders(authToken, true),
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, can_activate: newRecipientCanActivate }),
       });
 
       if (isUnauthorizedStatus(response.status)) {
@@ -358,6 +381,7 @@ export default function VaultDetailsPage() {
       }
 
       setRecipientEmail("");
+      setNewRecipientCanActivate(true);
       setRecipientMessage("Recipient added successfully.");
       await fetchVaultData(false);
     } catch (error) {
@@ -399,6 +423,9 @@ export default function VaultDetailsPage() {
       }
 
       setRecipientMessage("Recipient removed successfully.");
+      setSelectedRecipientEmails((currentSelection) =>
+        currentSelection.filter((currentEmail) => currentEmail !== email),
+      );
       await fetchVaultData(false);
     } catch (error) {
       const message =
@@ -406,6 +433,49 @@ export default function VaultDetailsPage() {
       setRecipientError(message);
     } finally {
       setIsDeletingRecipient(null);
+    }
+  };
+
+  const handleUpdateRecipientPermission = async (email: string, canActivate: boolean) => {
+    setRecipientMessage(null);
+    setRecipientError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setRecipientError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsUpdatingRecipientPermission(email);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/recipients/${encodeURIComponent(email)}`,
+        {
+          method: "PATCH",
+          headers: buildAuthHeaders(authToken, true),
+          body: JSON.stringify({ can_activate: canActivate }),
+        },
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to update recipient permission.");
+        throw new Error(message);
+      }
+
+      setRecipientMessage("Recipient permission updated.");
+      await fetchVaultData(false);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unexpected error while updating recipient permission.";
+      setRecipientError(message);
+    } finally {
+      setIsUpdatingRecipientPermission(null);
     }
   };
 
@@ -427,6 +497,7 @@ export default function VaultDetailsPage() {
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
+      formData.append("recipient_emails_json", JSON.stringify(selectedRecipientEmails));
 
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`, {
         method: "POST",
@@ -445,6 +516,7 @@ export default function VaultDetailsPage() {
       }
 
       setSelectedFile(null);
+      setSelectedRecipientEmails([]);
       setUploadMessage("File uploaded successfully.");
       await fetchVaultData(false);
     } catch (error) {
@@ -454,6 +526,16 @@ export default function VaultDetailsPage() {
     } finally {
       setIsUploadingFile(false);
     }
+  };
+
+  const handleSelectedFileChange = (file: File | null) => {
+    setSelectedFile(file);
+    if (!file) {
+      setSelectedRecipientEmails([]);
+      return;
+    }
+
+    setSelectedRecipientEmails((vault?.recipients || []).map((recipient) => recipient.email));
   };
 
   const handleDownload = async (fileId: string) => {
@@ -497,7 +579,7 @@ export default function VaultDetailsPage() {
     }
   };
 
-  const handleDownloadDeliveryPackage = async () => {
+  const handleDownloadDeliveryPackage = async (recipientEmail?: string) => {
     setDownloadError(null);
     if (!apiUrl || !vaultId || !authToken) {
       setDownloadError("API URL or vault identifier is missing.");
@@ -505,9 +587,14 @@ export default function VaultDetailsPage() {
     }
 
     setIsDownloadingPackage(true);
+    setDownloadingPackageRecipient(recipientEmail || null);
     try {
+      const searchParams = new URLSearchParams();
+      if (recipientEmail) {
+        searchParams.set("recipient_email", recipientEmail);
+      }
       const response = await fetch(
-        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-package`,
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-package${searchParams.size ? `?${searchParams.toString()}` : ""}`,
         {
           headers: buildAuthHeaders(authToken, false),
         },
@@ -536,6 +623,7 @@ export default function VaultDetailsPage() {
       setDownloadError(message);
     } finally {
       setIsDownloadingPackage(false);
+      setDownloadingPackageRecipient(null);
     }
   };
 
@@ -600,6 +688,10 @@ export default function VaultDetailsPage() {
       setUpdateError("Activation threshold must be at least 1.");
       return;
     }
+    if (activatableRecipientsCount > 0 && editableThreshold > activatableRecipientsCount) {
+      setUpdateError("Activation threshold cannot exceed the number of recipients allowed to activate.");
+      return;
+    }
 
     setIsUpdatingVault(true);
     try {
@@ -610,7 +702,10 @@ export default function VaultDetailsPage() {
           name: normalizedName,
           owner_message: editableOwnerMessage.trim() || null,
           grace_period_days: Number(editableGracePeriod),
-          activation_threshold: Math.floor(Number(editableThreshold)),
+          activation_threshold:
+            activatableRecipientsCount > 0
+              ? Math.min(Math.floor(Number(editableThreshold)), activatableRecipientsCount)
+              : Math.floor(Number(editableThreshold)),
         }),
       });
 
@@ -715,6 +810,9 @@ export default function VaultDetailsPage() {
   const activationRequests = vault?.activation_requests ?? [];
   const activationThreshold = vault?.activation_threshold ?? 1;
   const activationCount = activationRequests.length;
+  const activatableRecipients = (vault?.recipients ?? []).filter((recipient) => recipient.can_activate);
+  const activatableRecipientsCount = activatableRecipients.length;
+  const thresholdInputMax = activatableRecipientsCount > 0 ? activatableRecipientsCount : 1;
   const normalizedStatus = (vault?.status || "active").toLowerCase();
   const isArchivedFinal =
     normalizedStatus === "delivered" || normalizedStatus === "delivered_archived";
@@ -838,7 +936,7 @@ export default function VaultDetailsPage() {
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Delivery Package</Text>
                 <Text variant="label">
-                  {vault.delivery_blob_name
+                  {(vault.delivery_packages?.length || vault.delivery_blob_name)
                     ? "Ready"
                     : normalizedStatus === "delivery_initiated"
                       ? "Building"
@@ -978,7 +1076,7 @@ export default function VaultDetailsPage() {
                     id="vault-threshold"
                     type="number"
                     min={1}
-                    max={100}
+                    max={thresholdInputMax}
                     label="Activation Threshold (recipient votes)"
                     value={editableThreshold}
                     onChange={(event) => setEditableThreshold(Number(event.target.value))}
@@ -987,8 +1085,13 @@ export default function VaultDetailsPage() {
                   />
 
                   <Text variant="bodySmall" color="secondary">
-                    Vault status is managed automatically by activation requests, grace periods,
-                    and the delivery pipeline.
+                    {activatableRecipientsCount > 0
+                      ? `Only ${activatableRecipientsCount} recipient${activatableRecipientsCount === 1 ? "" : "s"} can request activation right now, so the threshold cannot be higher than that.`
+                      : "No recipient is currently allowed to request activation."}
+                  </Text>
+
+                  <Text variant="bodySmall" color="secondary">
+                    Vault status is managed automatically by activation requests, grace periods, and the delivery pipeline.
                   </Text>
 
                   <Button
@@ -1018,32 +1121,63 @@ export default function VaultDetailsPage() {
                 <Text variant="h3">Delivery Package</Text>
                 <Text variant="bodySmall" color="secondary">
                   When the grace period expires, the worker decrypts the vault files, generates a
-                  cover PDF, and publishes one ZIP package for delivery.
+                  cover PDF for each recipient, and publishes separate ZIP packages for delivery.
                 </Text>
 
                 {vault?.delivery_error ? (
                   <Alert variant="error" message={`Last delivery error: ${vault.delivery_error}`} />
                 ) : null}
 
-                {vault?.delivery_blob_name ? (
+                {vault?.delivery_packages?.length ? (
                   <>
                     <Alert
                       variant="success"
                       message={
                         vault.delivered_at
-                          ? `Delivery package ready since ${formatIsoDate(vault.delivered_at)}.`
-                          : "Delivery package ready."
+                          ? `Delivery packages ready since ${formatIsoDate(vault.delivered_at)}.`
+                          : "Delivery packages ready."
                       }
                     />
-                    <Button
-                      type="button"
-                      variant="SolidPrimary"
-                      onClick={() => void handleDownloadDeliveryPackage()}
-                      disabled={isDownloadingPackage}
-                    >
-                      {isDownloadingPackage ? "Downloading..." : "Download Delivery ZIP"}
-                    </Button>
+                    <div style={{ display: "grid", gap: t.space.xs }}>
+                      {vault.delivery_packages.map((deliveryPackage) => (
+                        <Card
+                          key={deliveryPackage.recipient_email}
+                          variant="secondary"
+                          style={{ padding: t.space.s, gap: t.space.xs }}
+                        >
+                          <Text variant="label">{deliveryPackage.recipient_email}</Text>
+                          <Text variant="caption" color="muted">
+                            {deliveryPackage.delivered_at
+                              ? `Ready since ${formatIsoDate(deliveryPackage.delivered_at)}`
+                              : "Ready"}
+                          </Text>
+                          <Button
+                            type="button"
+                            variant="SolidPrimary"
+                            onClick={() => void handleDownloadDeliveryPackage(deliveryPackage.recipient_email)}
+                            disabled={
+                              isDownloadingPackage &&
+                              downloadingPackageRecipient === deliveryPackage.recipient_email
+                            }
+                          >
+                            {isDownloadingPackage &&
+                            downloadingPackageRecipient === deliveryPackage.recipient_email
+                              ? "Downloading..."
+                              : "Download Delivery ZIP"}
+                          </Button>
+                        </Card>
+                      ))}
+                    </div>
                   </>
+                ) : vault?.delivery_blob_name ? (
+                  <Button
+                    type="button"
+                    variant="SolidPrimary"
+                    onClick={() => void handleDownloadDeliveryPackage()}
+                    disabled={isDownloadingPackage}
+                  >
+                    {isDownloadingPackage ? "Downloading..." : "Download Delivery ZIP"}
+                  </Button>
                 ) : normalizedStatus === "delivery_initiated" ? (
                   <Alert
                     variant="info"
@@ -1127,6 +1261,23 @@ export default function VaultDetailsPage() {
                     disabled={isArchivedFinal}
                     required
                   />
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: t.space.xs,
+                      color: t.colors.text.secondary,
+                      fontSize: t.typography.bodySmall.fontSize,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={newRecipientCanActivate}
+                      onChange={(event) => setNewRecipientCanActivate(event.target.checked)}
+                      disabled={isArchivedFinal}
+                    />
+                    Can request activation
+                  </label>
                   <Button
                     type="submit"
                     size="full"
@@ -1143,26 +1294,58 @@ export default function VaultDetailsPage() {
                 <div style={{ display: "grid", gap: t.space.xs }}>
                   {vault?.recipients.length ? (
                     vault.recipients.map((recipient) => (
-                      <Card key={recipient} variant="secondary" style={{ padding: t.space.s, gap: t.space.xs }}>
+                      <Card key={recipient.email} variant="secondary" style={{ padding: t.space.s, gap: t.space.xs }}>
                         <div
                           style={{
                             display: "flex",
                             justifyContent: "space-between",
-                            alignItems: "center",
+                            alignItems: "flex-start",
                             gap: t.space.xs,
                             flexWrap: "wrap",
                           }}
                         >
-                          <Text variant="bodySmall">{recipient}</Text>
-                          <Button
-                            type="button"
-                            size="default"
-                            variant="Destructive"
-                            disabled={isDeletingRecipient === recipient || isArchivedFinal}
-                            onClick={() => void handleDeleteRecipient(recipient)}
-                          >
-                            {isDeletingRecipient === recipient ? "Removing..." : "Remove"}
-                          </Button>
+                          <div style={{ display: "grid", gap: t.space.xxs }}>
+                            <Text variant="bodySmall">{recipient.email}</Text>
+                            <label
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: t.space.xs,
+                                color: t.colors.text.secondary,
+                                fontSize: t.typography.bodySmall.fontSize,
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={recipient.can_activate}
+                                disabled={isArchivedFinal || isUpdatingRecipientPermission === recipient.email}
+                                onChange={(event) =>
+                                  void handleUpdateRecipientPermission(
+                                    recipient.email,
+                                    event.target.checked,
+                                  )
+                                }
+                              />
+                              Can request activation
+                            </label>
+                          </div>
+                          <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+                            <Badge
+                              label={recipient.can_activate ? "Can activate" : "Cannot activate"}
+                              variant={recipient.can_activate ? "success" : "default"}
+                              size="sm"
+                              outlineOnly
+                            />
+                            <Button
+                              type="button"
+                              size="default"
+                              variant="Destructive"
+                              disabled={isDeletingRecipient === recipient.email || isArchivedFinal}
+                              onClick={() => void handleDeleteRecipient(recipient.email)}
+                            >
+                              {isDeletingRecipient === recipient.email ? "Removing..." : "Remove"}
+                            </Button>
+                          </div>
                         </div>
                       </Card>
                     ))
@@ -1184,7 +1367,7 @@ export default function VaultDetailsPage() {
                 >
                   <input
                     type="file"
-                    onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+                    onChange={(event) => handleSelectedFileChange(event.target.files?.[0] ?? null)}
                     disabled={isArchivedFinal}
                     style={{
                       width: "100%",
@@ -1196,6 +1379,48 @@ export default function VaultDetailsPage() {
                       fontFamily: "var(--font-geist-sans), sans-serif",
                     }}
                   />
+                  {selectedFile ? (
+                    <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
+                      <Text variant="label">Recipients for this file</Text>
+                      {vault?.recipients.length ? (
+                        <div style={{ display: "grid", gap: t.space.xs }}>
+                          {vault.recipients.map((recipient) => (
+                            <label
+                              key={recipient.email}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: t.space.xs,
+                                color: t.colors.text.secondary,
+                                fontSize: t.typography.bodySmall.fontSize,
+                              }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedRecipientEmails.includes(recipient.email)}
+                                onChange={(event) =>
+                                  setSelectedRecipientEmails((currentSelection) =>
+                                    event.target.checked
+                                      ? [...currentSelection, recipient.email].filter(
+                                          (value, index, values) => values.indexOf(value) === index,
+                                        )
+                                      : currentSelection.filter((value) => value !== recipient.email),
+                                  )
+                                }
+                                disabled={isArchivedFinal}
+                              />
+                              {recipient.email}
+                            </label>
+                          ))}
+                        </div>
+                      ) : (
+                        <Alert
+                          variant="info"
+                          message="This vault has no recipients yet, so the uploaded file will not be assigned to anyone."
+                        />
+                      )}
+                    </Card>
+                  ) : null}
                   <Button
                     type="submit"
                     size="full"
@@ -1284,6 +1509,9 @@ export default function VaultDetailsPage() {
                         </Text>
                         <Text variant="caption" color="secondary">
                           Encryption: {fileItem.encrypted ? fileItem.algorithm || "Encrypted" : "Legacy plaintext"}
+                        </Text>
+                        <Text variant="caption" color="secondary">
+                          Recipients: {fileItem.recipient_emails?.length ? fileItem.recipient_emails.join(", ") : "No recipients assigned"}
                         </Text>
                       </div>
                     </Card>

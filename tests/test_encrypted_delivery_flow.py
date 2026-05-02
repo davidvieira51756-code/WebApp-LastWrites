@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import io
+import json
 import os
 import sys
 import tempfile
@@ -91,10 +92,31 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         return response.json()
 
     def _upload_file(self, token: str, vault_id: str, file_name: str, content: bytes) -> dict:
+        return self._upload_file_for_recipients(
+            token,
+            vault_id,
+            file_name,
+            content,
+            recipient_emails=None,
+        )
+
+    def _upload_file_for_recipients(
+        self,
+        token: str,
+        vault_id: str,
+        file_name: str,
+        content: bytes,
+        *,
+        recipient_emails: list[str] | None,
+    ) -> dict:
+        data = {}
+        if recipient_emails is not None:
+            data["recipient_emails_json"] = json.dumps(recipient_emails)
         response = self.client.post(
             f"/vaults/{vault_id}/files",
             headers=self._auth_headers(token),
             files={"file": (file_name, content, "text/plain")},
+            data=data,
         )
         self.assertEqual(response.status_code, 201, response.text)
         return response.json()["file"]
@@ -155,7 +177,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(download_response.content, plaintext)
         self.assertIn("attachment", download_response.headers.get("content-disposition", ""))
 
-    def test_worker_generates_delivery_zip_for_encrypted_vault(self) -> None:
+    def test_worker_generates_recipient_specific_delivery_zips_for_encrypted_vault(self) -> None:
         email = f"worker-owner-{uuid4().hex[:8]}@example.com"
         token = self._register_and_login(email)
 
@@ -165,16 +187,43 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             owner_message="Final instructions for the recipients.",
         )
         vault_id = vault["id"]
+        first_recipient_email = f"recipient-a-{uuid4().hex[:8]}@example.com"
+        second_recipient_email = f"recipient-b-{uuid4().hex[:8]}@example.com"
 
-        add_recipient_response = self.client.post(
+        add_first_recipient_response = self.client.post(
             f"/vaults/{vault_id}/recipients",
             headers=self._auth_headers(token),
-            json={"email": f"recipient-{uuid4().hex[:8]}@example.com"},
+            json={"email": first_recipient_email, "can_activate": True},
         )
-        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+        self.assertEqual(add_first_recipient_response.status_code, 200, add_first_recipient_response.text)
+        add_second_recipient_response = self.client.post(
+            f"/vaults/{vault_id}/recipients",
+            headers=self._auth_headers(token),
+            json={"email": second_recipient_email, "can_activate": True},
+        )
+        self.assertEqual(add_second_recipient_response.status_code, 200, add_second_recipient_response.text)
 
-        first_file = self._upload_file(token, vault_id, "letter.txt", b"first encrypted file")
-        second_file = self._upload_file(token, vault_id, "notes.txt", b"second encrypted file")
+        first_file = self._upload_file_for_recipients(
+            token,
+            vault_id,
+            "letter.txt",
+            b"first encrypted file",
+            recipient_emails=[first_recipient_email],
+        )
+        second_file = self._upload_file_for_recipients(
+            token,
+            vault_id,
+            "notes.txt",
+            b"second encrypted file",
+            recipient_emails=[second_recipient_email],
+        )
+        shared_file = self._upload_file_for_recipients(
+            token,
+            vault_id,
+            "shared.txt",
+            b"shared encrypted file",
+            recipient_emails=[first_recipient_email, second_recipient_email],
+        )
 
         self._deliver_vault(vault_id)
 
@@ -188,21 +237,45 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(delivered_vault["delivery_container_name"], "deliveries")
         self.assertTrue(delivered_vault["delivery_blob_name"])
         self.assertTrue(delivered_vault["delivered_at"])
+        self.assertEqual(len(delivered_vault["delivery_packages"]), 2)
 
-        package_response = self.client.get(
+        owner_first_package_response = self.client.get(
             f"/vaults/{vault_id}/delivery-package",
             headers=self._auth_headers(token),
+            params={"recipient_email": first_recipient_email},
         )
-        self.assertEqual(package_response.status_code, 200, package_response.text)
-        self.assertEqual(package_response.headers.get("content-type"), "application/zip")
-        self.assertIn("last-writes-delivery.zip", package_response.headers.get("content-disposition", ""))
+        self.assertEqual(owner_first_package_response.status_code, 200, owner_first_package_response.text)
+        self.assertEqual(owner_first_package_response.headers.get("content-type"), "application/zip")
+        self.assertIn(vault_id, owner_first_package_response.headers.get("content-disposition", ""))
 
-        archive = ZipFile(io.BytesIO(package_response.content))
-        archive_names = set(archive.namelist())
-        self.assertIn("Delivery.pdf", archive_names)
-        self.assertNotIn("00-cover.pdf", archive_names)
-        self.assertIn(first_file["file_name"], archive_names)
-        self.assertIn(second_file["file_name"], archive_names)
+        first_archive = ZipFile(io.BytesIO(owner_first_package_response.content))
+        first_archive_names = set(first_archive.namelist())
+        self.assertIn("Delivery.pdf", first_archive_names)
+        self.assertIn(first_file["file_name"], first_archive_names)
+        self.assertIn(shared_file["file_name"], first_archive_names)
+        self.assertNotIn(second_file["file_name"], first_archive_names)
+
+        recipient_one_token = self._register_and_login(first_recipient_email)
+        recipient_one_package_response = self.client.get(
+            f"/vaults/{vault_id}/delivery-package",
+            headers=self._auth_headers(recipient_one_token),
+        )
+        self.assertEqual(recipient_one_package_response.status_code, 200, recipient_one_package_response.text)
+        recipient_one_archive = ZipFile(io.BytesIO(recipient_one_package_response.content))
+        self.assertEqual(set(recipient_one_archive.namelist()), first_archive_names)
+
+        recipient_two_token = self._register_and_login(second_recipient_email)
+        recipient_two_package_response = self.client.get(
+            f"/vaults/{vault_id}/delivery-package",
+            headers=self._auth_headers(recipient_two_token),
+        )
+        self.assertEqual(recipient_two_package_response.status_code, 200, recipient_two_package_response.text)
+        second_archive = ZipFile(io.BytesIO(recipient_two_package_response.content))
+        second_archive_names = set(second_archive.namelist())
+        self.assertIn("Delivery.pdf", second_archive_names)
+        self.assertIn(second_file["file_name"], second_archive_names)
+        self.assertIn(shared_file["file_name"], second_archive_names)
+        self.assertNotIn(first_file["file_name"], second_archive_names)
 
     def test_profile_update_and_short_id_public_access(self) -> None:
         email = f"profile-owner-{uuid4().hex[:8]}@example.com"
@@ -262,6 +335,85 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(incoming_payload[0]["id"], vault["id"])
         self.assertEqual(incoming_payload[0]["owner_display_name"], "Owner Public Name")
 
+    def test_recipient_activation_permissions_limit_threshold(self) -> None:
+        email = f"permission-owner-{uuid4().hex[:8]}@example.com"
+        token = self._register_and_login(email)
+
+        vault = self._create_vault(
+            token,
+            name="Recipient Permissions Vault",
+            owner_message="Permission checks.",
+        )
+        vault_id = vault["id"]
+        first_recipient_email = f"can-activate-{uuid4().hex[:8]}@example.com"
+        second_recipient_email = f"cannot-activate-{uuid4().hex[:8]}@example.com"
+
+        add_first_recipient_response = self.client.post(
+            f"/vaults/{vault_id}/recipients",
+            headers=self._auth_headers(token),
+            json={"email": first_recipient_email, "can_activate": True},
+        )
+        self.assertEqual(add_first_recipient_response.status_code, 200, add_first_recipient_response.text)
+        add_second_recipient_response = self.client.post(
+            f"/vaults/{vault_id}/recipients",
+            headers=self._auth_headers(token),
+            json={"email": second_recipient_email, "can_activate": True},
+        )
+        self.assertEqual(add_second_recipient_response.status_code, 200, add_second_recipient_response.text)
+
+        threshold_update_response = self.client.patch(
+            f"/vaults/{vault_id}",
+            headers=self._auth_headers(token),
+            json={"activation_threshold": 2},
+        )
+        self.assertEqual(threshold_update_response.status_code, 200, threshold_update_response.text)
+        self.assertEqual(threshold_update_response.json()["activation_threshold"], 2)
+
+        permission_update_response = self.client.patch(
+            f"/vaults/{vault_id}/recipients/{second_recipient_email}",
+            headers=self._auth_headers(token),
+            json={"can_activate": False},
+        )
+        self.assertEqual(permission_update_response.status_code, 200, permission_update_response.text)
+        self.assertEqual(permission_update_response.json()["activation_threshold"], 1)
+
+        updated_vault_response = self.client.get(
+            f"/vaults/{vault_id}",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(updated_vault_response.status_code, 200, updated_vault_response.text)
+        updated_vault = updated_vault_response.json()
+        self.assertEqual(updated_vault["activation_threshold"], 1)
+        self.assertEqual(
+            {recipient["email"]: recipient["can_activate"] for recipient in updated_vault["recipients"]},
+            {
+                first_recipient_email: True,
+                second_recipient_email: False,
+            },
+        )
+
+        blocked_recipient_token = self._register_and_login(second_recipient_email)
+        blocked_activation_response = self.client.post(
+            f"/vaults/{vault_id}/activation-requests",
+            headers=self._auth_headers(blocked_recipient_token),
+            json={"reason": "I should not be allowed to activate."},
+        )
+        self.assertEqual(blocked_activation_response.status_code, 403, blocked_activation_response.text)
+        self.assertEqual(
+            blocked_activation_response.json()["detail"],
+            "This recipient is not allowed to activate the vault.",
+        )
+
+        allowed_recipient_token = self._register_and_login(first_recipient_email)
+        allowed_activation_response = self.client.post(
+            f"/vaults/{vault_id}/activation-requests",
+            headers=self._auth_headers(allowed_recipient_token),
+            json={"reason": "I can activate this vault."},
+        )
+        self.assertEqual(allowed_activation_response.status_code, 201, allowed_activation_response.text)
+        self.assertEqual(allowed_activation_response.json()["activation_threshold"], 1)
+        self.assertTrue(allowed_activation_response.json()["can_activate"])
+
     def test_delivered_archived_vault_blocks_mutations(self) -> None:
         email = f"archived-owner-{uuid4().hex[:8]}@example.com"
         token = self._register_and_login(email)
@@ -302,7 +454,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(add_recipient_again_response.json()["detail"], expected_error)
 
         remove_recipient_response = self.client.delete(
-            f"/vaults/{vault_id}/recipients/{add_recipient_response.json()['recipients'][0]}",
+            f"/vaults/{vault_id}/recipients/{add_recipient_response.json()['recipients'][0]['email']}",
             headers=self._auth_headers(token),
         )
         self.assertEqual(remove_recipient_response.status_code, 409, remove_recipient_response.text)

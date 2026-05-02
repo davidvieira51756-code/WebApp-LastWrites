@@ -22,9 +22,25 @@ class ActivationRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=1000)
 
 
+class VaultRecipient(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+    can_activate: bool = True
+
+
+class DeliveryPackageMetadata(BaseModel):
+    recipient_email: str = Field(..., min_length=3, max_length=320)
+    file_name: str = Field(..., min_length=1, max_length=512)
+    blob_name: str = Field(..., min_length=1, max_length=1024)
+    container_name: str = Field(..., min_length=1, max_length=128)
+    size_bytes: Optional[int] = Field(default=None, ge=0)
+    checksum_sha256: Optional[str] = Field(default=None, min_length=32, max_length=128)
+    delivered_at: str = Field(..., min_length=1)
+
+
 class VaultFileMetadata(BaseModel):
     id: str = Field(..., min_length=1)
     file_name: str = Field(..., min_length=1, max_length=512)
+    recipient_emails: List[str] = Field(default_factory=list)
     blob_name: str = Field(..., min_length=1, max_length=1024)
     container_name: str = Field(..., min_length=1, max_length=128)
     blob_url: Optional[str] = None
@@ -49,7 +65,7 @@ class VaultBase(BaseModel):
     owner_message: Optional[str] = Field(default=None, max_length=4000)
     grace_period_days: int = Field(..., ge=1, le=3650)
     status: VaultStatus = VaultStatus.ACTIVE
-    recipients: List[str] = Field(default_factory=list)
+    recipients: List[VaultRecipient] = Field(default_factory=list)
     activation_threshold: int = Field(default=1, ge=1, le=100)
 
 
@@ -62,7 +78,7 @@ class VaultUpdate(BaseModel):
     owner_message: Optional[str] = Field(default=None, max_length=4000)
     grace_period_days: Optional[int] = Field(default=None, ge=1, le=3650)
     status: Optional[VaultStatus] = None
-    recipients: Optional[List[str]] = None
+    recipients: Optional[List[VaultRecipient]] = None
     activation_threshold: Optional[int] = Field(default=None, ge=1, le=100)
 
 
@@ -75,6 +91,7 @@ class Vault(VaultBase):
     public_jwk: Optional[Dict[str, str]] = None
     activation_requests: List[ActivationRequest] = Field(default_factory=list)
     files: List[VaultFileMetadata] = Field(default_factory=list)
+    delivery_packages: List[DeliveryPackageMetadata] = Field(default_factory=list)
     grace_period_started_at: Optional[str] = None
     grace_period_expires_at: Optional[str] = None
     last_check_in_at: Optional[str] = None
@@ -109,6 +126,7 @@ class RecipientVaultSummary(BaseModel):
     activation_threshold: int
     activation_requests_count: int
     has_requested_activation: bool
+    can_activate: bool = True
     grace_period_expires_at: Optional[str] = None
     delivered_at: Optional[str] = None
     delivery_available: bool = False

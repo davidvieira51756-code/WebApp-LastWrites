@@ -18,6 +18,112 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _recipient_email(recipient: Any) -> str:
+    if isinstance(recipient, dict):
+        return str(recipient.get("email", "")).strip().lower()
+    if isinstance(recipient, str):
+        return recipient.strip().lower()
+    return ""
+
+
+def _recipient_can_activate(recipient: Any) -> bool:
+    if isinstance(recipient, dict):
+        return bool(recipient.get("can_activate", True))
+    if isinstance(recipient, str):
+        return True
+    return False
+
+
+def _normalize_recipients(recipients: Any) -> List[Dict[str, Any]]:
+    if not isinstance(recipients, list):
+        recipients = []
+
+    normalized_recipients: List[Dict[str, Any]] = []
+    seen_recipients = set()
+    for recipient in recipients:
+        normalized_email = _recipient_email(recipient)
+        if not normalized_email or normalized_email in seen_recipients:
+            continue
+        seen_recipients.add(normalized_email)
+        normalized_recipients.append(
+            {
+                "email": normalized_email,
+                "can_activate": _recipient_can_activate(recipient),
+            }
+        )
+    return normalized_recipients
+
+
+def _count_activatable_recipients(recipients: Any) -> int:
+    return sum(
+        1
+        for recipient in _normalize_recipients(recipients)
+        if _recipient_can_activate(recipient)
+    )
+
+
+def _clamp_activation_threshold(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    current_threshold_raw = vault_document.get("activation_threshold", 1)
+    try:
+        current_threshold = max(1, int(current_threshold_raw))
+    except (TypeError, ValueError):
+        current_threshold = 1
+
+    activatable_count = _count_activatable_recipients(vault_document.get("recipients", []))
+    if activatable_count > 0:
+        vault_document["activation_threshold"] = min(current_threshold, activatable_count)
+    else:
+        vault_document["activation_threshold"] = current_threshold
+    return vault_document
+
+
+def _prune_activation_requests(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    activation_requests = vault_document.get("activation_requests", [])
+    if not isinstance(activation_requests, list):
+        activation_requests = []
+
+    allowed_emails = {
+        _recipient_email(recipient)
+        for recipient in _normalize_recipients(vault_document.get("recipients", []))
+        if _recipient_can_activate(recipient)
+    }
+    vault_document["activation_requests"] = [
+        activation_request
+        for activation_request in activation_requests
+        if isinstance(activation_request, dict)
+        and str(activation_request.get("recipient_email", "")).strip().lower() in allowed_emails
+    ]
+    return vault_document
+
+
+def _normalize_files_for_recipients(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    files = vault_document.get("files", [])
+    if not isinstance(files, list):
+        files = []
+
+    available_emails = {
+        _recipient_email(recipient)
+        for recipient in _normalize_recipients(vault_document.get("recipients", []))
+    }
+    normalized_files: List[Dict[str, Any]] = []
+    for file_item in files:
+        if not isinstance(file_item, dict):
+            continue
+        normalized_file = dict(file_item)
+        recipient_emails = normalized_file.get("recipient_emails")
+        if isinstance(recipient_emails, list):
+            normalized_file["recipient_emails"] = [
+                str(recipient_email).strip().lower()
+                for recipient_email in recipient_emails
+                if str(recipient_email).strip().lower() in available_emails
+            ]
+        else:
+            normalized_file["recipient_emails"] = sorted(available_emails)
+        normalized_files.append(normalized_file)
+    vault_document["files"] = normalized_files
+    return vault_document
+
+
 def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any]:
     """Given a vault document, recompute status / grace period based on activation requests.
 
@@ -33,6 +139,11 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
     current_status = str(vault_document.get("status", "active")).strip().lower()
     if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
         return vault_document
+
+    vault_document["recipients"] = _normalize_recipients(vault_document.get("recipients", []))
+    _normalize_files_for_recipients(vault_document)
+    _clamp_activation_threshold(vault_document)
+    _prune_activation_requests(vault_document)
 
     activation_requests = vault_document.get("activation_requests", [])
     if not isinstance(activation_requests, list):
@@ -304,10 +415,13 @@ class CosmosService:
         payload = dict(vault_data)
         payload["id"] = payload.get("id") or str(uuid4())
         payload["doc_type"] = "vault"
-        payload.setdefault("recipients", [])
+        payload["recipients"] = _normalize_recipients(payload.get("recipients", []))
         payload.setdefault("files", [])
+        _normalize_files_for_recipients(payload)
         payload.setdefault("activation_requests", [])
         payload.setdefault("owner_message", None)
+        payload.setdefault("delivery_packages", [])
+        _clamp_activation_threshold(payload)
 
         if not payload.get("user_id"):
             raise ValueError("vault_data must include user_id.")
@@ -390,6 +504,8 @@ class CosmosService:
         self,
         vault_id: str,
         email: str,
+        *,
+        can_activate: bool = True,
     ) -> Optional[Dict[str, Any]]:
         container = self._get_container()
         existing_item = self.get_vault_by_id(vault_id)
@@ -402,19 +518,13 @@ class CosmosService:
                 f"Vault document is missing user_id partition key. vault_id={vault_id}"
             )
 
-        recipients = existing_item.get("recipients", [])
-        if not isinstance(recipients, list):
-            recipients = []
+        recipients = _normalize_recipients(existing_item.get("recipients", []))
 
         normalized_email = email.strip().lower()
-        email_exists = any(
-            isinstance(recipient, str)
-            and recipient.strip().lower() == normalized_email
-            for recipient in recipients
-        )
+        email_exists = any(_recipient_email(recipient) == normalized_email for recipient in recipients)
 
         if not email_exists:
-            recipients.append(email.strip())
+            recipients.append({"email": normalized_email, "can_activate": can_activate})
             logger.info("Added recipient to vault. vault_id=%s email=%s", vault_id, email)
         else:
             logger.info(
@@ -425,6 +535,10 @@ class CosmosService:
 
         updated_item = dict(existing_item)
         updated_item["recipients"] = recipients
+        _normalize_files_for_recipients(updated_item)
+        _clamp_activation_threshold(updated_item)
+        _prune_activation_requests(updated_item)
+        _recompute_activation_state(updated_item)
 
         try:
             saved_item = container.replace_item(
@@ -455,22 +569,21 @@ class CosmosService:
                 f"Vault document is missing user_id partition key. vault_id={vault_id}"
             )
 
-        recipients = existing_item.get("recipients", [])
-        if not isinstance(recipients, list):
-            recipients = []
+        recipients = _normalize_recipients(existing_item.get("recipients", []))
 
         normalized_email = email.strip().lower()
         updated_recipients = [
             recipient
             for recipient in recipients
-            if not (
-                isinstance(recipient, str)
-                and recipient.strip().lower() == normalized_email
-            )
+            if _recipient_email(recipient) != normalized_email
         ]
 
         updated_item = dict(existing_item)
         updated_item["recipients"] = updated_recipients
+        _normalize_files_for_recipients(updated_item)
+        _clamp_activation_threshold(updated_item)
+        _prune_activation_requests(updated_item)
+        _recompute_activation_state(updated_item)
 
         try:
             saved_item = container.replace_item(
@@ -550,6 +663,11 @@ class CosmosService:
         merged_item.update(update_data)
         merged_item["id"] = existing_item["id"]
         merged_item["user_id"] = existing_item["user_id"]
+        merged_item["recipients"] = _normalize_recipients(merged_item.get("recipients", []))
+        _normalize_files_for_recipients(merged_item)
+        _clamp_activation_threshold(merged_item)
+        _prune_activation_requests(merged_item)
+        _recompute_activation_state(merged_item)
 
         try:
             updated_item = container.replace_item(
@@ -582,21 +700,26 @@ class CosmosService:
     def list_vaults_for_recipient(self, recipient_email: str) -> List[Dict[str, Any]]:
         container = self._get_container()
         normalized_email = recipient_email.strip().lower()
-        query = (
-            "SELECT * FROM c WHERE c.doc_type = 'vault' "
-            "AND ARRAY_CONTAINS(c.recipients, @email, false)"
-        )
-        parameters = [{"name": "@email", "value": normalized_email}]
+        query = "SELECT * FROM c WHERE c.doc_type = 'vault'"
 
         try:
             items = list(
                 container.query_items(
                     query=query,
-                    parameters=parameters,
                     enable_cross_partition_query=True,
                 )
             )
-            return [item for item in items if self._is_vault_document(item)]
+            matching_items: List[Dict[str, Any]] = []
+            for item in items:
+                if not self._is_vault_document(item):
+                    continue
+                recipients = item.get("recipients", [])
+                if isinstance(recipients, list) and any(
+                    _recipient_email(recipient) == normalized_email
+                    for recipient in recipients
+                ):
+                    matching_items.append(item)
+            return matching_items
         except exceptions.CosmosHttpResponseError:
             logger.exception(
                 "Cosmos DB list-for-recipient query failed for email=%s",
@@ -624,17 +747,16 @@ class CosmosService:
             return None, "not_found"
 
         normalized_email = recipient_email.strip().lower()
-        recipients = existing_item.get("recipients", [])
-        if not isinstance(recipients, list):
-            recipients = []
+        recipients = _normalize_recipients(existing_item.get("recipients", []))
 
-        recipient_is_known = any(
-            isinstance(recipient, str)
-            and recipient.strip().lower() == normalized_email
-            for recipient in recipients
+        matching_recipient = next(
+            (recipient for recipient in recipients if _recipient_email(recipient) == normalized_email),
+            None,
         )
-        if not recipient_is_known:
+        if matching_recipient is None:
             raise ValueError("Only configured recipients can request activation.")
+        if not _recipient_can_activate(matching_recipient):
+            raise ValueError("This recipient is not allowed to activate the vault.")
 
         current_status = str(existing_item.get("status", "active")).strip().lower()
         if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
@@ -800,6 +922,57 @@ class CosmosService:
                 audit_item["event_type"],
                 audit_item["vault_id"],
                 audit_item["owner_user_id"],
+            )
+            raise
+
+    def update_recipient_activation_permission(
+        self,
+        vault_id: str,
+        email: str,
+        *,
+        can_activate: bool,
+    ) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        existing_item = self.get_vault_by_id(vault_id)
+        if existing_item is None:
+            return None
+
+        recipients = _normalize_recipients(existing_item.get("recipients", []))
+        normalized_email = email.strip().lower()
+        recipient_found = False
+        updated_recipients: List[Dict[str, Any]] = []
+        for recipient in recipients:
+            if _recipient_email(recipient) == normalized_email:
+                recipient_found = True
+                updated_recipients.append(
+                    {
+                        "email": normalized_email,
+                        "can_activate": can_activate,
+                    }
+                )
+            else:
+                updated_recipients.append(recipient)
+
+        if not recipient_found:
+            raise ValueError("Recipient not found in vault.")
+
+        updated_item = dict(existing_item)
+        updated_item["recipients"] = updated_recipients
+        _normalize_files_for_recipients(updated_item)
+        _clamp_activation_threshold(updated_item)
+        _prune_activation_requests(updated_item)
+        _recompute_activation_state(updated_item)
+
+        try:
+            saved_item = container.replace_item(
+                item=existing_item,
+                body=updated_item,
+            )
+            return saved_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception(
+                "Cosmos DB recipient permission update failed for vault id=%s",
+                vault_id,
             )
             raise
 

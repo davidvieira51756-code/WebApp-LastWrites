@@ -12,6 +12,11 @@ export type ActivationRequestItem = {
     reason?: string | null;
 };
 
+export type VaultRecipient = {
+    email: string;
+    can_activate: boolean;
+};
+
 export type Vault = {
     id: string;
     user_id: string;
@@ -19,7 +24,7 @@ export type Vault = {
     owner_message?: string | null;
     grace_period_days: number;
     status: string;
-    recipients: string[];
+    recipients: VaultRecipient[];
     files?: Array<Record<string, unknown>>;
     activation_threshold?: number;
     activation_requests?: ActivationRequestItem[];

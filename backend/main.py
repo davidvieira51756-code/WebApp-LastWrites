@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import mimetypes
 import os
@@ -13,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -115,26 +116,118 @@ _login_rate_limit_buckets: dict[str, deque[float]] = defaultdict(deque)
 
 class RecipientCreateRequest(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
+    can_activate: bool = True
 
 
-def normalize_recipients(recipients: List[str]) -> List[str]:
-    normalized_recipients: List[str] = []
+class RecipientPermissionUpdateRequest(BaseModel):
+    can_activate: bool
+
+
+def get_recipient_email(recipient: object) -> str:
+    if isinstance(recipient, dict):
+        return str(recipient.get("email", "")).strip().lower()
+    if isinstance(recipient, str):
+        return recipient.strip().lower()
+    return ""
+
+
+def get_recipient_can_activate(recipient: object) -> bool:
+    if isinstance(recipient, dict):
+        return bool(recipient.get("can_activate", True))
+    if isinstance(recipient, str):
+        return True
+    return False
+
+
+def normalize_recipients(recipients: List[object]) -> List[Dict[str, object]]:
+    normalized_recipients: List[Dict[str, object]] = []
     seen_recipients = set()
 
     for recipient in recipients:
-        if not isinstance(recipient, str):
-            raise ValueError("Recipients must be email strings.")
+        if isinstance(recipient, dict):
+            normalized_email = str(recipient.get("email", "")).strip().lower()
+            can_activate = bool(recipient.get("can_activate", True))
+        elif isinstance(recipient, str):
+            normalized_email = recipient.strip().lower()
+            can_activate = True
+        else:
+            raise ValueError("Recipients must include email details.")
 
-        normalized_email = recipient.strip().lower()
         if not is_valid_email(normalized_email):
             raise ValueError(f"Invalid recipient email: {recipient}")
         if normalized_email in seen_recipients:
             continue
 
         seen_recipients.add(normalized_email)
-        normalized_recipients.append(normalized_email)
+        normalized_recipients.append(
+            {
+                "email": normalized_email,
+                "can_activate": can_activate,
+            }
+        )
 
     return normalized_recipients
+
+
+def get_recipient_email_set(recipients: List[object]) -> set[str]:
+    return {
+        email
+        for email in (get_recipient_email(recipient) for recipient in recipients)
+        if email
+    }
+
+
+def count_activatable_recipients(recipients: List[object]) -> int:
+    return sum(
+        1
+        for recipient in recipients
+        if get_recipient_email(recipient) and get_recipient_can_activate(recipient)
+    )
+
+
+def clamp_activation_threshold_for_recipients(
+    threshold: int,
+    recipients: List[object],
+) -> int:
+    activatable_count = count_activatable_recipients(recipients)
+    if activatable_count <= 0:
+        return threshold
+    return max(1, min(int(threshold), activatable_count))
+
+
+def validate_activation_threshold_for_recipients(
+    threshold: int,
+    recipients: List[object],
+) -> int:
+    normalized_threshold = max(1, int(threshold))
+    activatable_count = count_activatable_recipients(recipients)
+    if activatable_count > 0 and normalized_threshold > activatable_count:
+        raise ValueError("Activation threshold cannot exceed the number of recipients allowed to activate.")
+    return normalized_threshold
+
+
+def normalize_file_recipient_emails(
+    recipient_emails: Optional[List[str]],
+    recipients: List[object],
+) -> List[str]:
+    available_recipients = get_recipient_email_set(recipients)
+    if recipient_emails is None:
+        return sorted(available_recipients)
+
+    normalized_emails: List[str] = []
+    seen_emails = set()
+    for recipient_email in recipient_emails:
+        normalized_email = str(recipient_email or "").strip().lower()
+        if not normalized_email:
+            continue
+        if normalized_email not in available_recipients:
+            raise ValueError(f"Unknown recipient assignment: {recipient_email}")
+        if normalized_email in seen_emails:
+            continue
+        seen_emails.add(normalized_email)
+        normalized_emails.append(normalized_email)
+
+    return normalized_emails
 
 
 def get_vault_file_metadata(vault_item: dict, file_id: str) -> Optional[dict]:
@@ -351,6 +444,51 @@ def ensure_vault_short_ids(cosmos_service: CosmosService) -> None:
         seen_short_ids.add(new_short_id)
 
 
+def ensure_vault_access_shapes(cosmos_service: CosmosService) -> None:
+    for vault_item in cosmos_service.list_vaults():
+        internal_vault_id = str(vault_item.get("id", "")).strip()
+        recipients = vault_item.get("recipients", [])
+        if not isinstance(recipients, list):
+            recipients = []
+
+        normalized_recipients = normalize_recipients(recipients)
+        normalized_files: List[Dict[str, Any]] = []
+        files_changed = False
+        for file_item in vault_item.get("files", []) if isinstance(vault_item.get("files", []), list) else []:
+            if not isinstance(file_item, dict):
+                continue
+            normalized_file_item = dict(file_item)
+            try:
+                normalized_file_item["recipient_emails"] = normalize_file_recipient_emails(
+                    file_item.get("recipient_emails"),
+                    normalized_recipients,
+                )
+            except ValueError:
+                normalized_file_item["recipient_emails"] = sorted(get_recipient_email_set(normalized_recipients))
+            if normalized_file_item.get("recipient_emails") != file_item.get("recipient_emails"):
+                files_changed = True
+            normalized_files.append(normalized_file_item)
+
+        normalized_threshold = clamp_activation_threshold_for_recipients(
+            int(vault_item.get("activation_threshold", 1) or 1),
+            normalized_recipients,
+        )
+
+        if (
+            normalized_recipients != recipients
+            or files_changed
+            or normalized_threshold != int(vault_item.get("activation_threshold", 1) or 1)
+        ):
+            cosmos_service.update_vault(
+                internal_vault_id,
+                {
+                    "recipients": normalized_recipients,
+                    "files": normalized_files,
+                    "activation_threshold": normalized_threshold,
+                },
+            )
+
+
 def resolve_vault_by_public_id(cosmos_service: CosmosService, public_vault_id: str) -> Optional[Dict[str, Any]]:
     normalized_id = str(public_vault_id or "").strip().lower()
     if not normalized_id:
@@ -362,7 +500,17 @@ def build_public_vault_payload(vault_item: Dict[str, Any]) -> Dict[str, Any]:
     public_payload = dict(vault_item)
     public_payload["id"] = str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")).strip()
     if str(public_payload.get("delivery_blob_name", "")).strip():
-        public_payload["delivery_file_name"] = "last-writes-delivery.zip"
+        public_payload["delivery_file_name"] = build_delivery_zip_file_name(vault_item)
+    delivery_packages = public_payload.get("delivery_packages", [])
+    if isinstance(delivery_packages, list):
+        public_payload["delivery_packages"] = [
+            {
+                **delivery_package,
+                "file_name": str(delivery_package.get("file_name", "")).strip() or build_delivery_zip_file_name(vault_item),
+            }
+            for delivery_package in delivery_packages
+            if isinstance(delivery_package, dict)
+        ]
     return public_payload
 
 
@@ -390,6 +538,25 @@ def _build_attachment_headers(file_name: str) -> Dict[str, str]:
     }
 
 
+def parse_recipient_emails_json(raw_value: Optional[str]) -> Optional[List[str]]:
+    if raw_value is None:
+        return None
+
+    normalized_value = raw_value.strip()
+    if not normalized_value:
+        return []
+
+    try:
+        parsed_value = json.loads(normalized_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Recipient assignment payload must be valid JSON.") from exc
+
+    if not isinstance(parsed_value, list):
+        raise ValueError("Recipient assignment payload must be a JSON array.")
+
+    return [str(item or "") for item in parsed_value]
+
+
 def sanitize_filename(file_name: str) -> str:
     base_name = os.path.basename(str(file_name or "")).strip()
     normalized_name = base_name.replace("\x00", "")
@@ -403,6 +570,13 @@ def sanitize_filename(file_name: str) -> str:
     safe_stem = stem[:120] or f"upload-{uuid4().hex[:8]}"
     safe_suffix = suffix[:20]
     return f"{safe_stem}{safe_suffix}"[:160]
+
+
+def build_delivery_zip_file_name(vault_item: Dict[str, Any]) -> str:
+    vault_name = str(vault_item.get("name", "vault")).strip() or "vault"
+    short_id = str(vault_item.get("short_id", "")).strip().lower()
+    base_name = f"{vault_name}-{short_id}" if short_id else vault_name
+    return sanitize_filename(f"{base_name}.zip")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -515,10 +689,21 @@ def _is_vault_recipient(vault_item: Dict[str, Any], recipient_email: str) -> boo
         return False
 
     normalized_email = recipient_email.strip().lower()
-    return any(
-        isinstance(candidate, str) and candidate.strip().lower() == normalized_email
-        for candidate in recipients
-    )
+    return any(get_recipient_email(candidate) == normalized_email for candidate in recipients)
+
+
+def _get_vault_recipient(vault_item: Dict[str, Any], recipient_email: str) -> Optional[Dict[str, Any]]:
+    recipients = vault_item.get("recipients", [])
+    if not isinstance(recipients, list):
+        return None
+
+    normalized_email = recipient_email.strip().lower()
+    for recipient in recipients:
+        if get_recipient_email(recipient) == normalized_email:
+            if isinstance(recipient, dict):
+                return recipient
+            return {"email": normalized_email, "can_activate": True}
+    return None
 
 
 def ensure_vault_key_metadata(
@@ -702,6 +887,7 @@ def startup_event() -> None:
         app.state.email_service = email_service
         app.state.vault_key_service = vault_key_service
         ensure_vault_short_ids(cosmos_service)
+        ensure_vault_access_shapes(cosmos_service)
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise
@@ -1072,6 +1258,7 @@ def change_password(
 
 
 def _delete_vault_assets(blob_service: BlobService, vault_item: Dict[str, Any]) -> None:
+    deleted_blobs: set[tuple[str, str]] = set()
     files = vault_item.get("files", [])
     if not isinstance(files, list):
         files = []
@@ -1087,10 +1274,30 @@ def _delete_vault_assets(blob_service: BlobService, vault_item: Dict[str, Any]) 
     delivery_container_name = vault_item.get("delivery_container_name")
     delivery_blob_name = vault_item.get("delivery_blob_name")
     if delivery_container_name and delivery_blob_name:
-        blob_service.delete_blob(
-            container_name=str(delivery_container_name),
-            blob_name=str(delivery_blob_name),
-        )
+        delivery_blob_key = (str(delivery_container_name), str(delivery_blob_name))
+        if delivery_blob_key not in deleted_blobs:
+            blob_service.delete_blob(
+                container_name=delivery_blob_key[0],
+                blob_name=delivery_blob_key[1],
+            )
+            deleted_blobs.add(delivery_blob_key)
+
+    delivery_packages = vault_item.get("delivery_packages", [])
+    if isinstance(delivery_packages, list):
+        for delivery_package in delivery_packages:
+            if not isinstance(delivery_package, dict):
+                continue
+            package_container_name = str(delivery_package.get("container_name", "")).strip()
+            package_blob_name = str(delivery_package.get("blob_name", "")).strip()
+            if package_container_name and package_blob_name:
+                package_blob_key = (package_container_name, package_blob_name)
+                if package_blob_key in deleted_blobs:
+                    continue
+                blob_service.delete_blob(
+                    container_name=package_container_name,
+                    blob_name=package_blob_name,
+                )
+                deleted_blobs.add(package_blob_key)
 
 
 @app.delete("/auth/me")
@@ -1121,7 +1328,7 @@ def delete_current_user_account(
             internal_vault_id = str(vault_item.get("id", "")).strip()
             recipients = vault_item.get("recipients", [])
             if isinstance(recipients, list) and any(
-                isinstance(recipient, str) and recipient.strip().lower() == email
+                get_recipient_email(recipient) == email
                 for recipient in recipients
             ):
                 vault_item = cosmos_service.remove_recipient_from_vault(internal_vault_id, email) or vault_item
@@ -1173,6 +1380,11 @@ def create_vault(
         recipients = vault_payload.get("recipients", [])
         if recipients is not None:
             vault_payload["recipients"] = normalize_recipients(recipients)
+        vault_payload["activation_threshold"] = validate_activation_threshold_for_recipients(
+            int(vault_payload.get("activation_threshold", 1) or 1),
+            vault_payload.get("recipients", []),
+        )
+        vault_payload.setdefault("delivery_packages", [])
         vault_payload.update(vault_key_service.ensure_vault_key(vault_id))
         created_item = cosmos_service.create_vault(vault_payload)
         write_audit_event(
@@ -1218,6 +1430,7 @@ def _build_recipient_vault_summary(
     vault_item: Dict[str, Any], recipient_email: str
 ) -> RecipientVaultSummary:
     normalized_email = recipient_email.strip().lower()
+    recipient_record = _get_vault_recipient(vault_item, normalized_email)
     activation_requests = vault_item.get("activation_requests", [])
     if not isinstance(activation_requests, list):
         activation_requests = []
@@ -1239,6 +1452,17 @@ def _build_recipient_vault_summary(
     except (TypeError, ValueError):
         grace_period_days_value = 0
 
+    delivery_packages = vault_item.get("delivery_packages", [])
+    if not isinstance(delivery_packages, list):
+        delivery_packages = []
+    recipient_delivery_available = any(
+        isinstance(package, dict)
+        and str(package.get("recipient_email", "")).strip().lower() == normalized_email
+        and str(package.get("container_name", "")).strip()
+        and str(package.get("blob_name", "")).strip()
+        for package in delivery_packages
+    )
+
     owner_display_name = build_user_display_name(vault_item.get("owner_profile"))
     return RecipientVaultSummary(
         id=str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")),
@@ -1249,9 +1473,10 @@ def _build_recipient_vault_summary(
         activation_threshold=threshold_value,
         activation_requests_count=len(activation_requests),
         has_requested_activation=has_requested,
+        can_activate=bool(recipient_record.get("can_activate", True)) if recipient_record else False,
         grace_period_expires_at=vault_item.get("grace_period_expires_at"),
         delivered_at=vault_item.get("delivered_at"),
-        delivery_available=bool(vault_item.get("delivery_blob_name")),
+        delivery_available=recipient_delivery_available or bool(vault_item.get("delivery_blob_name")),
     )
 
 
@@ -1338,6 +1563,12 @@ def update_vault(
             update_data["recipients"] = normalize_recipients(update_data["recipients"])
         if "owner_message" in update_data:
             update_data["owner_message"] = str(update_data.get("owner_message", "")).strip() or None
+        recipients_for_validation = update_data.get("recipients", existing_vault.get("recipients", []))
+        if "activation_threshold" in update_data and update_data["activation_threshold"] is not None:
+            update_data["activation_threshold"] = validate_activation_threshold_for_recipients(
+                int(update_data["activation_threshold"]),
+                recipients_for_validation,
+            )
 
         updated_vault = cosmos_service.update_vault(internal_vault_id, update_data)
     except ValueError as exc:
@@ -1487,6 +1718,7 @@ def get_vault_activation_summary(
 def download_delivery_package(
     vault_id: str,
     request: Request,
+    recipient_email: Optional[str] = Query(default=None),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     cosmos_service = get_cosmos_service(request)
@@ -1511,8 +1743,44 @@ def download_delivery_package(
     if not is_owner and not is_recipient:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
 
-    delivery_container_name = str(vault_item.get("delivery_container_name", "")).strip()
-    delivery_blob_name = str(vault_item.get("delivery_blob_name", "")).strip()
+    normalized_requested_email = str(recipient_email or "").strip().lower()
+    if is_owner:
+        target_recipient_email = normalized_requested_email or current_email
+    else:
+        target_recipient_email = current_email
+
+    delivery_packages = vault_item.get("delivery_packages", [])
+    if not isinstance(delivery_packages, list):
+        delivery_packages = []
+
+    selected_package = next(
+        (
+            package
+            for package in delivery_packages
+            if isinstance(package, dict)
+            and str(package.get("recipient_email", "")).strip().lower() == target_recipient_email
+        ),
+        None,
+    )
+
+    if selected_package is None and is_owner and not normalized_requested_email and len(delivery_packages) == 1:
+        selected_package = delivery_packages[0]
+
+    if selected_package is None and is_owner and normalized_requested_email and delivery_packages:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="The delivery package for that recipient could not be found.",
+        )
+
+    if selected_package is not None:
+        delivery_container_name = str(selected_package.get("container_name", "")).strip()
+        delivery_blob_name = str(selected_package.get("blob_name", "")).strip()
+        file_name = str(selected_package.get("file_name", "")).strip() or build_delivery_zip_file_name(vault_item)
+    else:
+        delivery_container_name = str(vault_item.get("delivery_container_name", "")).strip()
+        delivery_blob_name = str(vault_item.get("delivery_blob_name", "")).strip()
+        file_name = build_delivery_zip_file_name(vault_item)
+
     if not delivery_container_name or not delivery_blob_name:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1536,7 +1804,6 @@ def download_delivery_package(
             detail="Failed to download delivery package.",
         ) from None
 
-    file_name = "last-writes-delivery.zip"
     return Response(
         content=payload,
         media_type="application/zip",
@@ -1679,11 +1946,7 @@ def withdraw_activation_request(
     if not isinstance(recipients, list):
         recipients = []
 
-    is_recipient = any(
-        isinstance(candidate, str)
-        and candidate.strip().lower() == recipient_email
-        for candidate in recipients
-    )
+    is_recipient = any(get_recipient_email(candidate) == recipient_email for candidate in recipients)
     if not is_recipient:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1768,7 +2031,11 @@ def add_vault_recipient(
         )
 
     try:
-        updated_vault = cosmos_service.add_recipient_to_vault(internal_vault_id, recipient_email)
+        updated_vault = cosmos_service.add_recipient_to_vault(
+            internal_vault_id,
+            recipient_email,
+            can_activate=payload.can_activate,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1833,6 +2100,65 @@ def add_vault_recipient(
     return {
         "vault_id": str(updated_vault.get("short_id", "")).strip() or vault_id,
         "recipients": recipients,
+    }
+
+
+@app.patch("/vaults/{vault_id}/recipients/{recipient_email:path}")
+def update_vault_recipient_permission(
+    vault_id: str,
+    recipient_email: str,
+    payload: RecipientPermissionUpdateRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    normalized_email = recipient_email.strip().lower()
+    existing_vault = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        public_vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
+    ensure_vault_is_mutable(existing_vault)
+    internal_vault_id = str(existing_vault.get("id", "")).strip()
+
+    if not is_valid_email(normalized_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid recipient email is required.",
+        )
+
+    try:
+        updated_vault = cosmos_service.update_recipient_activation_permission(
+            internal_vault_id,
+            normalized_email,
+            can_activate=payload.can_activate,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception(
+            "Unhandled error while updating recipient permission. vault_id=%s recipient=%s",
+            vault_id,
+            normalized_email,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update recipient permission.",
+        ) from None
+
+    if updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    return {
+        "vault_id": str(updated_vault.get("short_id", "")).strip() or vault_id,
+        "recipients": updated_vault.get("recipients", []),
+        "activation_threshold": updated_vault.get("activation_threshold", 1),
     }
 
 
@@ -2092,6 +2418,7 @@ def download_local_blob(container_name: str, blob_name: str, request: Request):
 async def upload_vault_file(
     vault_id: str,
     request: Request,
+    recipient_emails_json: Optional[str] = Form(default=None),
     file: UploadFile = File(...),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -2125,6 +2452,10 @@ async def upload_vault_file(
 
         plaintext_bytes = await file.read()
         validated_content_type = validate_upload(file, plaintext_bytes, sanitized_file_name)
+        assigned_recipient_emails = normalize_file_recipient_emails(
+            parse_recipient_emails_json(recipient_emails_json),
+            vault_item.get("recipients", []),
+        )
         encryption_payload = encrypt_file_bytes(
             plaintext_bytes,
             vault_item.get("public_jwk", {}),
@@ -2143,6 +2474,7 @@ async def upload_vault_file(
         uploaded_file_metadata["blob_content_type"] = "application/octet-stream"
         uploaded_file_metadata["size_bytes"] = len(plaintext_bytes)
         uploaded_file_metadata["ciphertext_size_bytes"] = len(encryption_payload["ciphertext"])
+        uploaded_file_metadata["recipient_emails"] = assigned_recipient_emails
         uploaded_file_metadata["key_kid"] = str(vault_item.get("key_kid", "")).strip()
         uploaded_file_metadata["key_version"] = str(vault_item.get("key_version", "")).strip()
 
@@ -2164,6 +2496,8 @@ async def upload_vault_file(
         }
     except HTTPException:
         raise
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except Exception:
         logger.exception("File upload pipeline failed for vault id=%s", vault_id)
         if uploaded_file_metadata is not None:

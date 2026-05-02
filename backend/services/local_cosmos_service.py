@@ -15,10 +15,121 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _recipient_email(recipient: Any) -> str:
+    if isinstance(recipient, dict):
+        return str(recipient.get("email", "")).strip().lower()
+    if isinstance(recipient, str):
+        return recipient.strip().lower()
+    return ""
+
+
+def _recipient_can_activate(recipient: Any) -> bool:
+    if isinstance(recipient, dict):
+        return bool(recipient.get("can_activate", True))
+    if isinstance(recipient, str):
+        return True
+    return False
+
+
+def _normalize_recipients(recipients: Any) -> List[Dict[str, Any]]:
+    if not isinstance(recipients, list):
+        recipients = []
+
+    normalized_recipients: List[Dict[str, Any]] = []
+    seen_recipients = set()
+    for recipient in recipients:
+        normalized_email = _recipient_email(recipient)
+        if not normalized_email or normalized_email in seen_recipients:
+            continue
+        seen_recipients.add(normalized_email)
+        normalized_recipients.append(
+            {
+                "email": normalized_email,
+                "can_activate": _recipient_can_activate(recipient),
+            }
+        )
+    return normalized_recipients
+
+
+def _count_activatable_recipients(recipients: Any) -> int:
+    return sum(
+        1
+        for recipient in _normalize_recipients(recipients)
+        if _recipient_can_activate(recipient)
+    )
+
+
+def _clamp_activation_threshold(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    current_threshold_raw = vault_document.get("activation_threshold", 1)
+    try:
+        current_threshold = max(1, int(current_threshold_raw))
+    except (TypeError, ValueError):
+        current_threshold = 1
+
+    activatable_count = _count_activatable_recipients(vault_document.get("recipients", []))
+    if activatable_count > 0:
+        vault_document["activation_threshold"] = min(current_threshold, activatable_count)
+    else:
+        vault_document["activation_threshold"] = current_threshold
+    return vault_document
+
+
+def _prune_activation_requests(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    activation_requests = vault_document.get("activation_requests", [])
+    if not isinstance(activation_requests, list):
+        activation_requests = []
+
+    allowed_emails = {
+        _recipient_email(recipient)
+        for recipient in _normalize_recipients(vault_document.get("recipients", []))
+        if _recipient_can_activate(recipient)
+    }
+    vault_document["activation_requests"] = [
+        activation_request
+        for activation_request in activation_requests
+        if isinstance(activation_request, dict)
+        and str(activation_request.get("recipient_email", "")).strip().lower() in allowed_emails
+    ]
+    return vault_document
+
+
+def _normalize_files_for_recipients(vault_document: Dict[str, Any]) -> Dict[str, Any]:
+    files = vault_document.get("files", [])
+    if not isinstance(files, list):
+        files = []
+
+    available_emails = {
+        _recipient_email(recipient)
+        for recipient in _normalize_recipients(vault_document.get("recipients", []))
+    }
+    normalized_files: List[Dict[str, Any]] = []
+    for file_item in files:
+        if not isinstance(file_item, dict):
+            continue
+        normalized_file = dict(file_item)
+        recipient_emails = normalized_file.get("recipient_emails")
+        if isinstance(recipient_emails, list):
+            normalized_file["recipient_emails"] = [
+                str(recipient_email).strip().lower()
+                for recipient_email in recipient_emails
+                if str(recipient_email).strip().lower() in available_emails
+            ]
+        else:
+            normalized_file["recipient_emails"] = sorted(available_emails)
+        normalized_files.append(normalized_file)
+    vault_document["files"] = normalized_files
+    return vault_document
+
+
 def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any]:
     current_status = str(vault_document.get("status", "active")).strip().lower()
     if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
         return vault_document
+
+    vault_document["recipients"] = _normalize_recipients(vault_document.get("recipients", []))
+    _normalize_files_for_recipients(vault_document)
+    _clamp_activation_threshold(vault_document)
+    _prune_activation_requests(vault_document)
 
     activation_requests = vault_document.get("activation_requests", [])
     if not isinstance(activation_requests, list):
@@ -190,10 +301,13 @@ class LocalCosmosService:
         payload = dict(vault_data)
         payload["id"] = str(payload.get("id") or uuid4())
         payload["doc_type"] = "vault"
-        payload.setdefault("recipients", [])
+        payload["recipients"] = _normalize_recipients(payload.get("recipients", []))
         payload.setdefault("files", [])
+        _normalize_files_for_recipients(payload)
         payload.setdefault("activation_requests", [])
         payload.setdefault("owner_message", None)
+        payload.setdefault("delivery_packages", [])
+        _clamp_activation_threshold(payload)
         items.append(payload)
         self._write_items(items)
         return payload
@@ -227,7 +341,7 @@ class LocalCosmosService:
             return items
         return [item for item in items if item.get("user_id") == user_id]
 
-    def add_recipient_to_vault(self, vault_id: str, email: str) -> Optional[Dict[str, Any]]:
+    def add_recipient_to_vault(self, vault_id: str, email: str, *, can_activate: bool = True) -> Optional[Dict[str, Any]]:
         items = self._read_items()
         normalized_email = email.strip().lower()
 
@@ -235,18 +349,16 @@ class LocalCosmosService:
             if str(item.get("id")) != vault_id:
                 continue
 
-            recipients = item.get("recipients", [])
-            if not isinstance(recipients, list):
-                recipients = []
+            recipients = _normalize_recipients(item.get("recipients", []))
 
-            if not any(
-                isinstance(recipient, str)
-                and recipient.strip().lower() == normalized_email
-                for recipient in recipients
-            ):
-                recipients.append(normalized_email)
+            if not any(_recipient_email(recipient) == normalized_email for recipient in recipients):
+                recipients.append({"email": normalized_email, "can_activate": can_activate})
 
             item["recipients"] = recipients
+            _normalize_files_for_recipients(item)
+            _clamp_activation_threshold(item)
+            _prune_activation_requests(item)
+            _recompute_activation_state(item)
             self._write_items(items)
             return item
 
@@ -260,18 +372,54 @@ class LocalCosmosService:
             if str(item.get("id")) != vault_id:
                 continue
 
-            recipients = item.get("recipients", [])
-            if not isinstance(recipients, list):
-                recipients = []
+            recipients = _normalize_recipients(item.get("recipients", []))
 
             item["recipients"] = [
                 recipient
                 for recipient in recipients
-                if not (
-                    isinstance(recipient, str)
-                    and recipient.strip().lower() == normalized_email
-                )
+                if _recipient_email(recipient) != normalized_email
             ]
+            _normalize_files_for_recipients(item)
+            _clamp_activation_threshold(item)
+            _prune_activation_requests(item)
+            _recompute_activation_state(item)
+            self._write_items(items)
+            return item
+
+        return None
+
+    def update_recipient_activation_permission(
+        self,
+        vault_id: str,
+        email: str,
+        *,
+        can_activate: bool,
+    ) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+        normalized_email = email.strip().lower()
+
+        for item in items:
+            if str(item.get("id")) != vault_id:
+                continue
+
+            recipients = _normalize_recipients(item.get("recipients", []))
+            recipient_found = False
+            updated_recipients: List[Dict[str, Any]] = []
+            for recipient in recipients:
+                if _recipient_email(recipient) == normalized_email:
+                    recipient_found = True
+                    updated_recipients.append({"email": normalized_email, "can_activate": can_activate})
+                else:
+                    updated_recipients.append(recipient)
+
+            if not recipient_found:
+                raise ValueError("Recipient not found in vault.")
+
+            item["recipients"] = updated_recipients
+            _normalize_files_for_recipients(item)
+            _clamp_activation_threshold(item)
+            _prune_activation_requests(item)
+            _recompute_activation_state(item)
             self._write_items(items)
             return item
 
@@ -322,6 +470,11 @@ class LocalCosmosService:
             updated_item.update(update_data)
             updated_item["id"] = item["id"]
             updated_item["user_id"] = item["user_id"]
+            updated_item["recipients"] = _normalize_recipients(updated_item.get("recipients", []))
+            _normalize_files_for_recipients(updated_item)
+            _clamp_activation_threshold(updated_item)
+            _prune_activation_requests(updated_item)
+            _recompute_activation_state(updated_item)
             items[index] = updated_item
             self._write_items(items)
             return updated_item
@@ -346,10 +499,7 @@ class LocalCosmosService:
             if not isinstance(recipients, list):
                 continue
             for recipient in recipients:
-                if (
-                    isinstance(recipient, str)
-                    and recipient.strip().lower() == normalized_email
-                ):
+                if _recipient_email(recipient) == normalized_email:
                     matching.append(item)
                     break
         return matching
@@ -369,17 +519,15 @@ class LocalCosmosService:
             if str(item.get("id")) != vault_id:
                 continue
 
-            recipients = item.get("recipients", [])
-            if not isinstance(recipients, list):
-                recipients = []
-
-            recipient_is_known = any(
-                isinstance(recipient, str)
-                and recipient.strip().lower() == normalized_email
-                for recipient in recipients
+            recipients = _normalize_recipients(item.get("recipients", []))
+            matching_recipient = next(
+                (recipient for recipient in recipients if _recipient_email(recipient) == normalized_email),
+                None,
             )
-            if not recipient_is_known:
+            if matching_recipient is None:
                 raise ValueError("Only configured recipients can request activation.")
+            if not _recipient_can_activate(matching_recipient):
+                raise ValueError("This recipient is not allowed to activate the vault.")
 
             current_status = str(item.get("status", "active")).strip().lower()
             if current_status in VAULT_ACTIVATION_TERMINAL_STATUSES:
