@@ -161,7 +161,7 @@ function buildDeliveryZipFallbackName(vault?: VaultDetail | null): string {
     return "vault-delivery.zip";
   }
 
-  return `${vault.id}-${vault.name}.zip`;
+  return `${vault.name}-${vault.id}.zip`;
 }
 
 function triggerBrowserDownload(blob: Blob, fileName: string): void {

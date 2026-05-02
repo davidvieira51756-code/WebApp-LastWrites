@@ -93,7 +93,7 @@ function buildDeliveryZipFallbackName(summary?: RecipientVaultSummary | null): s
     return "vault-delivery.zip";
   }
 
-  return `${summary.id}-${summary.name}.zip`;
+  return `${summary.name}-${summary.id}.zip`;
 }
 
 function triggerBrowserDownload(blob: Blob, fileName: string): void {

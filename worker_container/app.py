@@ -152,7 +152,7 @@ def _normalized_recipients(vault_document: Dict[str, Any]) -> List[Dict[str, Any
 def _build_delivery_zip_name(vault_document: Dict[str, Any]) -> str:
     vault_name = str(vault_document.get("name", "vault")).strip() or "vault"
     short_id = str(vault_document.get("short_id", "")).strip().lower()
-    base_name = f"{short_id}-{vault_name}" if short_id else vault_name
+    base_name = f"{vault_name}-{short_id}" if short_id else vault_name
     normalized_base_name = unicodedata.normalize("NFKD", base_name).encode("ascii", errors="ignore").decode("ascii")
     normalized_base_name = re.sub(r"[^A-Za-z0-9._() -]+", "-", normalized_base_name)
     normalized_base_name = re.sub(r"\s+", " ", normalized_base_name).strip(" .-_") or "vault-delivery"

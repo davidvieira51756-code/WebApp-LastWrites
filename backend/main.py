@@ -613,7 +613,7 @@ def sanitize_filename(file_name: str) -> str:
 def build_delivery_zip_file_name(vault_item: Dict[str, Any]) -> str:
     vault_name = str(vault_item.get("name", "vault")).strip() or "vault"
     short_id = str(vault_item.get("short_id", "")).strip().lower()
-    base_name = f"{short_id}-{vault_name}" if short_id else vault_name
+    base_name = f"{vault_name}-{short_id}" if short_id else vault_name
     return sanitize_filename(f"{base_name}.zip")
 
 
