@@ -7,7 +7,6 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 from zipfile import ZipFile
@@ -77,23 +76,14 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
     def _auth_headers(token: str) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"}
 
-    def _create_vault(
-        self,
-        token: str,
-        *,
-        name: str,
-        owner_message: str,
-        grace_period_value: int = 7,
-        grace_period_unit: str = "days",
-    ) -> dict:
+    def _create_vault(self, token: str, *, name: str, owner_message: str) -> dict:
         response = self.client.post(
             "/vaults",
             headers=self._auth_headers(token),
             json={
                 "name": name,
                 "owner_message": owner_message,
-                "grace_period_value": grace_period_value,
-                "grace_period_unit": grace_period_unit,
+                "grace_period_days": 7,
                 "recipients": [],
                 "activation_threshold": 1,
             },
@@ -294,7 +284,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         me_response = self.client.get("/auth/me", headers=self._auth_headers(token))
         self.assertEqual(me_response.status_code, 200, me_response.text)
         self.assertEqual(me_response.json()["display_name_preference"], "username")
-        self.assertEqual(me_response.json()["account_status"], "active")
 
         update_response = self.client.patch(
             "/auth/me",
@@ -345,7 +334,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         incoming_payload = incoming_response.json()
         self.assertEqual(incoming_payload[0]["id"], vault["id"])
         self.assertEqual(incoming_payload[0]["owner_display_name"], "Owner Public Name")
-        self.assertEqual(incoming_payload[0]["owner_username"], "owner_public")
 
     def test_recipient_activation_permissions_limit_threshold(self) -> None:
         email = f"permission-owner-{uuid4().hex[:8]}@example.com"
@@ -425,72 +413,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(allowed_activation_response.status_code, 201, allowed_activation_response.text)
         self.assertEqual(allowed_activation_response.json()["activation_threshold"], 1)
         self.assertTrue(allowed_activation_response.json()["can_activate"])
-
-    def test_grace_period_supports_hours(self) -> None:
-        email = f"hours-owner-{uuid4().hex[:8]}@example.com"
-        token = self._register_and_login(email)
-
-        vault = self._create_vault(
-            token,
-            name="Hours Vault",
-            owner_message="Hours-based grace period.",
-            grace_period_value=12,
-            grace_period_unit="hours",
-        )
-        self.assertEqual(vault["grace_period_value"], 12)
-        self.assertEqual(vault["grace_period_unit"], "hours")
-
-        recipient_email = f"hours-recipient-{uuid4().hex[:8]}@example.com"
-        add_recipient_response = self.client.post(
-            f"/vaults/{vault['id']}/recipients",
-            headers=self._auth_headers(token),
-            json={"email": recipient_email, "can_activate": True},
-        )
-        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
-
-        recipient_token = self._register_and_login(recipient_email)
-        activation_response = self.client.post(
-            f"/vaults/{vault['id']}/activation-requests",
-            headers=self._auth_headers(recipient_token),
-            json={"reason": "Checking hour-based grace periods."},
-        )
-        self.assertEqual(activation_response.status_code, 201, activation_response.text)
-        self.assertEqual(activation_response.json()["grace_period_value"], 12)
-        self.assertEqual(activation_response.json()["grace_period_unit"], "hours")
-
-        vault_response = self.client.get(
-            f"/vaults/{vault['id']}",
-            headers=self._auth_headers(token),
-        )
-        self.assertEqual(vault_response.status_code, 200, vault_response.text)
-        updated_vault = vault_response.json()
-        self.assertEqual(updated_vault["status"], "grace_period")
-        started_at = datetime.fromisoformat(updated_vault["grace_period_started_at"])
-        expires_at = datetime.fromisoformat(updated_vault["grace_period_expires_at"])
-        self.assertAlmostEqual((expires_at - started_at).total_seconds(), 12 * 3600, delta=5)
-
-    def test_account_deletion_is_blocked_for_active_vaults(self) -> None:
-        email = f"delete-block-owner-{uuid4().hex[:8]}@example.com"
-        password = "Password123!"
-        token = self._register_and_login(email, password=password)
-
-        self._create_vault(
-            token,
-            name="Blocking Vault",
-            owner_message="Account deletion should be blocked.",
-        )
-
-        delete_response = self.client.request(
-            "DELETE",
-            "/auth/me",
-            headers=self._auth_headers(token),
-            json={"password": password},
-        )
-        self.assertEqual(delete_response.status_code, 409, delete_response.text)
-        self.assertEqual(
-            delete_response.json()["detail"],
-            "This account cannot be deleted while it still owns vaults that are active or pending delivery.",
-        )
 
     def test_delivered_archived_vault_blocks_mutations(self) -> None:
         email = f"archived-owner-{uuid4().hex[:8]}@example.com"

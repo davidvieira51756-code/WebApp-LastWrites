@@ -157,26 +157,26 @@ class EmailService:
         public_vault_id: str,
         vault_name: str,
         owner_label: str,
-        owner_secondary_label: Optional[str] = None,
     ) -> EmailSendResult:
         access_url = self.build_recipient_access_url(public_vault_id)
         subject = f"[Last Writes] You were added to vault '{vault_name}'"
-        plain_text_lines = [
-            f"You were added as a recipient to the vault '{vault_name}'.",
-            f"From {owner_label}",
-        ]
-        html_lines = [
-            f"<p>You were added as a recipient to the vault <strong>{vault_name}</strong>.</p>",
-            f"<p>From <strong>{owner_label}</strong></p>",
-        ]
-        if owner_secondary_label:
-            plain_text_lines.append(f"Username: {owner_secondary_label}")
-            html_lines.append(f"<p><small>Username: {owner_secondary_label}</small></p>")
-        plain_text_lines.append(f"Access the vault after signing in: {access_url}")
-        html_lines.append(f'<p>Access the vault after signing in: <a href="{access_url}">{access_url}</a></p>')
+        plain_text = "\n".join(
+            [
+                f"You were added as a recipient to the vault '{vault_name}'.",
+                f"Vault owner: {owner_label}",
+                f"Access the vault after signing in: {access_url}",
+            ]
+        )
+        html = "".join(
+            [
+                f"<p>You were added as a recipient to the vault <strong>{vault_name}</strong>.</p>",
+                f"<p>Vault owner: {owner_label}</p>",
+                f'<p>Access the vault after signing in: <a href="{access_url}">{access_url}</a></p>',
+            ]
+        )
         return self._send_email(
             recipient=recipient,
             subject=subject,
-            plain_text="\n".join(plain_text_lines),
-            html="".join(html_lines),
+            plain_text=plain_text,
+            html=html,
         )

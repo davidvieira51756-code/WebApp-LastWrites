@@ -16,11 +16,6 @@ class VaultStatus(str, Enum):
     DISABLED = "disabled"
 
 
-class GracePeriodUnit(str, Enum):
-    HOURS = "hours"
-    DAYS = "days"
-
-
 class ActivationRequest(BaseModel):
     recipient_email: str = Field(..., min_length=3, max_length=320)
     requested_at: str = Field(..., min_length=1)
@@ -68,8 +63,7 @@ class VaultFileMetadata(BaseModel):
 class VaultBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     owner_message: Optional[str] = Field(default=None, max_length=4000)
-    grace_period_value: int = Field(..., ge=1, le=3650)
-    grace_period_unit: GracePeriodUnit = GracePeriodUnit.DAYS
+    grace_period_days: int = Field(..., ge=1, le=3650)
     status: VaultStatus = VaultStatus.ACTIVE
     recipients: List[VaultRecipient] = Field(default_factory=list)
     activation_threshold: int = Field(default=1, ge=1, le=100)
@@ -82,8 +76,7 @@ class VaultCreate(VaultBase):
 class VaultUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     owner_message: Optional[str] = Field(default=None, max_length=4000)
-    grace_period_value: Optional[int] = Field(default=None, ge=1, le=3650)
-    grace_period_unit: Optional[GracePeriodUnit] = None
+    grace_period_days: Optional[int] = Field(default=None, ge=1, le=3650)
     status: Optional[VaultStatus] = None
     recipients: Optional[List[VaultRecipient]] = None
     activation_threshold: Optional[int] = Field(default=None, ge=1, le=100)
@@ -128,10 +121,8 @@ class RecipientVaultSummary(BaseModel):
     id: str
     name: str
     owner_display_name: Optional[str] = Field(default=None, max_length=120)
-    owner_username: Optional[str] = Field(default=None, max_length=32)
     status: VaultStatus
-    grace_period_value: int
-    grace_period_unit: GracePeriodUnit
+    grace_period_days: int
     activation_threshold: int
     activation_requests_count: int
     has_requested_activation: bool

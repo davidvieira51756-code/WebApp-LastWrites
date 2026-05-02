@@ -21,10 +21,8 @@ type IncomingVaultSummary = {
     id: string;
     name: string;
     owner_display_name?: string | null;
-    owner_username?: string | null;
     status: string;
-    grace_period_value: number;
-    grace_period_unit: "hours" | "days";
+    grace_period_days: number;
     activation_threshold: number;
     activation_requests_count: number;
     has_requested_activation: boolean;
@@ -51,10 +49,6 @@ function statusBadgeVariant(
 
 function formatStatusLabel(status: string): string {
     return status.replace(/_/g, " ");
-}
-
-function formatGracePeriod(value: number, unit: "hours" | "days"): string {
-    return `${value} ${value === 1 ? unit.slice(0, -1) : unit}`;
 }
 
 export default function DashboardPage() {
@@ -380,7 +374,7 @@ export default function DashboardPage() {
                                             }}
                                         >
                                             <Text variant="bodySmall" color="secondary">
-                                                Grace Period: {formatGracePeriod(vault.grace_period_value, vault.grace_period_unit)}
+                                                Grace Period: {vault.grace_period_days} days
                                             </Text>
                                             <Text variant="bodySmall" color="secondary">
                                                 Recipients: {vault.recipients.length}
@@ -466,12 +460,7 @@ export default function DashboardPage() {
                                                 </Text>
                                                 {incoming.owner_display_name ? (
                                                     <Text variant="caption" color="muted">
-                                                        From {incoming.owner_display_name}
-                                                    </Text>
-                                                ) : null}
-                                                {incoming.owner_username ? (
-                                                    <Text variant="caption" color="muted">
-                                                        Username: {incoming.owner_username}
+                                                        Owner: {incoming.owner_display_name}
                                                     </Text>
                                                 ) : null}
                                                 <Text variant="caption" color="muted">
@@ -496,7 +485,7 @@ export default function DashboardPage() {
                                             Votes: {incoming.activation_requests_count}/{incoming.activation_threshold}
                                         </Text>
                                         <Text variant="bodySmall" color="secondary">
-                                            Grace Period: {formatGracePeriod(incoming.grace_period_value, incoming.grace_period_unit)}
+                                            Grace Period: {incoming.grace_period_days} days
                                         </Text>
                                         {incoming.delivery_available ? (
                                             <Text variant="bodySmall" color="secondary">

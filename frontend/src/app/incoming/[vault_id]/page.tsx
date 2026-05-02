@@ -22,10 +22,8 @@ type RecipientVaultSummary = {
   id: string;
   name: string;
   owner_display_name?: string | null;
-  owner_username?: string | null;
   status: string;
-  grace_period_value: number;
-  grace_period_unit: "hours" | "days";
+  grace_period_days: number;
   activation_threshold: number;
   activation_requests_count: number;
   has_requested_activation: boolean;
@@ -69,10 +67,6 @@ function formatIsoDate(value: string | null | undefined): string {
     return value;
   }
   return parsed.toLocaleString();
-}
-
-function formatGracePeriod(value: number, unit: "hours" | "days"): string {
-  return `${value} ${value === 1 ? unit.slice(0, -1) : unit}`;
 }
 
 function getDownloadFileName(response: Response, fallbackName: string): string {
@@ -407,12 +401,7 @@ export default function RecipientActivationPage() {
               <Text variant="h2">{summary ? summary.name : "Incoming Vault"}</Text>
               {summary?.owner_display_name ? (
                 <Text variant="bodySmall" color="secondary">
-                  From {summary.owner_display_name}
-                </Text>
-              ) : null}
-              {summary?.owner_username ? (
-                <Text variant="caption" color="muted">
-                  Username: {summary.owner_username}
+                  Owner: {summary.owner_display_name}
                 </Text>
               ) : null}
               <Text variant="bodySmall" color="secondary">
@@ -470,7 +459,7 @@ export default function RecipientActivationPage() {
               </Card>
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Grace Period</Text>
-                <Text variant="label">{formatGracePeriod(summary.grace_period_value, summary.grace_period_unit)}</Text>
+                <Text variant="label">{summary.grace_period_days} days</Text>
               </Card>
               {summary.grace_period_expires_at ? (
                 <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
