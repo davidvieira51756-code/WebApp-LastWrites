@@ -152,7 +152,7 @@ def _normalized_recipients(vault_document: Dict[str, Any]) -> List[Dict[str, Any
 def _build_delivery_zip_name(vault_document: Dict[str, Any]) -> str:
     vault_name = str(vault_document.get("name", "vault")).strip() or "vault"
     short_id = str(vault_document.get("short_id", "")).strip().lower()
-    base_name = f"{vault_name}-{short_id}" if short_id else vault_name
+    base_name = f"{short_id}-{vault_name}" if short_id else vault_name
     normalized_base_name = unicodedata.normalize("NFKD", base_name).encode("ascii", errors="ignore").decode("ascii")
     normalized_base_name = re.sub(r"[^A-Za-z0-9._() -]+", "-", normalized_base_name)
     normalized_base_name = re.sub(r"\s+", " ", normalized_base_name).strip(" .-_") or "vault-delivery"
@@ -347,20 +347,17 @@ def _load_user(user_id: str) -> Optional[Dict[str, Any]]:
     return _get_azure_user(user_id)
 
 
-def _build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
+def _build_owner_full_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
     if not user_item:
         return None
 
-    preference = str(user_item.get("display_name_preference", "username")).strip().lower()
     full_name = str(user_item.get("full_name", "")).strip()
     username = str(user_item.get("username", "")).strip()
 
-    if preference == "real_name" and full_name:
+    if full_name:
         return full_name
     if username:
         return username
-    if full_name:
-        return full_name
     return None
 
 
@@ -757,7 +754,7 @@ def run() -> int:
         if not recipients:
             raise ValueError("Vault has no recipients configured for delivery.")
         owner_profile = _load_user(str(vault_document.get("user_id", "")).strip())
-        owner_display_name = _build_user_display_name(owner_profile)
+        owner_display_name = _build_owner_full_name(owner_profile)
 
         with tempfile.TemporaryDirectory(prefix=f"last-writes-{vault_id[:12]}-") as temp_dir:
             temp_root = Path(temp_dir)

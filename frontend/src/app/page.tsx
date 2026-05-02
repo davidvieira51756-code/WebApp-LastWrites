@@ -262,10 +262,10 @@ export default function DashboardPage() {
                     </div>
 
                     <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+                        <ThemeToggleButton />
                         <ButtonLink href="/profile" variant="Primary">
                             Profile
                         </ButtonLink>
-                        <ThemeToggleButton />
                         <Button
                             type="button"
                             onClick={() => {

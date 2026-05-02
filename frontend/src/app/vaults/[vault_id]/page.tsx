@@ -156,6 +156,14 @@ function getDownloadFileName(response: Response, fallbackName: string): string {
   return fallbackName;
 }
 
+function buildDeliveryZipFallbackName(vault?: VaultDetail | null): string {
+  if (!vault) {
+    return "vault-delivery.zip";
+  }
+
+  return `${vault.id}-${vault.name}.zip`;
+}
+
 function triggerBrowserDownload(blob: Blob, fileName: string): void {
   const objectUrl = window.URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -626,7 +634,7 @@ export default function VaultDetailsPage() {
       const blob = await response.blob();
       triggerBrowserDownload(
         blob,
-        getDownloadFileName(response, vault?.delivery_file_name || "last-writes-delivery.zip"),
+        getDownloadFileName(response, vault?.delivery_file_name || buildDeliveryZipFallbackName(vault)),
       );
     } catch (error) {
       const message =
@@ -900,10 +908,10 @@ export default function VaultDetailsPage() {
               <ButtonLink href="/" variant="Primary">
                 Back to Dashboard
               </ButtonLink>
+              <ThemeToggleButton />
               <ButtonLink href="/profile" variant="Primary">
                 Profile
               </ButtonLink>
-              <ThemeToggleButton />
               <Button
                 type="button"
                 onClick={() => void fetchVaultData(false)}
@@ -1064,18 +1072,6 @@ export default function VaultDetailsPage() {
                     required
                   />
 
-                  <Input
-                    id="vault-grace"
-                    type="number"
-                    min={1}
-                    max={editableGracePeriodUnit === "days" ? 3650 : 87600}
-                    label={`Grace Period (${editableGracePeriodUnit})`}
-                    value={editableGracePeriod}
-                    onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
-                    disabled={isArchivedFinal}
-                    required
-                  />
-
                   <label
                     htmlFor="vault-grace-unit"
                     style={{
@@ -1105,6 +1101,18 @@ export default function VaultDetailsPage() {
                       <option value="hours">Hours</option>
                     </select>
                   </label>
+
+                  <Input
+                    id="vault-grace"
+                    type="number"
+                    min={1}
+                    max={editableGracePeriodUnit === "days" ? 3650 : 87600}
+                    label={`Grace Period (${editableGracePeriodUnit})`}
+                    value={editableGracePeriod}
+                    onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
+                    disabled={isArchivedFinal}
+                    required
+                  />
 
                   <Input
                     id="vault-owner-message"

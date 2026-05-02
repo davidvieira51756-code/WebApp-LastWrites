@@ -169,17 +169,6 @@ export default function CreateVaultForm({
                     required
                 />
 
-                <Input
-                    id="grace-period"
-                    label={`Grace Period (${gracePeriodUnit})`}
-                    type="number"
-                    min={1}
-                    max={gracePeriodUnit === "days" ? 3650 : 87600}
-                    value={gracePeriodValue}
-                    onChange={(event) => setGracePeriodValue(Number(event.target.value))}
-                    required
-                />
-
                 <label
                     htmlFor="grace-period-unit"
                     style={{
@@ -208,6 +197,17 @@ export default function CreateVaultForm({
                         <option value="hours">Hours</option>
                     </select>
                 </label>
+
+                <Input
+                    id="grace-period"
+                    label={`Grace Period (${gracePeriodUnit})`}
+                    type="number"
+                    min={1}
+                    max={gracePeriodUnit === "days" ? 3650 : 87600}
+                    value={gracePeriodValue}
+                    onChange={(event) => setGracePeriodValue(Number(event.target.value))}
+                    required
+                />
 
                 <Input
                     id="owner-message"

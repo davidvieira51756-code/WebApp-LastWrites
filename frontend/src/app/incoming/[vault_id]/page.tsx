@@ -88,6 +88,14 @@ function getDownloadFileName(response: Response, fallbackName: string): string {
   return fallbackName;
 }
 
+function buildDeliveryZipFallbackName(summary?: RecipientVaultSummary | null): string {
+  if (!summary) {
+    return "vault-delivery.zip";
+  }
+
+  return `${summary.id}-${summary.name}.zip`;
+}
+
 function triggerBrowserDownload(blob: Blob, fileName: string): void {
   const objectUrl = window.URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -324,7 +332,7 @@ export default function RecipientActivationPage() {
       const blob = await response.blob();
       triggerBrowserDownload(
         blob,
-        getDownloadFileName(response, "last-writes-delivery.zip"),
+        getDownloadFileName(response, buildDeliveryZipFallbackName(summary)),
       );
     } catch (error) {
       const message =
