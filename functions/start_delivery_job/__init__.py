@@ -110,55 +110,6 @@ def _update_vault(vault_document: Dict[str, Any], update_data: Dict[str, Any]) -
     return container.replace_item(item=vault_document, body=patched_document)
 
 
-def _upsert_delivery(vault_document: Dict[str, Any]) -> None:
-    container = _get_vaults_container()
-    vault_id = str(vault_document.get("id", "")).strip()
-    owner_user_id = str(vault_document.get("user_id", "")).strip()
-    if not vault_id or not owner_user_id:
-        return
-
-    delivery_document = {
-        "id": f"delivery:{vault_id}",
-        "doc_type": "delivery",
-        "type": "delivery",
-        "user_id": owner_user_id,
-        "vault_id": vault_id,
-        "vault_short_id": str(vault_document.get("short_id", "")).strip() or None,
-        "vault_name": str(vault_document.get("name", "")).strip() or None,
-        "status": str(vault_document.get("status", "")).strip().lower() or None,
-        "delivery_container_name": vault_document.get("delivery_container_name"),
-        "delivery_blob_name": vault_document.get("delivery_blob_name"),
-        "delivery_file_name": vault_document.get("delivery_file_name"),
-        "delivery_size_bytes": vault_document.get("delivery_size_bytes"),
-        "delivery_checksum_sha256": vault_document.get("delivery_checksum_sha256"),
-        "delivery_packages": vault_document.get("delivery_packages", []),
-        "delivery_error": vault_document.get("delivery_error"),
-        "delivery_initiated_at": vault_document.get("delivery_initiated_at"),
-        "delivery_job_started_at": vault_document.get("delivery_job_started_at"),
-        "delivery_job_execution_name": vault_document.get("delivery_job_execution_name"),
-        "delivery_trigger": vault_document.get("delivery_trigger"),
-        "delivered_at": vault_document.get("delivered_at"),
-        "updated_at": _now_iso(),
-    }
-
-    query = "SELECT * FROM c WHERE c.doc_type = 'delivery' AND c.vault_id = @vault_id"
-    parameters = [{"name": "@vault_id", "value": vault_id}]
-    items = list(
-        container.query_items(
-            query=query,
-            parameters=parameters,
-            enable_cross_partition_query=True,
-        )
-    )
-    if not items:
-        container.create_item(body=delivery_document)
-        return
-
-    patched_document = dict(items[0])
-    patched_document.update(delivery_document)
-    container.replace_item(item=items[0], body=patched_document)
-
-
 def _append_or_replace_env(container_definition: Dict[str, Any], name: str, value: str) -> None:
     env_items = container_definition.get("env")
     if not isinstance(env_items, list):
@@ -314,7 +265,6 @@ def main(event: func.EventGridEvent) -> None:
                 },
             },
         )
-        _upsert_delivery(claimed_vault)
     except exceptions.CosmosHttpResponseError:
         logger.exception("Failed to claim vault for delivery. vault_id=%s", vault_id)
         return
@@ -328,9 +278,6 @@ def main(event: func.EventGridEvent) -> None:
                 "delivery_job_execution_name": execution_name,
             },
         )
-        refreshed_vault = _get_vault(vault_id)
-        if refreshed_vault is not None:
-            _upsert_delivery(refreshed_vault)
         logger.info(
             "Delivery job started successfully. vault_id=%s execution=%s",
             vault_id,
@@ -345,8 +292,5 @@ def main(event: func.EventGridEvent) -> None:
                     "delivery_error": str(exc),
                 },
             )
-            refreshed_vault = _get_vault(vault_id)
-            if refreshed_vault is not None:
-                _upsert_delivery(refreshed_vault)
         except Exception:
             logger.exception("Failed to persist delivery start error. vault_id=%s", vault_id)

@@ -28,10 +28,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-try:
-    from worker_container.email_service import EmailService
-except ModuleNotFoundError:
-    from email_service import EmailService
+from email_service import EmailService
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -116,10 +113,6 @@ def _get_local_cosmos_file() -> Path:
 
 def _get_local_keys_dir() -> Path:
     return Path(os.getenv("LOCAL_VAULT_KEYS_DIR", str(_default_local_data_dir() / "vault_keys")))
-
-
-def _get_local_key_version_path(key_name: str, version: str) -> Path:
-    return _get_local_keys_dir() / f"{key_name}--{version}.pem"
 
 
 def _safe_file_name(file_name: str) -> str:
@@ -212,40 +205,6 @@ def _save_local_items(items: List[Dict[str, Any]]) -> None:
     data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
 
-def _assign_document_type(item: Dict[str, Any], doc_type: str) -> Dict[str, Any]:
-    item["doc_type"] = doc_type
-    item["type"] = doc_type
-    return item
-
-
-def _build_delivery_document(vault_document: Dict[str, Any]) -> Dict[str, Any]:
-    delivery_packages = vault_document.get("delivery_packages", [])
-    if not isinstance(delivery_packages, list):
-        delivery_packages = []
-    delivery_document = {
-        "id": f"delivery:{str(vault_document.get('id', '')).strip()}",
-        "user_id": str(vault_document.get("user_id", "")).strip(),
-        "vault_id": str(vault_document.get("id", "")).strip(),
-        "vault_short_id": str(vault_document.get("short_id", "")).strip() or None,
-        "vault_name": str(vault_document.get("name", "")).strip() or None,
-        "status": str(vault_document.get("status", "")).strip().lower() or None,
-        "delivery_container_name": vault_document.get("delivery_container_name"),
-        "delivery_blob_name": vault_document.get("delivery_blob_name"),
-        "delivery_file_name": vault_document.get("delivery_file_name"),
-        "delivery_size_bytes": vault_document.get("delivery_size_bytes"),
-        "delivery_checksum_sha256": vault_document.get("delivery_checksum_sha256"),
-        "delivery_packages": [package for package in delivery_packages if isinstance(package, dict)],
-        "delivery_error": vault_document.get("delivery_error"),
-        "delivery_initiated_at": vault_document.get("delivery_initiated_at"),
-        "delivery_job_started_at": vault_document.get("delivery_job_started_at"),
-        "delivery_job_execution_name": vault_document.get("delivery_job_execution_name"),
-        "delivery_trigger": vault_document.get("delivery_trigger"),
-        "delivered_at": vault_document.get("delivered_at"),
-        "updated_at": _now_iso(),
-    }
-    return _assign_document_type(delivery_document, "delivery")
-
-
 def _get_local_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     items = _load_local_items()
     return next(
@@ -273,26 +232,6 @@ def _update_local_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[
         _save_local_items(items)
         return updated_item
     return None
-
-
-def _upsert_local_delivery(vault_document: Dict[str, Any]) -> Dict[str, Any]:
-    delivery_document = _build_delivery_document(vault_document)
-    items = _load_local_items()
-    for index, item in enumerate(items):
-        if str(item.get("doc_type", "")).strip().lower() != "delivery":
-            continue
-        if str(item.get("vault_id", "")).strip() != delivery_document["vault_id"]:
-            continue
-        updated_item = dict(item)
-        updated_item.update(delivery_document)
-        _assign_document_type(updated_item, "delivery")
-        items[index] = updated_item
-        _save_local_items(items)
-        return updated_item
-
-    items.append(delivery_document)
-    _save_local_items(items)
-    return delivery_document
 
 
 def _get_local_user(user_id: str) -> Optional[Dict[str, Any]]:
@@ -388,28 +327,6 @@ def _update_azure_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[
     return container.replace_item(item=existing_item, body=merged_item)
 
 
-def _upsert_azure_delivery(vault_document: Dict[str, Any]) -> Dict[str, Any]:
-    container = _get_azure_cosmos_container()
-    delivery_document = _build_delivery_document(vault_document)
-    query = "SELECT * FROM c WHERE c.doc_type = 'delivery' AND c.vault_id = @vault_id"
-    parameters = [{"name": "@vault_id", "value": delivery_document["vault_id"]}]
-    items = list(
-        container.query_items(
-            query=query,
-            parameters=parameters,
-            enable_cross_partition_query=True,
-        )
-    )
-    if not items:
-        return container.create_item(body=delivery_document)
-
-    existing_item = items[0]
-    updated_item = dict(existing_item)
-    updated_item.update(delivery_document)
-    _assign_document_type(updated_item, "delivery")
-    return container.replace_item(item=existing_item, body=updated_item)
-
-
 def _load_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     if _is_local_dev_mode():
         return _get_local_vault(vault_id)
@@ -420,12 +337,6 @@ def _update_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[Dict[s
     if _is_local_dev_mode():
         return _update_local_vault(vault_id, update_data)
     return _update_azure_vault(vault_id, update_data)
-
-
-def _upsert_delivery_document(vault_document: Dict[str, Any]) -> Dict[str, Any]:
-    if _is_local_dev_mode():
-        return _upsert_local_delivery(vault_document)
-    return _upsert_azure_delivery(vault_document)
 
 
 def _load_user(user_id: str) -> Optional[Dict[str, Any]]:
@@ -676,19 +587,8 @@ def _upload_delivery_zip(vault_document: Dict[str, Any], recipient_email: str, z
 
 def _unwrap_file_key(*, key_kid: str, wrapped_key: str) -> bytes:
     if _is_local_dev_mode():
-        if key_kid.startswith("local://"):
-            key_parts = key_kid.split("/")
-            key_name = key_parts[3]
-            key_version = key_parts[5] if len(key_parts) > 5 else "local"
-        else:
-            key_name = key_kid.rsplit("/", 2)[-2]
-            key_version = key_kid.rsplit("/", 1)[-1] or "local"
-
-        private_key_path = (
-            _get_local_keys_dir() / f"{key_name}.pem"
-            if key_version == "local"
-            else _get_local_key_version_path(key_name, key_version)
-        )
+        key_name = key_kid.split("/")[3] if key_kid.startswith("local://") else key_kid.rsplit("/", 2)[-2]
+        private_key_path = _get_local_keys_dir() / f"{key_name}.pem"
         if not private_key_path.exists():
             raise FileNotFoundError(f"Local private key file not found for key_name={key_name}.")
 
@@ -940,7 +840,6 @@ def run() -> int:
             )
             if updated_vault is None:
                 raise RuntimeError("Vault metadata could not be updated after delivery ZIP upload.")
-            _upsert_delivery_document(updated_vault)
 
             _record_audit_event(
                 event_type="delivery_completed",
@@ -974,15 +873,13 @@ def run() -> int:
     except Exception as exc:
         logger.exception("Worker execution failed for vault_id=%s", vault_id)
         try:
-            failed_vault = _update_vault(
+            _update_vault(
                 vault_id,
                 {
                     "delivery_error": str(exc),
                     "delivery_job_execution_name": execution_name,
                 },
             )
-            if failed_vault is not None:
-                _upsert_delivery_document(failed_vault)
         except Exception:
             logger.exception("Failed to persist worker delivery error for vault_id=%s", vault_id)
         return 1

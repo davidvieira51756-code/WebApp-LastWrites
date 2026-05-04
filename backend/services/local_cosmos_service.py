@@ -9,77 +9,10 @@ from uuid import uuid4
 
 
 VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "delivered_archived", "disabled"}
-DELIVERY_DOC_STATUSES = {"delivery_initiated", "delivered", "delivered_archived"}
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _document_type(item: Dict[str, Any], default: str = "vault") -> str:
-    for field_name in ("doc_type", "type"):
-        value = str(item.get(field_name, "")).strip().lower()
-        if value:
-            return value
-    if any(field_name in item for field_name in ("password_hash", "verification_token_hash", "username")):
-        return "user"
-    if "vault_id" in item and any(field_name in item for field_name in ("delivery_packages", "delivery_blob_name", "delivered_at")):
-        return "delivery"
-    return default
-
-
-def _assign_document_type(item: Dict[str, Any], doc_type: str) -> Dict[str, Any]:
-    item["doc_type"] = doc_type
-    item["type"] = doc_type
-    return item
-
-
-def _normalize_delivery_packages(delivery_packages: Any) -> List[Dict[str, Any]]:
-    if not isinstance(delivery_packages, list):
-        return []
-    return [package for package in delivery_packages if isinstance(package, dict)]
-
-
-def _build_delivery_document(vault_document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    delivery_packages = _normalize_delivery_packages(vault_document.get("delivery_packages", []))
-    status = str(vault_document.get("status", "")).strip().lower()
-    has_delivery_shape = (
-        status in DELIVERY_DOC_STATUSES
-        or str(vault_document.get("delivery_blob_name", "")).strip()
-        or bool(delivery_packages)
-        or str(vault_document.get("delivery_error", "")).strip()
-        or str(vault_document.get("delivery_initiated_at", "")).strip()
-    )
-    if not has_delivery_shape:
-        return None
-
-    owner_user_id = str(vault_document.get("user_id", "")).strip()
-    vault_id = str(vault_document.get("id", "")).strip()
-    if not owner_user_id or not vault_id:
-        return None
-
-    delivery_document = {
-        "id": f"delivery:{vault_id}",
-        "user_id": owner_user_id,
-        "vault_id": vault_id,
-        "vault_short_id": str(vault_document.get("short_id", "")).strip() or None,
-        "vault_name": str(vault_document.get("name", "")).strip() or None,
-        "status": status or None,
-        "delivery_container_name": vault_document.get("delivery_container_name"),
-        "delivery_blob_name": vault_document.get("delivery_blob_name"),
-        "delivery_file_name": vault_document.get("delivery_file_name"),
-        "delivery_size_bytes": vault_document.get("delivery_size_bytes"),
-        "delivery_checksum_sha256": vault_document.get("delivery_checksum_sha256"),
-        "delivery_packages": delivery_packages,
-        "delivery_error": vault_document.get("delivery_error"),
-        "delivery_initiated_at": vault_document.get("delivery_initiated_at"),
-        "delivery_job_started_at": vault_document.get("delivery_job_started_at"),
-        "delivery_job_execution_name": vault_document.get("delivery_job_execution_name"),
-        "delivery_trigger": vault_document.get("delivery_trigger"),
-        "delivered_at": vault_document.get("delivered_at"),
-        "updated_at": _now_iso(),
-    }
-    return _assign_document_type(delivery_document, "delivery")
 
 
 def _recipient_email(recipient: Any) -> str:
@@ -276,7 +209,8 @@ class LocalCosmosService:
 
     @staticmethod
     def _is_vault_document(item: Dict[str, Any]) -> bool:
-        return _document_type(item) == "vault"
+        doc_type = str(item.get("doc_type", "vault")).strip().lower()
+        return doc_type == "vault"
 
     @staticmethod
     def _audit_partition_key(vault_id: Optional[str], owner_user_id: str) -> str:
@@ -290,7 +224,7 @@ class LocalCosmosService:
         payload = dict(user_data)
         payload["id"] = str(payload.get("id") or uuid4())
         payload["user_id"] = str(payload.get("user_id") or payload["id"])
-        _assign_document_type(payload, "user")
+        payload["doc_type"] = "user"
 
         email = str(payload.get("email", "")).strip().lower()
         if not email:
@@ -310,7 +244,7 @@ class LocalCosmosService:
             (
                 item
                 for item in items
-                if _document_type(item, default="") == "user"
+                if str(item.get("doc_type", "")).strip().lower() == "user"
                 and str(item.get("email", "")).strip().lower() == normalized_email
             ),
             None,
@@ -323,7 +257,7 @@ class LocalCosmosService:
             (
                 item
                 for item in items
-                if _document_type(item, default="") == "user"
+                if str(item.get("doc_type", "")).strip().lower() == "user"
                 and str(item.get("username", "")).strip().lower() == normalized_username
             ),
             None,
@@ -335,7 +269,7 @@ class LocalCosmosService:
             (
                 item
                 for item in items
-                if _document_type(item, default="") == "user"
+                if str(item.get("doc_type", "")).strip().lower() == "user"
                 and str(item.get("id")) == user_id
             ),
             None,
@@ -347,7 +281,7 @@ class LocalCosmosService:
             (
                 item
                 for item in items
-                if _document_type(item, default="") == "user"
+                if str(item.get("doc_type", "")).strip().lower() == "user"
                 and str(item.get("verification_token_hash", "")) == token_hash
             ),
             None,
@@ -357,7 +291,7 @@ class LocalCosmosService:
         items = self._read_items()
 
         for index, item in enumerate(items):
-            if _document_type(item, default="") != "user":
+            if str(item.get("doc_type", "")).strip().lower() != "user":
                 continue
             if str(item.get("id")) != user_id:
                 continue
@@ -366,7 +300,7 @@ class LocalCosmosService:
             updated_item.update(update_data)
             updated_item["id"] = item["id"]
             updated_item["user_id"] = item["user_id"]
-            _assign_document_type(updated_item, "user")
+            updated_item["doc_type"] = "user"
             items[index] = updated_item
             self._write_items(items)
             return updated_item
@@ -380,7 +314,7 @@ class LocalCosmosService:
         items = self._read_items()
         payload = dict(vault_data)
         payload["id"] = str(payload.get("id") or uuid4())
-        _assign_document_type(payload, "vault")
+        payload["doc_type"] = "vault"
         payload["recipients"] = _normalize_recipients(payload.get("recipients", []))
         payload.setdefault("files", [])
         _normalize_files_for_recipients(payload)
@@ -550,7 +484,6 @@ class LocalCosmosService:
             updated_item.update(update_data)
             updated_item["id"] = item["id"]
             updated_item["user_id"] = item["user_id"]
-            _assign_document_type(updated_item, "vault")
             updated_item["recipients"] = _normalize_recipients(updated_item.get("recipients", []))
             _normalize_files_for_recipients(updated_item)
             _clamp_activation_threshold(updated_item)
@@ -564,78 +497,12 @@ class LocalCosmosService:
 
     def delete_vault(self, vault_id: str) -> bool:
         items = self._read_items()
-        remaining = [
-            item
-            for item in items
-            if str(item.get("id")) != vault_id
-            and not (
-                _document_type(item, default="") == "delivery"
-                and str(item.get("vault_id", "")).strip() == vault_id
-            )
-        ]
+        remaining = [item for item in items if str(item.get("id")) != vault_id]
         if len(remaining) == len(items):
             return False
 
         self._write_items(remaining)
         return True
-
-    def get_delivery_by_vault_id(self, vault_id: str) -> Optional[Dict[str, Any]]:
-        items = self._read_items()
-        return next(
-            (
-                item
-                for item in items
-                if _document_type(item, default="") == "delivery"
-                and str(item.get("vault_id", "")).strip() == vault_id
-            ),
-            None,
-        )
-
-    def upsert_delivery(self, vault_document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        delivery_document = _build_delivery_document(vault_document)
-        if delivery_document is None:
-            return None
-
-        items = self._read_items()
-        for index, item in enumerate(items):
-            if _document_type(item, default="") != "delivery":
-                continue
-            if str(item.get("vault_id", "")).strip() != str(vault_document.get("id", "")).strip():
-                continue
-
-            updated_item = dict(item)
-            updated_item.update(delivery_document)
-            _assign_document_type(updated_item, "delivery")
-            items[index] = updated_item
-            self._write_items(items)
-            return updated_item
-
-        items.append(delivery_document)
-        self._write_items(items)
-        return delivery_document
-
-    def backfill_document_shapes(self) -> None:
-        items = self._read_items()
-        changed = False
-        for index, item in enumerate(items):
-            normalized_type = _document_type(item)
-            needs_update = (
-                str(item.get("doc_type", "")).strip().lower() != normalized_type
-                or str(item.get("type", "")).strip().lower() != normalized_type
-            )
-            if needs_update:
-                patched_item = dict(item)
-                _assign_document_type(patched_item, normalized_type)
-                items[index] = patched_item
-                item = patched_item
-                changed = True
-
-        if changed:
-            self._write_items(items)
-
-        for item in self._read_items():
-            if _document_type(item) == "vault":
-                self.upsert_delivery(item)
 
     def list_vaults_for_recipient(self, recipient_email: str) -> List[Dict[str, Any]]:
         normalized_email = recipient_email.strip().lower()
@@ -785,7 +652,7 @@ class LocalCosmosService:
             item
             for item in items
             if not (
-                _document_type(item, default="") == "user"
+                str(item.get("doc_type", "")).strip().lower() == "user"
                 and str(item.get("id")) == user_id
             )
         ]
@@ -810,6 +677,7 @@ class LocalCosmosService:
         items = self._read_items()
         audit_item = {
             "id": str(uuid4()),
+            "doc_type": "audit_log",
             "partition_key": self._audit_partition_key(vault_id, owner_user_id),
             "event_type": str(event_type).strip(),
             "event_at": event_at or _now_iso(),
@@ -820,7 +688,6 @@ class LocalCosmosService:
             "source": str(source).strip() or "api",
             "metadata": metadata or {},
         }
-        _assign_document_type(audit_item, "audit_log")
         items.append(audit_item)
         self._write_items(items)
         return audit_item
@@ -837,7 +704,7 @@ class LocalCosmosService:
         items = [
             item
             for item in self._read_items()
-            if _document_type(item, default="") == "audit_log"
+            if str(item.get("doc_type", "")).strip().lower() == "audit_log"
             and str(item.get("partition_key", "")) == partition_key
             and str(item.get("owner_user_id", "")) == owner_user_id
             and str(item.get("vault_id", "")) == vault_id

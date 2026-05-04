@@ -11,16 +11,12 @@ from pathlib import Path
 from uuid import uuid4
 from zipfile import ZipFile
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding as asym_padding, rsa
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from fastapi.testclient import TestClient
-from backend.services.file_crypto_service import b64url_encode
-from backend.services.vault_key_service import LocalVaultKeyService, _build_key_name
 
 
 class EncryptedDeliveryFlowTests(unittest.TestCase):
@@ -155,7 +151,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertRegex(vault["id"], r"^[a-z0-9]{8}$")
         self.assertTrue(str(vault["key_kid"]).startswith("local://"))
         self.assertIn("public_jwk", vault)
-        self.assertEqual(vault["key_size_bits"], 4096)
 
         plaintext = b"hello from the encrypted upload pipeline"
         uploaded_file = self._upload_file(token, vault["id"], "hello.txt", plaintext)
@@ -243,17 +238,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertTrue(delivered_vault["delivery_blob_name"])
         self.assertTrue(delivered_vault["delivered_at"])
         self.assertEqual(len(delivered_vault["delivery_packages"]), 2)
-        internal_vault_id = self.backend_main.app.state.cosmos_service.get_vault_by_short_id(vault_id)["id"]
-
-        stored_items = json.loads(Path(os.environ["LOCAL_COSMOS_DATA_FILE"]).read_text(encoding="utf-8"))
-        delivery_document = next(
-            item
-            for item in stored_items
-            if item.get("doc_type") == "delivery" and item.get("vault_id") == internal_vault_id
-        )
-        self.assertEqual(delivery_document["type"], "delivery")
-        self.assertEqual(delivery_document["status"], "delivered_archived")
-        self.assertEqual(len(delivery_document["delivery_packages"]), 2)
 
         owner_first_package_response = self.client.get(
             f"/vaults/{vault_id}/delivery-package",
@@ -490,41 +474,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         )
         self.assertEqual(delete_file_response.status_code, 409, delete_file_response.text)
         self.assertEqual(delete_file_response.json()["detail"], expected_error)
-
-    def test_local_legacy_rsa_2048_keys_remain_readable_after_rotation_to_4096(self) -> None:
-        vault_id = f"legacy-{uuid4().hex[:8]}"
-        key_service = LocalVaultKeyService(keys_dir=os.environ["LOCAL_VAULT_KEYS_DIR"])
-        key_name = _build_key_name(vault_id)
-        legacy_key_path = Path(os.environ["LOCAL_VAULT_KEYS_DIR"]) / f"{key_name}.pem"
-        legacy_key_path.parent.mkdir(parents=True, exist_ok=True)
-
-        legacy_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        legacy_key_path.write_bytes(
-            legacy_private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
-
-        rotated_metadata = key_service.ensure_vault_key(vault_id)
-        self.assertEqual(rotated_metadata["key_size_bits"], 4096)
-        self.assertNotEqual(rotated_metadata["key_version"], "local")
-
-        plaintext_key = b"0123456789abcdef0123456789abcdef"
-        wrapped_key = legacy_private_key.public_key().encrypt(
-            plaintext_key,
-            asym_padding.OAEP(
-                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
-        )
-        unwrapped_key = key_service.unwrap_file_key(
-            key_kid=f"local://vault-keys/{key_name}/versions/local",
-            wrapped_key=b64url_encode(wrapped_key),
-        )
-        self.assertEqual(unwrapped_key, plaintext_key)
 
 
 if __name__ == "__main__":
