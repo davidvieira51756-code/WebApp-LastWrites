@@ -51,6 +51,10 @@ class VaultFileMetadata(BaseModel):
     uploaded_at: str = Field(..., min_length=1)
     encrypted: bool = False
     algorithm: Optional[str] = Field(default=None, max_length=128)
+    schema_version: Optional[int] = Field(default=None, ge=1)
+    key_wrap_algorithm: Optional[str] = Field(default=None, max_length=128)
+    key_type: Optional[str] = Field(default=None, max_length=64)
+    key_size_bits: Optional[int] = Field(default=None, ge=2048)
     wrapped_key: Optional[str] = None
     iv: Optional[str] = None
     tag: Optional[str] = None
@@ -94,6 +98,10 @@ class Vault(VaultBase):
     user_id: str = Field(..., min_length=1, max_length=128)
     key_kid: Optional[str] = None
     key_version: Optional[str] = None
+    key_type: Optional[str] = Field(default=None, max_length=64)
+    key_algorithm: Optional[str] = Field(default=None, max_length=128)
+    key_size_bits: Optional[int] = Field(default=None, ge=2048)
+    key_schema_version: Optional[int] = Field(default=None, ge=1)
     public_jwk: Optional[Dict[str, str]] = None
     activation_requests: List[ActivationRequest] = Field(default_factory=list)
     files: List[VaultFileMetadata] = Field(default_factory=list)

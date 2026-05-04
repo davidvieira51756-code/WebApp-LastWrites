@@ -45,7 +45,12 @@ try:
     from backend.services.blob_service import BlobService
     from backend.services.cosmos_service import CosmosService
     from backend.services.email_service import EmailService
-    from backend.services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
+    from backend.services.file_crypto_service import (
+        decrypt_file_bytes,
+        encrypt_file_bytes,
+        rsa_key_size_bits_from_public_jwk,
+        sha256_hexdigest,
+    )
     from backend.services.keyvault_service import KeyVaultService
     from backend.services.local_blob_service import LocalBlobService
     from backend.services.local_cosmos_service import LocalCosmosService
@@ -75,7 +80,12 @@ except ModuleNotFoundError:
     from services.blob_service import BlobService
     from services.cosmos_service import CosmosService
     from services.email_service import EmailService
-    from services.file_crypto_service import decrypt_file_bytes, encrypt_file_bytes, sha256_hexdigest
+    from services.file_crypto_service import (
+        decrypt_file_bytes,
+        encrypt_file_bytes,
+        rsa_key_size_bits_from_public_jwk,
+        sha256_hexdigest,
+    )
     from services.keyvault_service import KeyVaultService
     from services.local_blob_service import LocalBlobService
     from services.local_cosmos_service import LocalCosmosService
@@ -751,7 +761,21 @@ def ensure_vault_key_metadata(
 ) -> Dict[str, Any]:
     existing_key_kid = str(vault_item.get("key_kid", "")).strip()
     public_jwk = vault_item.get("public_jwk")
-    if existing_key_kid and isinstance(public_jwk, dict) and public_jwk.get("n") and public_jwk.get("e"):
+    existing_key_size = vault_item.get("key_size_bits")
+    if existing_key_size is None and isinstance(public_jwk, dict) and public_jwk.get("n") and public_jwk.get("e"):
+        try:
+            existing_key_size = rsa_key_size_bits_from_public_jwk(public_jwk)
+        except Exception:
+            existing_key_size = None
+
+    if (
+        existing_key_kid
+        and isinstance(public_jwk, dict)
+        and public_jwk.get("n")
+        and public_jwk.get("e")
+        and isinstance(existing_key_size, int)
+        and existing_key_size >= 4096
+    ):
         return vault_item
 
     key_metadata = vault_key_service.ensure_vault_key(str(vault_item.get("id", "")))
@@ -792,6 +816,14 @@ def _download_vault_file_bytes(
         raise ValueError("File integrity verification failed after decryption.")
 
     return plaintext
+
+
+def ensure_document_model_shapes(cosmos_service: CosmosService) -> None:
+    ensure_vault_short_ids(cosmos_service)
+    ensure_vault_access_shapes(cosmos_service)
+    backfill_document_shapes = getattr(cosmos_service, "backfill_document_shapes", None)
+    if callable(backfill_document_shapes):
+        backfill_document_shapes()
 
 
 def get_current_user(
@@ -924,8 +956,7 @@ def startup_event() -> None:
         app.state.auth_service = auth_service
         app.state.email_service = email_service
         app.state.vault_key_service = vault_key_service
-        ensure_vault_short_ids(cosmos_service)
-        ensure_vault_access_shapes(cosmos_service)
+        ensure_document_model_shapes(cosmos_service)
     except Exception:
         logger.exception("Application startup failed during service initialization.")
         raise

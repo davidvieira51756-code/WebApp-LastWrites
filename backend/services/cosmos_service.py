@@ -12,10 +12,77 @@ logger = logging.getLogger(__name__)
 
 
 VAULT_ACTIVATION_TERMINAL_STATUSES = {"delivery_initiated", "delivered", "delivered_archived", "disabled"}
+DELIVERY_DOC_STATUSES = {"delivery_initiated", "delivered", "delivered_archived"}
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _document_type(item: Dict[str, Any], default: str = "vault") -> str:
+    for field_name in ("doc_type", "type"):
+        value = str(item.get(field_name, "")).strip().lower()
+        if value:
+            return value
+    if any(field_name in item for field_name in ("password_hash", "verification_token_hash", "username")):
+        return "user"
+    if "vault_id" in item and any(field_name in item for field_name in ("delivery_packages", "delivery_blob_name", "delivered_at")):
+        return "delivery"
+    return default
+
+
+def _assign_document_type(item: Dict[str, Any], doc_type: str) -> Dict[str, Any]:
+    item["doc_type"] = doc_type
+    item["type"] = doc_type
+    return item
+
+
+def _normalize_delivery_packages(delivery_packages: Any) -> List[Dict[str, Any]]:
+    if not isinstance(delivery_packages, list):
+        return []
+    return [package for package in delivery_packages if isinstance(package, dict)]
+
+
+def _build_delivery_document(vault_document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    delivery_packages = _normalize_delivery_packages(vault_document.get("delivery_packages", []))
+    status = str(vault_document.get("status", "")).strip().lower()
+    has_delivery_shape = (
+        status in DELIVERY_DOC_STATUSES
+        or str(vault_document.get("delivery_blob_name", "")).strip()
+        or bool(delivery_packages)
+        or str(vault_document.get("delivery_error", "")).strip()
+        or str(vault_document.get("delivery_initiated_at", "")).strip()
+    )
+    if not has_delivery_shape:
+        return None
+
+    owner_user_id = str(vault_document.get("user_id", "")).strip()
+    vault_id = str(vault_document.get("id", "")).strip()
+    if not owner_user_id or not vault_id:
+        return None
+
+    delivery_document = {
+        "id": f"delivery:{vault_id}",
+        "user_id": owner_user_id,
+        "vault_id": vault_id,
+        "vault_short_id": str(vault_document.get("short_id", "")).strip() or None,
+        "vault_name": str(vault_document.get("name", "")).strip() or None,
+        "status": status or None,
+        "delivery_container_name": vault_document.get("delivery_container_name"),
+        "delivery_blob_name": vault_document.get("delivery_blob_name"),
+        "delivery_file_name": vault_document.get("delivery_file_name"),
+        "delivery_size_bytes": vault_document.get("delivery_size_bytes"),
+        "delivery_checksum_sha256": vault_document.get("delivery_checksum_sha256"),
+        "delivery_packages": delivery_packages,
+        "delivery_error": vault_document.get("delivery_error"),
+        "delivery_initiated_at": vault_document.get("delivery_initiated_at"),
+        "delivery_job_started_at": vault_document.get("delivery_job_started_at"),
+        "delivery_job_execution_name": vault_document.get("delivery_job_execution_name"),
+        "delivery_trigger": vault_document.get("delivery_trigger"),
+        "delivered_at": vault_document.get("delivered_at"),
+        "updated_at": _now_iso(),
+    }
+    return _assign_document_type(delivery_document, "delivery")
 
 
 def _recipient_email(recipient: Any) -> str:
@@ -258,8 +325,7 @@ class CosmosService:
 
     @staticmethod
     def _is_vault_document(item: Dict[str, Any]) -> bool:
-        doc_type = str(item.get("doc_type", "vault")).strip().lower()
-        return doc_type == "vault"
+        return _document_type(item) == "vault"
 
     @staticmethod
     def _audit_partition_key(vault_id: Optional[str], owner_user_id: str) -> str:
@@ -273,7 +339,7 @@ class CosmosService:
         payload = dict(user_data)
         payload["id"] = str(payload.get("id") or uuid4())
         payload["user_id"] = str(payload.get("user_id") or payload["id"])
-        payload["doc_type"] = "user"
+        _assign_document_type(payload, "user")
 
         email = str(payload.get("email", "")).strip().lower()
         if not email:
@@ -396,7 +462,7 @@ class CosmosService:
         merged_item.update(update_data)
         merged_item["id"] = existing_item["id"]
         merged_item["user_id"] = existing_item["user_id"]
-        merged_item["doc_type"] = "user"
+        _assign_document_type(merged_item, "user")
 
         try:
             updated_item = container.replace_item(item=existing_item, body=merged_item)
@@ -427,7 +493,7 @@ class CosmosService:
         container = self._get_container()
         payload = dict(vault_data)
         payload["id"] = payload.get("id") or str(uuid4())
-        payload["doc_type"] = "vault"
+        _assign_document_type(payload, "vault")
         payload["recipients"] = _normalize_recipients(payload.get("recipients", []))
         payload.setdefault("files", [])
         _normalize_files_for_recipients(payload)
@@ -676,6 +742,7 @@ class CosmosService:
         merged_item.update(update_data)
         merged_item["id"] = existing_item["id"]
         merged_item["user_id"] = existing_item["user_id"]
+        _assign_document_type(merged_item, "vault")
         merged_item["recipients"] = _normalize_recipients(merged_item.get("recipients", []))
         _normalize_files_for_recipients(merged_item)
         _clamp_activation_threshold(merged_item)
@@ -704,11 +771,89 @@ class CosmosService:
                 item=existing_item["id"],
                 partition_key=existing_item["user_id"],
             )
+            existing_delivery = self.get_delivery_by_vault_id(vault_id)
+            if existing_delivery is not None:
+                container.delete_item(
+                    item=existing_delivery["id"],
+                    partition_key=existing_delivery["user_id"],
+                )
             logger.info("Deleted vault id=%s", existing_item["id"])
             return True
         except exceptions.CosmosHttpResponseError:
             logger.exception("Cosmos DB delete failed for vault id=%s", vault_id)
             raise
+
+    def get_delivery_by_vault_id(self, vault_id: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        query = "SELECT * FROM c WHERE c.doc_type = 'delivery' AND c.vault_id = @vault_id"
+        parameters = [{"name": "@vault_id", "value": vault_id}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB read failed for delivery vault_id=%s", vault_id)
+            raise
+
+        if not items:
+            return None
+        return items[0]
+
+    def upsert_delivery(self, vault_document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        delivery_document = _build_delivery_document(vault_document)
+        if delivery_document is None:
+            return None
+
+        existing_delivery = self.get_delivery_by_vault_id(str(vault_document.get("id", "")).strip())
+        try:
+            if existing_delivery is None:
+                created_item = container.create_item(body=delivery_document)
+                logger.info("Created delivery document for vault_id=%s", delivery_document.get("vault_id"))
+                return created_item
+
+            merged_item = dict(existing_delivery)
+            merged_item.update(delivery_document)
+            _assign_document_type(merged_item, "delivery")
+            updated_item = container.replace_item(item=existing_delivery, body=merged_item)
+            logger.info("Updated delivery document for vault_id=%s", delivery_document.get("vault_id"))
+            return updated_item
+        except exceptions.CosmosHttpResponseError:
+            logger.exception(
+                "Cosmos DB upsert failed for delivery vault_id=%s",
+                delivery_document.get("vault_id"),
+            )
+            raise
+
+    def backfill_document_shapes(self) -> None:
+        container = self._get_container()
+        try:
+            items = list(container.query_items(query="SELECT * FROM c", enable_cross_partition_query=True))
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB scan failed during document backfill.")
+            raise
+
+        for item in items:
+            normalized_type = _document_type(item)
+            needs_update = (
+                str(item.get("doc_type", "")).strip().lower() != normalized_type
+                or str(item.get("type", "")).strip().lower() != normalized_type
+            )
+            if needs_update:
+                patched_item = dict(item)
+                _assign_document_type(patched_item, normalized_type)
+                container.replace_item(item=item, body=patched_item)
+                item = patched_item
+
+            if normalized_type == "vault":
+                delivery_document = _build_delivery_document(item)
+                if delivery_document is not None:
+                    self.upsert_delivery(item)
 
     def list_vaults_for_recipient(self, recipient_email: str) -> List[Dict[str, Any]]:
         container = self._get_container()
@@ -908,7 +1053,6 @@ class CosmosService:
         container = self._get_audit_container()
         audit_item = {
             "id": str(uuid4()),
-            "doc_type": "audit_log",
             "partition_key": self._audit_partition_key(vault_id, owner_user_id),
             "event_type": str(event_type).strip(),
             "event_at": event_at or _now_iso(),
@@ -919,6 +1063,7 @@ class CosmosService:
             "source": str(source).strip() or "api",
             "metadata": metadata or {},
         }
+        _assign_document_type(audit_item, "audit_log")
 
         try:
             created_item = container.create_item(body=audit_item)
