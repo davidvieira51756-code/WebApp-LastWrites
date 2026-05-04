@@ -10,6 +10,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+FILE_CRYPTO_SCHEMA_VERSION = 2
+FILE_KEY_WRAP_ALGORITHM = "RSA-OAEP-256"
+
 
 def b64url_encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
@@ -55,6 +58,10 @@ def rsa_public_key_from_jwk(public_jwk: Dict[str, Any] | str) -> rsa.RSAPublicKe
     return public_numbers.public_key()
 
 
+def rsa_key_size_bits_from_public_jwk(public_jwk: Dict[str, Any] | str) -> int:
+    return rsa_public_key_from_jwk(public_jwk).key_size
+
+
 def encrypt_file_bytes(plaintext: bytes, public_jwk: Dict[str, Any] | str) -> Dict[str, Any]:
     rsa_public_key = rsa_public_key_from_jwk(public_jwk)
     aes_key = secrets.token_bytes(32)
@@ -78,6 +85,10 @@ def encrypt_file_bytes(plaintext: bytes, public_jwk: Dict[str, Any] | str) -> Di
         "metadata": {
             "encrypted": True,
             "algorithm": "AES-256-GCM",
+            "schema_version": FILE_CRYPTO_SCHEMA_VERSION,
+            "key_wrap_algorithm": FILE_KEY_WRAP_ALGORITHM,
+            "key_type": "RSA",
+            "key_size_bits": rsa_public_key.key_size,
             "wrapped_key": b64url_encode(wrapped_key),
             "iv": b64url_encode(iv),
             "tag": b64url_encode(tag),
