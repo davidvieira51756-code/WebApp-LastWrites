@@ -2064,6 +2064,7 @@ def submit_activation_request(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ) -> RecipientVaultSummary:
     cosmos_service = get_cosmos_service(request)
+    email_service = get_email_service(request)
     recipient_email = str(current_user.get("email", "")).strip().lower()
 
     if not recipient_email:
@@ -2150,6 +2151,52 @@ def submit_activation_request(
         )
 
     owner_profile = cosmos_service.get_user_by_id(owner_user_id) if owner_user_id else None
+    owner_email = ""
+    if owner_profile:
+        owner_email = str(owner_profile.get("email", "")).strip().lower()
+    grace_period_started = str(updated_vault.get("grace_period_started_at", "")).strip()
+    grace_period_expires = str(updated_vault.get("grace_period_expires_at", "")).strip()
+    entered_grace_period = (
+        previous_status != "grace_period"
+        and str(updated_vault.get("status", "")).strip().lower() == "grace_period"
+        and bool(grace_period_started)
+    )
+    if owner_user_id and owner_email and entered_grace_period:
+        grace_period_email_result = email_service.send_vault_grace_period_started_email(
+            recipient=owner_email,
+            public_vault_id=str(updated_vault.get("short_id", "")).strip() or vault_id,
+            vault_name=str(updated_vault.get("name", "Unnamed Vault")).strip() or "Unnamed Vault",
+            requester_label=build_user_display_name(current_user) or recipient_email,
+            grace_period_started_at=grace_period_started,
+            grace_period_expires_at=grace_period_expires,
+        )
+        if grace_period_email_result.sent:
+            write_audit_event(
+                cosmos_service,
+                event_type="grace_period_owner_email_sent",
+                owner_user_id=owner_user_id,
+                vault_id=internal_vault_id,
+                actor_user_id=str(current_user.get("id", "")),
+                actor_email=recipient_email,
+                metadata={
+                    "recipient_email": owner_email,
+                    "message_id": grace_period_email_result.message_id,
+                },
+            )
+        elif grace_period_email_result.failed:
+            write_audit_event(
+                cosmos_service,
+                event_type="email_send_failed",
+                owner_user_id=owner_user_id,
+                vault_id=internal_vault_id,
+                actor_user_id=str(current_user.get("id", "")),
+                actor_email=recipient_email,
+                metadata={
+                    "email_kind": "grace_period_started_owner_notice",
+                    "recipient_email": owner_email,
+                    "error": grace_period_email_result.error,
+                },
+            )
     return _build_recipient_vault_summary(
         {**updated_vault, "owner_profile": owner_profile},
         recipient_email,

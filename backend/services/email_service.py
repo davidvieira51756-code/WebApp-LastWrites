@@ -122,6 +122,9 @@ class EmailService:
     def build_recipient_access_url(self, public_vault_id: str) -> str:
         return f"{self._frontend_base_url}/incoming/{public_vault_id.strip()}"
 
+    def build_owner_vault_url(self, public_vault_id: str) -> str:
+        return f"{self._frontend_base_url}/vaults/{public_vault_id.strip()}"
+
     def send_verification_email(
         self,
         *,
@@ -202,6 +205,43 @@ class EmailService:
                 f"<p>You were added as a recipient to the vault <strong>{vault_name}</strong>.</p>",
                 f"<p>Vault owner: {owner_label}</p>",
                 f'<p>Access the vault after signing in: <a href="{access_url}">{access_url}</a></p>',
+            ]
+        )
+        return self._send_email(
+            recipient=recipient,
+            subject=subject,
+            plain_text=plain_text,
+            html=html,
+        )
+
+    def send_vault_grace_period_started_email(
+        self,
+        *,
+        recipient: str,
+        public_vault_id: str,
+        vault_name: str,
+        requester_label: str,
+        grace_period_started_at: str,
+        grace_period_expires_at: str,
+    ) -> EmailSendResult:
+        vault_url = self.build_owner_vault_url(public_vault_id)
+        subject = f"[Last Writes] Vault '{vault_name}' entered grace period"
+        plain_text = "\n".join(
+            [
+                f"Your vault '{vault_name}' has entered grace period.",
+                f"Activation threshold reached by: {requester_label}",
+                f"Grace period started at: {grace_period_started_at}",
+                f"Grace period expires at: {grace_period_expires_at}",
+                f"Review the vault after signing in: {vault_url}",
+            ]
+        )
+        html = "".join(
+            [
+                f"<p>Your vault <strong>{vault_name}</strong> has entered grace period.</p>",
+                f"<p>Activation threshold reached by: {requester_label}</p>",
+                f"<p>Grace period started at: {grace_period_started_at}</p>",
+                f"<p>Grace period expires at: {grace_period_expires_at}</p>",
+                f'<p>Review the vault after signing in: <a href="{vault_url}">{vault_url}</a></p>',
             ]
         )
         return self._send_email(

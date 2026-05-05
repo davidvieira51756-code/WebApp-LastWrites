@@ -142,6 +142,25 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         return {"internal_vault_id": internal_vault_id}
 
+    def _capture_grace_period_owner_emails(self) -> list[dict]:
+        captured_emails: list[dict] = []
+        email_service = self.backend_main.app.state.email_service
+        original_method = email_service.send_vault_grace_period_started_email
+
+        def _recording_send_vault_grace_period_started_email(**kwargs):
+            captured_emails.append(dict(kwargs))
+            return original_method(**kwargs)
+
+        email_service.send_vault_grace_period_started_email = _recording_send_vault_grace_period_started_email
+        self.addCleanup(
+            lambda: setattr(
+                email_service,
+                "send_vault_grace_period_started_email",
+                original_method,
+            )
+        )
+        return captured_emails
+
     def test_encrypted_upload_and_owner_download_round_trip(self) -> None:
         email = f"owner-{uuid4().hex[:8]}@example.com"
         token = self._register_and_login(email)
@@ -490,6 +509,59 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         )
         self.assertEqual(delete_file_response.status_code, 409, delete_file_response.text)
         self.assertEqual(delete_file_response.json()["detail"], expected_error)
+
+    def test_owner_receives_email_when_vault_enters_grace_period(self) -> None:
+        owner_email = f"grace-owner-{uuid4().hex[:8]}@example.com"
+        owner_token = self._register_and_login(owner_email)
+        captured_emails = self._capture_grace_period_owner_emails()
+
+        vault = self._create_vault(
+            owner_token,
+            name="Grace Email Vault",
+            owner_message="Notify owner when grace period starts.",
+        )
+        vault_id = vault["id"]
+
+        first_recipient_email = f"grace-first-{uuid4().hex[:8]}@example.com"
+        second_recipient_email = f"grace-second-{uuid4().hex[:8]}@example.com"
+        for recipient_email in (first_recipient_email, second_recipient_email):
+            add_recipient_response = self.client.post(
+                f"/vaults/{vault_id}/recipients",
+                headers=self._auth_headers(owner_token),
+                json={"email": recipient_email, "can_activate": True},
+            )
+            self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        threshold_update_response = self.client.patch(
+            f"/vaults/{vault_id}",
+            headers=self._auth_headers(owner_token),
+            json={"activation_threshold": 2},
+        )
+        self.assertEqual(threshold_update_response.status_code, 200, threshold_update_response.text)
+
+        first_recipient_token = self._register_and_login(first_recipient_email)
+        first_activation_response = self.client.post(
+            f"/vaults/{vault_id}/activation-requests",
+            headers=self._auth_headers(first_recipient_token),
+            json={"reason": "First activation request."},
+        )
+        self.assertEqual(first_activation_response.status_code, 201, first_activation_response.text)
+        self.assertEqual(first_activation_response.json()["status"], "pending_activation")
+        self.assertEqual(len(captured_emails), 0)
+
+        second_recipient_token = self._register_and_login(second_recipient_email)
+        second_activation_response = self.client.post(
+            f"/vaults/{vault_id}/activation-requests",
+            headers=self._auth_headers(second_recipient_token),
+            json={"reason": "Second activation request."},
+        )
+        self.assertEqual(second_activation_response.status_code, 201, second_activation_response.text)
+        self.assertEqual(second_activation_response.json()["status"], "grace_period")
+        self.assertEqual(len(captured_emails), 1)
+        self.assertEqual(captured_emails[0]["recipient"], owner_email)
+        self.assertEqual(captured_emails[0]["public_vault_id"], vault_id)
+        self.assertEqual(captured_emails[0]["vault_name"], "Grace Email Vault")
+        self.assertEqual(captured_emails[0]["requester_label"], "Integration Test User")
 
     def test_local_legacy_rsa_2048_keys_remain_readable_after_rotation_to_4096(self) -> None:
         vault_id = f"legacy-{uuid4().hex[:8]}"
