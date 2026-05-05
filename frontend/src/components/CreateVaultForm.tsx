@@ -5,6 +5,11 @@ import { useState } from "react";
 
 import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
 import { buildAuthHeaders, isUnauthorizedStatus } from "@/lib/api";
+import {
+    getVaultTemplateById,
+    VAULT_TEMPLATES,
+    type VaultTemplateId,
+} from "@/lib/vaultTemplates";
 
 export type ActivationRequestItem = {
     recipient_email: string;
@@ -55,6 +60,7 @@ export default function CreateVaultForm({
     onUnauthorized,
 }: CreateVaultFormProps) {
     const t = useCatTheme();
+    const [selectedTemplateId, setSelectedTemplateId] = useState<VaultTemplateId>("blank");
     const [name, setName] = useState("");
     const [ownerMessage, setOwnerMessage] = useState("");
     const [gracePeriodValue, setGracePeriodValue] = useState(30);
@@ -63,6 +69,31 @@ export default function CreateVaultForm({
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
+    const selectedTemplate = getVaultTemplateById(selectedTemplateId);
+
+    const handleTemplateSelect = (templateId: VaultTemplateId) => {
+        setSelectedTemplateId(templateId);
+        setSuccessMessage(null);
+        setErrorMessage(null);
+    };
+
+    const handleInsertStarterOutline = () => {
+        const outline = selectedTemplate.starterOutline.trim();
+        if (!outline) {
+            return;
+        }
+
+        setOwnerMessage((currentValue) => {
+            const trimmedCurrentValue = currentValue.trim();
+            if (!trimmedCurrentValue) {
+                return outline;
+            }
+            if (trimmedCurrentValue.includes(outline)) {
+                return currentValue;
+            }
+            return `${trimmedCurrentValue}\n\n${outline}`;
+        });
+    };
 
     const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -122,6 +153,7 @@ export default function CreateVaultForm({
 
             const createdVault = (await response.json()) as Vault;
             onCreated(createdVault);
+            setSelectedTemplateId("blank");
             setName("");
             setOwnerMessage("");
             setGracePeriodValue(30);
@@ -150,6 +182,108 @@ export default function CreateVaultForm({
                 request activation before the grace-period timer starts.
             </Text>
 
+            <div
+                style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: t.space.s,
+                }}
+            >
+                <Text variant="label" color="secondary">
+                    Choose a starter template
+                </Text>
+                <div
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                        gap: t.space.xs,
+                    }}
+                >
+                    {VAULT_TEMPLATES.map((template) => {
+                        const isSelected = template.id === selectedTemplateId;
+                        return (
+                            <button
+                                key={template.id}
+                                type="button"
+                                onClick={() => handleTemplateSelect(template.id)}
+                                style={{
+                                    textAlign: "left",
+                                    borderRadius: t.radius.l,
+                                    border: `1px solid ${
+                                        isSelected ? t.colors.border.active : t.colors.border.default
+                                    }`,
+                                    background: isSelected
+                                        ? t.isDark
+                                            ? "linear-gradient(180deg, rgba(244, 63, 94, 0.16), rgba(24, 24, 27, 0.92))"
+                                            : "linear-gradient(180deg, rgba(244, 63, 94, 0.10), rgba(255, 255, 255, 0.98))"
+                                        : t.colors.card.secondary,
+                                    padding: t.space.m,
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: t.space.xs,
+                                    cursor: "pointer",
+                                    transition: "border-color 140ms ease, transform 140ms ease",
+                                }}
+                            >
+                                <Text variant="label" weight="semibold">
+                                    {template.name}
+                                </Text>
+                                <Text variant="caption" color="secondary">
+                                    {template.shortDescription}
+                                </Text>
+                            </button>
+                        );
+                    })}
+                </div>
+
+                <Card
+                    variant="outline"
+                    style={{
+                        gap: t.space.s,
+                        padding: t.space.m,
+                    }}
+                >
+                    <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
+                        <Text variant="label" weight="semibold">
+                            {selectedTemplate.name}
+                        </Text>
+                        <Text variant="bodySmall" color="secondary">
+                            {selectedTemplate.shortDescription}
+                        </Text>
+                    </div>
+
+                    <div
+                        style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                            gap: t.space.s,
+                        }}
+                    >
+                        <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
+                            <Text variant="label" color="secondary">
+                                Suggested sections
+                            </Text>
+                            {selectedTemplate.sections.map((section) => (
+                                <Text key={section} variant="caption" color="secondary">
+                                    - {section}
+                                </Text>
+                            ))}
+                        </div>
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
+                            <Text variant="label" color="secondary">
+                                Useful files to include
+                            </Text>
+                            {selectedTemplate.fileChecklist.map((item) => (
+                                <Text key={item} variant="caption" color="secondary">
+                                    - {item}
+                                </Text>
+                            ))}
+                        </div>
+                    </div>
+                </Card>
+            </div>
+
             <form
                 onSubmit={handleSubmit}
                 style={{
@@ -165,7 +299,7 @@ export default function CreateVaultForm({
                     type="text"
                     value={name}
                     onChange={(event) => setName(event.target.value)}
-                    placeholder="Family Legacy Vault"
+                    placeholder={selectedTemplate.vaultNamePlaceholder}
                     required
                 />
 
@@ -214,9 +348,43 @@ export default function CreateVaultForm({
                     label="Message For Recipients"
                     value={ownerMessage}
                     onChange={(event) => setOwnerMessage(event.target.value)}
-                    placeholder="Write the message that should appear on the delivery cover page."
+                    placeholder={selectedTemplate.ownerMessagePlaceholder}
                     multiline
                 />
+                <Card
+                    variant="secondary"
+                    style={{
+                        gap: t.space.xs,
+                        padding: t.space.m,
+                    }}
+                >
+                    <Text variant="label" color="secondary">
+                        What to write here
+                    </Text>
+                    <Text variant="bodySmall" color="secondary">
+                        {selectedTemplate.ownerMessageGuidance}
+                    </Text>
+                    <div
+                        style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: t.space.s,
+                            flexWrap: "wrap",
+                        }}
+                    >
+                        <Text variant="caption" color="muted">
+                            Optional: insert an editable outline based on this template.
+                        </Text>
+                        <Button
+                            type="button"
+                            variant="Primary"
+                            onClick={handleInsertStarterOutline}
+                        >
+                            Insert Starter Outline
+                        </Button>
+                    </div>
+                </Card>
 
                 <Input
                     id="activation-threshold"
