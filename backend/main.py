@@ -134,6 +134,10 @@ class RecipientPermissionUpdateRequest(BaseModel):
     can_activate: bool
 
 
+class FileRecipientAssignmentsUpdateRequest(BaseModel):
+    recipient_emails: List[str] = Field(default_factory=list)
+
+
 def get_recipient_email(recipient: object) -> str:
     if isinstance(recipient, dict):
         return str(recipient.get("email", "")).strip().lower()
@@ -2464,6 +2468,89 @@ def delete_vault_file(
         )
 
     return None
+
+
+@app.patch("/vaults/{vault_id}/files/{file_id}")
+def update_vault_file_recipients(
+    vault_id: str,
+    file_id: str,
+    payload: FileRecipientAssignmentsUpdateRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        public_vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
+    ensure_vault_is_mutable(vault_item)
+    internal_vault_id = str(vault_item.get("id", "")).strip()
+
+    file_metadata = get_vault_file_metadata(vault_item, file_id)
+    if file_metadata is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found for vault.",
+        )
+
+    try:
+        assigned_recipient_emails = normalize_file_recipient_emails(
+            payload.recipient_emails,
+            vault_item.get("recipients", []),
+        )
+        existing_files = vault_item.get("files", [])
+        if not isinstance(existing_files, list):
+            existing_files = []
+
+        updated_files = []
+        for file_item in existing_files:
+            if not isinstance(file_item, dict):
+                updated_files.append(file_item)
+                continue
+
+            if str(file_item.get("id", "")).strip() != file_id:
+                updated_files.append(file_item)
+                continue
+
+            updated_file_item = dict(file_item)
+            updated_file_item["recipient_emails"] = assigned_recipient_emails
+            updated_files.append(updated_file_item)
+
+        updated_vault = cosmos_service.update_vault(internal_vault_id, {"files": updated_files})
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        logger.exception(
+            "Unhandled error while updating file recipients. vault_id=%s file_id=%s",
+            vault_id,
+            file_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update file recipients.",
+        ) from None
+
+    if updated_vault is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault not found.",
+        )
+
+    updated_file = get_vault_file_metadata(updated_vault, file_id)
+    if updated_file is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found after update.",
+        )
+
+    return {
+        "vault_id": str(updated_vault.get("short_id", "")).strip() or vault_id,
+        "file": updated_file,
+    }
 
 
 @app.get("/local-downloads/{container_name}/{blob_name:path}")

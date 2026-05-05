@@ -225,10 +225,13 @@ export default function VaultDetailsPage() {
   const [isUpdatingRecipientPermission, setIsUpdatingRecipientPermission] = useState<string | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [selectedRecipientEmails, setSelectedRecipientEmails] = useState<string[]>([]);
+  const [fileInputKey, setFileInputKey] = useState(0);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [uploadMessage, setUploadMessage] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [isUpdatingFileRecipientsId, setIsUpdatingFileRecipientsId] = useState<string | null>(null);
+  const [fileRecipientsMessage, setFileRecipientsMessage] = useState<string | null>(null);
+  const [fileRecipientsError, setFileRecipientsError] = useState<string | null>(null);
 
   const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -340,10 +343,6 @@ export default function VaultDetailsPage() {
         setEditableGracePeriodUnit(vaultPayload.grace_period_unit === "hours" ? "hours" : "days");
         setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
-        setSelectedRecipientEmails((currentSelection) => {
-          const availableEmails = new Set((vaultPayload.recipients || []).map((recipient) => recipient.email));
-          return currentSelection.filter((email) => availableEmails.has(email));
-        });
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Unexpected error while loading vault details.";
@@ -444,9 +443,6 @@ export default function VaultDetailsPage() {
       }
 
       setRecipientMessage("Recipient removed successfully.");
-      setSelectedRecipientEmails((currentSelection) =>
-        currentSelection.filter((currentEmail) => currentEmail !== email),
-      );
       await fetchVaultData(false);
     } catch (error) {
       const message =
@@ -504,6 +500,8 @@ export default function VaultDetailsPage() {
     event.preventDefault();
     setUploadMessage(null);
     setUploadError(null);
+    setFileRecipientsMessage(null);
+    setFileRecipientsError(null);
 
     if (!selectedFile) {
       setUploadError("Please choose a file before uploading.");
@@ -518,7 +516,7 @@ export default function VaultDetailsPage() {
     try {
       const formData = new FormData();
       formData.append("file", selectedFile);
-      formData.append("recipient_emails_json", JSON.stringify(selectedRecipientEmails));
+      formData.append("recipient_emails_json", JSON.stringify([]));
 
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`, {
         method: "POST",
@@ -537,7 +535,7 @@ export default function VaultDetailsPage() {
       }
 
       setSelectedFile(null);
-      setSelectedRecipientEmails([]);
+      setFileInputKey((currentValue) => currentValue + 1);
       setUploadMessage("File uploaded successfully.");
       await fetchVaultData(false);
     } catch (error) {
@@ -550,13 +548,50 @@ export default function VaultDetailsPage() {
   };
 
   const handleSelectedFileChange = (file: File | null) => {
+    setUploadMessage(null);
+    setUploadError(null);
     setSelectedFile(file);
-    if (!file) {
-      setSelectedRecipientEmails([]);
+  };
+
+  const handleUpdateFileRecipients = async (fileId: string, recipientEmails: string[]) => {
+    setFileRecipientsMessage(null);
+    setFileRecipientsError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setFileRecipientsError("API URL or vault identifier is missing.");
       return;
     }
 
-    setSelectedRecipientEmails((vault?.recipients || []).map((recipient) => recipient.email));
+    setIsUpdatingFileRecipientsId(fileId);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileId)}`,
+        {
+          method: "PATCH",
+          headers: buildAuthHeaders(authToken, true),
+          body: JSON.stringify({ recipient_emails: recipientEmails }),
+        },
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+
+      if (!response.ok) {
+        const message = await getErrorDetail(response, "Failed to update file recipients.");
+        throw new Error(message);
+      }
+
+      setFileRecipientsMessage("File recipients updated.");
+      await fetchVaultData(false);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unexpected error while updating file recipients.";
+      setFileRecipientsError(message);
+    } finally {
+      setIsUpdatingFileRecipientsId(null);
+    }
   };
 
   const handleDownload = async (fileId: string) => {
@@ -1408,85 +1443,6 @@ export default function VaultDetailsPage() {
                 </div>
               </Card>
 
-              <Card variant="elevated" style={{ gap: t.space.s }}>
-                <Text variant="h3">Upload File</Text>
-                <Text variant="bodySmall" color="secondary">
-                  Attach new files to this vault using secure upload.
-                </Text>
-
-                <form
-                  onSubmit={handleFileUpload}
-                  style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
-                >
-                  <input
-                    type="file"
-                    onChange={(event) => handleSelectedFileChange(event.target.files?.[0] ?? null)}
-                    disabled={isArchivedFinal}
-                    style={{
-                      width: "100%",
-                      border: `1px solid ${t.colors.components.input.border}`,
-                      borderRadius: t.radius.l,
-                      backgroundColor: t.colors.components.input.bg,
-                      color: t.colors.text.secondary,
-                      padding: `${t.space.s}px ${t.space.s}px`,
-                      fontFamily: "var(--font-geist-sans), sans-serif",
-                    }}
-                  />
-                  {selectedFile ? (
-                    <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
-                      <Text variant="label">Recipients for this file</Text>
-                      {vault?.recipients.length ? (
-                        <div style={{ display: "grid", gap: t.space.xs }}>
-                          {vault.recipients.map((recipient) => (
-                            <label
-                              key={recipient.email}
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: t.space.xs,
-                                color: t.colors.text.secondary,
-                                fontSize: t.typography.bodySmall.fontSize,
-                              }}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={selectedRecipientEmails.includes(recipient.email)}
-                                onChange={(event) =>
-                                  setSelectedRecipientEmails((currentSelection) =>
-                                    event.target.checked
-                                      ? [...currentSelection, recipient.email].filter(
-                                          (value, index, values) => values.indexOf(value) === index,
-                                        )
-                                      : currentSelection.filter((value) => value !== recipient.email),
-                                  )
-                                }
-                                disabled={isArchivedFinal}
-                              />
-                              {recipient.email}
-                            </label>
-                          ))}
-                        </div>
-                      ) : (
-                        <Alert
-                          variant="info"
-                          message="This vault has no recipients yet, so the uploaded file will not be assigned to anyone."
-                        />
-                      )}
-                    </Card>
-                  ) : null}
-                  <Button
-                    type="submit"
-                    size="full"
-                    variant="SolidPrimary"
-                    disabled={isUploadingFile || isArchivedFinal}
-                  >
-                    {isUploadingFile ? "Uploading..." : "Upload File"}
-                  </Button>
-                </form>
-
-                {uploadError ? <Alert variant="error" message={uploadError} /> : null}
-                {uploadMessage ? <Alert variant="success" message={uploadMessage} /> : null}
-              </Card>
             </div>
 
             <Card variant="elevated" style={{ gap: t.space.s }}>
@@ -1498,11 +1454,49 @@ export default function VaultDetailsPage() {
                   gap: t.space.xs,
                 }}
               >
-                <Text variant="h3">Attached Files</Text>
+                <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
+                  <Text variant="h3">Attached Files</Text>
+                  <Text variant="bodySmall" color="secondary">
+                    Add files here first. After a file is attached, you can add or remove recipients for that specific file at any time.
+                  </Text>
+                </div>
                 <Badge label={`${files.length} files`} size="sm" outlineOnly />
               </div>
 
               {downloadError ? <Alert variant="error" message={downloadError} /> : null}
+              {uploadError ? <Alert variant="error" message={uploadError} /> : null}
+              {uploadMessage ? <Alert variant="success" message={uploadMessage} /> : null}
+              {fileRecipientsError ? <Alert variant="error" message={fileRecipientsError} /> : null}
+              {fileRecipientsMessage ? <Alert variant="success" message={fileRecipientsMessage} /> : null}
+
+              <form
+                onSubmit={handleFileUpload}
+                style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
+              >
+                <input
+                  key={fileInputKey}
+                  type="file"
+                  onChange={(event) => handleSelectedFileChange(event.target.files?.[0] ?? null)}
+                  disabled={isArchivedFinal}
+                  style={{
+                    width: "100%",
+                    border: `1px solid ${t.colors.components.input.border}`,
+                    borderRadius: t.radius.l,
+                    backgroundColor: t.colors.components.input.bg,
+                    color: t.colors.text.secondary,
+                    padding: `${t.space.s}px ${t.space.s}px`,
+                    fontFamily: "var(--font-geist-sans), sans-serif",
+                  }}
+                />
+                <Button
+                  type="submit"
+                  size="full"
+                  variant="SolidPrimary"
+                  disabled={isUploadingFile || isArchivedFinal || !selectedFile}
+                >
+                  {isUploadingFile ? "Uploading..." : "Add File"}
+                </Button>
+              </form>
 
               {files.length === 0 ? (
                 <Alert variant="info" message="No files uploaded yet." />
@@ -1567,6 +1561,50 @@ export default function VaultDetailsPage() {
                           Recipients: {fileItem.recipient_emails?.length ? fileItem.recipient_emails.join(", ") : "No recipients assigned"}
                         </Text>
                       </div>
+
+                      <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
+                        <Text variant="label">Attached file recipients</Text>
+                        {vault?.recipients.length ? (
+                          <div style={{ display: "grid", gap: t.space.xs }}>
+                            {vault.recipients.map((recipient) => {
+                              const currentRecipientEmails = fileItem.recipient_emails ?? [];
+                              const isChecked = currentRecipientEmails.includes(recipient.email);
+                              return (
+                                <label
+                                  key={`${fileItem.id}-${recipient.email}`}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: t.space.xs,
+                                    color: t.colors.text.secondary,
+                                    fontSize: t.typography.bodySmall.fontSize,
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    disabled={isArchivedFinal || isUpdatingFileRecipientsId === fileItem.id}
+                                    onChange={(event) => {
+                                      const nextRecipientEmails = event.target.checked
+                                        ? [...currentRecipientEmails, recipient.email].filter(
+                                            (value, index, values) => values.indexOf(value) === index,
+                                          )
+                                        : currentRecipientEmails.filter((value) => value !== recipient.email);
+                                      void handleUpdateFileRecipients(fileItem.id, nextRecipientEmails);
+                                    }}
+                                  />
+                                  {recipient.email}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <Alert
+                            variant="info"
+                            message="Add vault recipients first, then assign them to this file here."
+                          />
+                        )}
+                      </Card>
                     </Card>
                   ))}
                 </div>
