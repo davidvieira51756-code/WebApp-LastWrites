@@ -211,8 +211,8 @@ export default function RecipientActivationPage() {
   const handleSignOut = useCallback(() => {
     clearAuthSession();
     setAuthToken(null);
-    router.replace(`/auth?next=${encodeURIComponent(authRedirectPath)}`);
-  }, [authRedirectPath, router]);
+    router.replace("/auth");
+  }, [router]);
 
   const handleSubmitRequest = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

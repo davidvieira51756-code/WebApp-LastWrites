@@ -225,6 +225,10 @@ export default function ProfilePage() {
         body: JSON.stringify({ password: deletePassword }),
       });
       if (isUnauthorizedStatus(response.status)) {
+        const detail = await getErrorDetail(response, "Failed to delete account.");
+        if (detail.toLowerCase().includes("password is incorrect")) {
+          throw new Error(detail);
+        }
         redirectToAuth();
         return;
       }

@@ -364,8 +364,8 @@ export default function VaultDetailsPage() {
   const handleSignOut = useCallback(() => {
     clearAuthSession();
     setAuthToken(null);
-    router.replace(`/auth?next=${encodeURIComponent(authRedirectPath)}`);
-  }, [authRedirectPath, router]);
+    router.replace("/auth");
+  }, [router]);
 
   const handleAddRecipient = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
