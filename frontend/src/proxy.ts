@@ -1,12 +1,19 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const PUBLIC_ROUTE_PREFIXES = ["/auth", "/verify-email"];
+const PUBLIC_ROUTE_PREFIXES = ["/auth", "/verify-email", "/reset-password"];
+const REDIRECT_IF_AUTH_ROUTE_PREFIXES = ["/auth"];
 const AUTH_TOKEN_COOKIE = "lw_auth_token";
 const AUTH_EXP_COOKIE = "lw_auth_exp";
 
 function isPublicRoute(pathname: string): boolean {
   return PUBLIC_ROUTE_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
+  );
+}
+
+function shouldRedirectAuthenticatedUser(pathname: string): boolean {
+  return REDIRECT_IF_AUTH_ROUTE_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`)
   );
 }
@@ -42,7 +49,7 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(signInUrl);
   }
 
-  if (hasAuth && isPublic) {
+  if (hasAuth && shouldRedirectAuthenticatedUser(pathname)) {
     return NextResponse.redirect(new URL("/", request.url));
   }
 

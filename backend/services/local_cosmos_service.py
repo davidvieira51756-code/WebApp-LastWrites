@@ -353,6 +353,18 @@ class LocalCosmosService:
             None,
         )
 
+    def get_user_by_password_reset_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        items = self._read_items()
+        return next(
+            (
+                item
+                for item in items
+                if _document_type(item, default="") == "user"
+                and str(item.get("password_reset_token_hash", "")) == token_hash
+            ),
+            None,
+        )
+
     def update_user(self, user_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         items = self._read_items()
 

@@ -33,12 +33,20 @@ class AuthService:
         self._verification_ttl_minutes = self._get_env_int(
             "EMAIL_VERIFICATION_TOKEN_TTL_MINUTES", 24 * 60
         )
+        self._password_reset_ttl_minutes = self._get_env_int(
+            "PASSWORD_RESET_TOKEN_TTL_MINUTES", 60
+        )
         self._password_iterations = self._get_env_int("AUTH_PASSWORD_PBKDF2_ITERATIONS", 260000)
         self._require_email_verification = self._env_to_bool(
             os.getenv("AUTH_REQUIRE_EMAIL_VERIFICATION", "true")
         )
         self._frontend_verify_url = (
             os.getenv("FRONTEND_VERIFY_EMAIL_URL", "http://localhost:3000/verify-email")
+            .strip()
+            .rstrip("/")
+        )
+        self._frontend_reset_password_url = (
+            os.getenv("FRONTEND_RESET_PASSWORD_URL", "http://localhost:3000/reset-password")
             .strip()
             .rstrip("/")
         )
@@ -190,6 +198,19 @@ class AuthService:
 
     def build_email_verification_url(self, token: str) -> str:
         return f"{self._frontend_verify_url}?token={quote(token)}"
+
+    def issue_password_reset(self) -> Dict[str, str]:
+        token = secrets.token_urlsafe(32)
+        token_hash = self.hash_verification_token(token)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=self._password_reset_ttl_minutes)
+        return {
+            "token": token,
+            "token_hash": token_hash,
+            "expires_at": expires_at.isoformat(),
+        }
+
+    def build_password_reset_url(self, token: str) -> str:
+        return f"{self._frontend_reset_password_url}?token={quote(token)}"
 
     def should_require_email_verification(self) -> bool:
         return self._require_email_verification

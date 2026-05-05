@@ -28,6 +28,8 @@ try:
         AuthLoginRequest,
         AuthMeResponse,
         AuthProfileUpdateRequest,
+        PasswordResetEmailRequest,
+        PasswordResetRequest,
         AuthRegisterRequest,
         AuthRegisterResponse,
         AuthTokenResponse,
@@ -63,6 +65,8 @@ except ModuleNotFoundError:
         AuthLoginRequest,
         AuthMeResponse,
         AuthProfileUpdateRequest,
+        PasswordResetEmailRequest,
+        PasswordResetRequest,
         AuthRegisterRequest,
         AuthRegisterResponse,
         AuthTokenResponse,
@@ -1142,6 +1146,75 @@ def verify_email(payload: EmailVerificationRequest, request: Request):
     }
 
 
+@app.post("/auth/reset-password")
+def reset_password(payload: PasswordResetRequest, request: Request):
+    cosmos_service = get_cosmos_service(request)
+    auth_service = get_auth_service(request)
+
+    token = payload.token.strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password reset token is required.",
+        )
+
+    token_hash = auth_service.hash_verification_token(token)
+    try:
+        user_item = cosmos_service.get_user_by_password_reset_token_hash(token_hash)
+    except Exception:
+        logger.exception("Failed to resolve user for password reset token.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password.",
+        ) from None
+
+    if user_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired password reset token.",
+        )
+
+    expiry_raw = str(user_item.get("password_reset_token_expires_at", "")).strip()
+    expiry_time = _parse_iso_datetime(expiry_raw)
+    now = datetime.now(timezone.utc)
+    if expiry_time is None or expiry_time <= now:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired password reset token.",
+        )
+
+    try:
+        new_password_hash = auth_service.hash_password(payload.new_password)
+        updated_user = cosmos_service.update_user(
+            str(user_item.get("id")),
+            {
+                "password_hash": new_password_hash,
+                "password_reset_token_hash": None,
+                "password_reset_token_expires_at": None,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Failed to reset password for user id=%s", user_item.get("id"))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password.",
+        ) from None
+
+    if updated_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password.",
+        )
+
+    return {
+        "message": "Password reset successfully. You can now sign in.",
+        "user_id": str(updated_user.get("id")),
+        "email": str(updated_user.get("email", "")),
+    }
+
+
 @app.post("/auth/login", response_model=AuthTokenResponse)
 def login_account(payload: AuthLoginRequest, request: Request) -> AuthTokenResponse:
     cosmos_service = get_cosmos_service(request)
@@ -1289,6 +1362,88 @@ def update_current_user_profile(
     )
 
 
+@app.post("/auth/me/request-password-reset")
+def request_current_user_password_reset(
+    payload: PasswordResetEmailRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    auth_service = get_auth_service(request)
+    email_service = get_email_service(request)
+
+    user_id = str(current_user.get("id", "")).strip()
+    user_email = auth_service.normalize_email(str(current_user.get("email", "")).strip())
+    requested_email = auth_service.normalize_email(str(payload.email or user_email).strip())
+
+    if requested_email != user_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password reset email must match the signed-in account.",
+        )
+
+    reset_payload = auth_service.issue_password_reset()
+
+    try:
+        updated_user = cosmos_service.update_user(
+            user_id,
+            {
+                "password_reset_token_hash": reset_payload["token_hash"],
+                "password_reset_token_expires_at": reset_payload["expires_at"],
+            },
+        )
+    except Exception:
+        logger.exception("Failed to create password reset token. user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send password reset email.",
+        ) from None
+
+    if updated_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account was not found.",
+        )
+
+    reset_url = auth_service.build_password_reset_url(reset_payload["token"])
+    email_result = email_service.send_password_reset_email(
+        recipient=user_email,
+        reset_url=reset_url,
+    )
+    if email_result.sent:
+        write_audit_event(
+            cosmos_service,
+            event_type="password_reset_email_sent",
+            owner_user_id=user_id,
+            actor_user_id=user_id,
+            actor_email=user_email,
+            metadata={
+                "recipient_email": user_email,
+                "message_id": email_result.message_id,
+            },
+        )
+    elif email_result.failed:
+        write_audit_event(
+            cosmos_service,
+            event_type="email_send_failed",
+            owner_user_id=user_id,
+            actor_user_id=user_id,
+            actor_email=user_email,
+            metadata={
+                "email_kind": "password_reset",
+                "recipient_email": user_email,
+                "error": email_result.error,
+            },
+        )
+
+    return {
+        "message": "If email delivery is configured, a password reset link has been sent.",
+        "email": user_email,
+        "sent": email_result.sent,
+        "skipped": email_result.skipped,
+    }
+
+
 @app.post("/auth/change-password")
 def change_password(
     payload: AuthChangePasswordRequest,
@@ -1313,7 +1468,14 @@ def change_password(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     try:
-        updated_user = cosmos_service.update_user(user_id, {"password_hash": new_password_hash})
+        updated_user = cosmos_service.update_user(
+            user_id,
+            {
+                "password_hash": new_password_hash,
+                "password_reset_token_hash": None,
+                "password_reset_token_expires_at": None,
+            },
+        )
     except Exception:
         logger.exception("Failed to change password. user_id=%s", user_id)
         raise HTTPException(

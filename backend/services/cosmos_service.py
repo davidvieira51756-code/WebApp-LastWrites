@@ -452,6 +452,30 @@ class CosmosService:
             return None
         return items[0]
 
+    def get_user_by_password_reset_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        container = self._get_container()
+        query = (
+            "SELECT * FROM c WHERE c.doc_type = 'user' "
+            "AND c.password_reset_token_hash = @token_hash"
+        )
+        parameters = [{"name": "@token_hash", "value": token_hash}]
+
+        try:
+            items = list(
+                container.query_items(
+                    query=query,
+                    parameters=parameters,
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB token lookup failed for password reset.")
+            raise
+
+        if not items:
+            return None
+        return items[0]
+
     def update_user(self, user_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         container = self._get_container()
         existing_item = self.get_user_by_id(user_id)

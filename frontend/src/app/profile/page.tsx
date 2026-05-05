@@ -54,8 +54,6 @@ export default function ProfilePage() {
   const [birthDate, setBirthDate] = useState("");
   const [displayNamePreference, setDisplayNamePreference] = useState<"username" | "real_name">("username");
 
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
   const [deletePassword, setDeletePassword] = useState("");
 
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
@@ -65,7 +63,7 @@ export default function ProfilePage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const [isSavingProfile, setIsSavingProfile] = useState(false);
-  const [isChangingPassword, setIsChangingPassword] = useState(false);
+  const [isSendingPasswordReset, setIsSendingPasswordReset] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
 
   const redirectToAuth = useCallback(() => {
@@ -174,8 +172,7 @@ export default function ProfilePage() {
     }
   };
 
-  const handlePasswordSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const handlePasswordResetEmail = async () => {
     setPasswordMessage(null);
     setPasswordError(null);
 
@@ -183,36 +180,27 @@ export default function ProfilePage() {
       setPasswordError("Authentication is required.");
       return;
     }
-    if (newPassword.length < 8) {
-      setPasswordError("Password must be at least 8 characters.");
-      return;
-    }
 
-    setIsChangingPassword(true);
+    setIsSendingPasswordReset(true);
     try {
-      const response = await fetch(`${apiUrl}/auth/change-password`, {
+      const response = await fetch(`${apiUrl}/auth/me/request-password-reset`, {
         method: "POST",
         headers: buildAuthHeaders(authToken, true),
-        body: JSON.stringify({
-          current_password: currentPassword,
-          new_password: newPassword,
-        }),
+        body: JSON.stringify({ email }),
       });
       if (isUnauthorizedStatus(response.status)) {
         redirectToAuth();
         return;
       }
       if (!response.ok) {
-        throw new Error(await getErrorDetail(response, "Failed to change password."));
+        throw new Error(await getErrorDetail(response, "Failed to send password reset email."));
       }
 
-      setCurrentPassword("");
-      setNewPassword("");
-      setPasswordMessage("Password updated successfully.");
+      setPasswordMessage("Password reset email sent. Open the link in your email to choose a new password.");
     } catch (error) {
-      setPasswordError(error instanceof Error ? error.message : "Unexpected password update error.");
+      setPasswordError(error instanceof Error ? error.message : "Unexpected password reset error.");
     } finally {
-      setIsChangingPassword(false);
+      setIsSendingPasswordReset(false);
     }
   };
 
@@ -279,7 +267,7 @@ export default function ProfilePage() {
             <div style={{ display: "grid", gap: t.space.xxs }}>
               <Text variant="h2">Profile</Text>
               <Text variant="bodySmall" color="secondary">
-                Manage the name other users see, update your password, or delete your account.
+                Manage the name other users see, reset your password by email, or delete your account.
               </Text>
               {email ? <Text variant="caption" color="muted">Signed in as {email}</Text> : null}
             </div>
@@ -340,14 +328,19 @@ export default function ProfilePage() {
 
             <div style={{ display: "grid", gap: t.space.m }}>
               <Card variant="elevated" style={{ gap: t.space.s }}>
-                <Text variant="h3">Change Password</Text>
-                <form onSubmit={handlePasswordSubmit} style={{ display: "grid", gap: t.space.s }}>
-                  <Input id="current-password" type="password" label="Current Password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required />
-                  <Input id="new-password" type="password" label="New Password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required />
-                  <Button type="submit" size="full" variant="SolidPrimary" disabled={isChangingPassword}>
-                    {isChangingPassword ? "Updating Password..." : "Update Password"}
-                  </Button>
-                </form>
+                <Text variant="h3">Reset Password By Email</Text>
+                <Text variant="bodySmall" color="secondary">
+                  For security, password changes are now done through an email link sent to your account.
+                </Text>
+                <Button
+                  type="button"
+                  size="full"
+                  variant="SolidPrimary"
+                  disabled={isSendingPasswordReset || !email}
+                  onClick={() => void handlePasswordResetEmail()}
+                >
+                  {isSendingPasswordReset ? "Sending Email..." : "Send Password Reset Email"}
+                </Button>
 
                 {passwordError ? <Alert variant="error" message={passwordError} /> : null}
                 {passwordMessage ? <Alert variant="success" message={passwordMessage} /> : null}

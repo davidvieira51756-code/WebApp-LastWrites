@@ -150,6 +150,36 @@ class EmailService:
             html=html,
         )
 
+    def send_password_reset_email(
+        self,
+        *,
+        recipient: str,
+        reset_url: str,
+    ) -> EmailSendResult:
+        subject = "[Last Writes] Reset your password"
+        plain_text = "\n".join(
+            [
+                "We received a request to reset your Last Writes password.",
+                "Open the link below to choose a new password:",
+                reset_url,
+                "If you did not request this, you can safely ignore this email.",
+            ]
+        )
+        html = "".join(
+            [
+                "<p>We received a request to reset your Last Writes password.</p>",
+                "<p>Open the link below to choose a new password:</p>",
+                f'<p><a href="{reset_url}">{reset_url}</a></p>',
+                "<p>If you did not request this, you can safely ignore this email.</p>",
+            ]
+        )
+        return self._send_email(
+            recipient=recipient,
+            subject=subject,
+            plain_text=plain_text,
+            html=html,
+        )
+
     def send_recipient_invited_email(
         self,
         *,

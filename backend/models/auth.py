@@ -22,6 +22,15 @@ class EmailVerificationRequest(BaseModel):
     token: str = Field(..., min_length=10, max_length=2048)
 
 
+class PasswordResetRequest(BaseModel):
+    token: str = Field(..., min_length=10, max_length=2048)
+    new_password: str = Field(..., min_length=8, max_length=256)
+
+
+class PasswordResetEmailRequest(BaseModel):
+    email: str | None = Field(default=None, min_length=3, max_length=320)
+
+
 class AuthTokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
