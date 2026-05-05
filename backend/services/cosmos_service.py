@@ -277,14 +277,16 @@ class CosmosService:
             )
 
         self._database_name = os.getenv("COSMOS_DATABASE_NAME", "last-writes-db")
-        self._container_name = os.getenv("COSMOS_VAULTS_CONTAINER", "vaults")
+        self._vault_container_name = os.getenv("COSMOS_VAULTS_CONTAINER", "vaults")
+        self._user_container_name = os.getenv("COSMOS_USERS_CONTAINER", "users")
         self._audit_container_name = os.getenv("COSMOS_AUDIT_CONTAINER", "audit_logs")
         throughput_value = os.getenv("COSMOS_CONTAINER_THROUGHPUT", "400")
         self._container_throughput = int(throughput_value)
 
         self._client: Optional[CosmosClient] = None
         self._database = None
-        self._container = None
+        self._vault_container = None
+        self._user_container = None
         self._audit_container = None
 
     def initialize(self) -> None:
@@ -293,8 +295,13 @@ class CosmosService:
             self._database = self._client.create_database_if_not_exists(
                 id=self._database_name
             )
-            self._container = self._database.create_container_if_not_exists(
-                id=self._container_name,
+            self._vault_container = self._database.create_container_if_not_exists(
+                id=self._vault_container_name,
+                partition_key=PartitionKey(path="/user_id"),
+                offer_throughput=self._container_throughput,
+            )
+            self._user_container = self._database.create_container_if_not_exists(
+                id=self._user_container_name,
                 partition_key=PartitionKey(path="/user_id"),
                 offer_throughput=self._container_throughput,
             )
@@ -304,19 +311,28 @@ class CosmosService:
                 offer_throughput=self._container_throughput,
             )
             logger.info(
-                "Cosmos DB initialized. database=%s container=%s audit_container=%s",
+                "Cosmos DB initialized. database=%s users_container=%s vaults_container=%s audit_container=%s",
                 self._database_name,
-                self._container_name,
+                self._user_container_name,
+                self._vault_container_name,
                 self._audit_container_name,
             )
         except Exception:
             logger.exception("Failed to initialize Cosmos DB resources.")
             raise
 
-    def _get_container(self):
-        if self._container is None:
+    def _get_vault_container(self):
+        if self._vault_container is None:
             raise RuntimeError("CosmosService is not initialized.")
-        return self._container
+        return self._vault_container
+
+    def _get_user_container(self):
+        if self._user_container is None:
+            raise RuntimeError("CosmosService is not initialized.")
+        return self._user_container
+
+    def _get_container(self):
+        return self._get_vault_container()
 
     def _get_audit_container(self):
         if self._audit_container is None:
@@ -335,7 +351,7 @@ class CosmosService:
         return f"user:{owner_user_id}"
 
     def create_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
-        container = self._get_container()
+        container = self._get_user_container()
         payload = dict(user_data)
         payload["id"] = str(payload.get("id") or uuid4())
         payload["user_id"] = str(payload.get("user_id") or payload["id"])
@@ -358,7 +374,7 @@ class CosmosService:
             raise
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
+        container = self._get_user_container()
         normalized_email = email.strip().lower()
         query = (
             "SELECT * FROM c WHERE c.doc_type = 'user' "
@@ -383,7 +399,7 @@ class CosmosService:
         return items[0]
 
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
+        container = self._get_user_container()
         normalized_username = username.strip().lower()
         query = (
             "SELECT * FROM c WHERE c.doc_type = 'user' "
@@ -408,8 +424,8 @@ class CosmosService:
         return items[0]
 
     def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
-        query = "SELECT * FROM c WHERE c.doc_type = 'user' AND c.id = @id"
+        container = self._get_user_container()
+        query = "SELECT * FROM c WHERE c.id = @id"
         parameters = [{"name": "@id", "value": user_id}]
 
         try:
@@ -429,7 +445,7 @@ class CosmosService:
         return items[0]
 
     def get_user_by_verification_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
+        container = self._get_user_container()
         query = (
             "SELECT * FROM c WHERE c.doc_type = 'user' "
             "AND c.verification_token_hash = @token_hash"
@@ -453,7 +469,7 @@ class CosmosService:
         return items[0]
 
     def get_user_by_password_reset_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
+        container = self._get_user_container()
         query = (
             "SELECT * FROM c WHERE c.doc_type = 'user' "
             "AND c.password_reset_token_hash = @token_hash"
@@ -477,7 +493,7 @@ class CosmosService:
         return items[0]
 
     def update_user(self, user_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
+        container = self._get_user_container()
         existing_item = self.get_user_by_id(user_id)
         if existing_item is None:
             return None
@@ -497,7 +513,7 @@ class CosmosService:
             raise
 
     def delete_user(self, user_id: str) -> bool:
-        container = self._get_container()
+        container = self._get_user_container()
         existing_item = self.get_user_by_id(user_id)
         if existing_item is None:
             return False
@@ -854,7 +870,40 @@ class CosmosService:
             )
             raise
 
+    def _migrate_legacy_user_documents(self) -> None:
+        vault_container = self._get_vault_container()
+        user_container = self._get_user_container()
+        try:
+            legacy_user_items = list(
+                vault_container.query_items(
+                    query="SELECT * FROM c WHERE c.doc_type = 'user'",
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB scan failed during legacy user migration.")
+            raise
+
+        for legacy_user_item in legacy_user_items:
+            user_id = str(legacy_user_item.get("id", "")).strip()
+            user_partition_key = str(legacy_user_item.get("user_id", "")).strip()
+            if not user_id or not user_partition_key:
+                continue
+
+            try:
+                existing_user = self.get_user_by_id(user_id)
+                if existing_user is None:
+                    user_container.create_item(body=legacy_user_item)
+                vault_container.delete_item(
+                    item=legacy_user_item["id"],
+                    partition_key=user_partition_key,
+                )
+            except exceptions.CosmosHttpResponseError:
+                logger.exception("Failed migrating legacy user document id=%s", user_id)
+                raise
+
     def backfill_document_shapes(self) -> None:
+        self._migrate_legacy_user_documents()
         container = self._get_container()
         try:
             items = list(container.query_items(query="SELECT * FROM c", enable_cross_partition_query=True))

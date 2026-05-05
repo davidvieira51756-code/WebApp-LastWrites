@@ -253,26 +253,84 @@ def _recompute_activation_state(vault_document: Dict[str, Any]) -> Dict[str, Any
 
 
 class LocalCosmosService:
-    def __init__(self, data_file: Optional[str] = None) -> None:
-        default_path = Path(__file__).resolve().parents[1] / ".local_data" / "vaults.json"
-        configured_path = data_file or os.getenv("LOCAL_COSMOS_DATA_FILE")
-        self._data_file = Path(configured_path) if configured_path else default_path
+    def __init__(
+        self,
+        data_file: Optional[str] = None,
+        user_data_file: Optional[str] = None,
+    ) -> None:
+        default_data_dir = Path(__file__).resolve().parents[1] / ".local_data"
+        default_vaults_path = default_data_dir / "vaults.json"
+        default_users_path = default_data_dir / "users.json"
+
+        configured_vaults_path = data_file or os.getenv("LOCAL_COSMOS_DATA_FILE")
+        configured_users_path = user_data_file or os.getenv("LOCAL_COSMOS_USERS_DATA_FILE")
+        if not configured_users_path and configured_vaults_path:
+            configured_users_path = str(Path(configured_vaults_path).with_name("users.json"))
+
+        self._data_file = Path(configured_vaults_path) if configured_vaults_path else default_vaults_path
+        self._user_data_file = Path(configured_users_path) if configured_users_path else default_users_path
 
     def initialize(self) -> None:
         self._data_file.parent.mkdir(parents=True, exist_ok=True)
         if not self._data_file.exists():
             self._data_file.write_text("[]", encoding="utf-8")
+        self._user_data_file.parent.mkdir(parents=True, exist_ok=True)
+        if not self._user_data_file.exists():
+            self._user_data_file.write_text("[]", encoding="utf-8")
+        self._migrate_legacy_user_items()
 
-    def _read_items(self) -> List[Dict[str, Any]]:
-        self.initialize()
-        raw = self._data_file.read_text(encoding="utf-8").strip() or "[]"
+    @staticmethod
+    def _read_json_file(path: Path) -> List[Dict[str, Any]]:
+        raw = path.read_text(encoding="utf-8").strip() or "[]"
         items = json.loads(raw)
         if not isinstance(items, list):
             return []
         return [item for item in items if isinstance(item, dict)]
 
+    def _read_items(self) -> List[Dict[str, Any]]:
+        self.initialize()
+        return self._read_json_file(self._data_file)
+
     def _write_items(self, items: List[Dict[str, Any]]) -> None:
         self._data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+    def _read_user_items(self) -> List[Dict[str, Any]]:
+        self.initialize()
+        return self._read_json_file(self._user_data_file)
+
+    def _write_user_items(self, items: List[Dict[str, Any]]) -> None:
+        self._user_data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+    def _migrate_legacy_user_items(self) -> None:
+        vault_items = self._read_json_file(self._data_file)
+        legacy_user_items = [
+            item
+            for item in vault_items
+            if _document_type(item, default="") == "user"
+        ]
+        if not legacy_user_items:
+            return
+
+        user_items = self._read_json_file(self._user_data_file)
+        existing_user_ids = {
+            str(item.get("id", "")).strip()
+            for item in user_items
+            if str(item.get("id", "")).strip()
+        }
+        for legacy_user_item in legacy_user_items:
+            legacy_user_id = str(legacy_user_item.get("id", "")).strip()
+            if legacy_user_id and legacy_user_id not in existing_user_ids:
+                user_items.append(dict(legacy_user_item))
+                existing_user_ids.add(legacy_user_id)
+
+        self._write_user_items(user_items)
+        self._write_items(
+            [
+                item
+                for item in vault_items
+                if _document_type(item, default="") != "user"
+            ]
+        )
 
     @staticmethod
     def _is_vault_document(item: Dict[str, Any]) -> bool:
@@ -286,7 +344,7 @@ class LocalCosmosService:
         return f"user:{owner_user_id}"
 
     def create_user(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
-        items = self._read_items()
+        items = self._read_user_items()
         payload = dict(user_data)
         payload["id"] = str(payload.get("id") or uuid4())
         payload["user_id"] = str(payload.get("user_id") or payload["id"])
@@ -300,12 +358,12 @@ class LocalCosmosService:
 
         payload["email"] = email
         items.append(payload)
-        self._write_items(items)
+        self._write_user_items(items)
         return payload
 
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         normalized_email = email.strip().lower()
-        items = self._read_items()
+        items = self._read_user_items()
         return next(
             (
                 item
@@ -318,7 +376,7 @@ class LocalCosmosService:
 
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
         normalized_username = username.strip().lower()
-        items = self._read_items()
+        items = self._read_user_items()
         return next(
             (
                 item
@@ -330,7 +388,7 @@ class LocalCosmosService:
         )
 
     def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        items = self._read_items()
+        items = self._read_user_items()
         return next(
             (
                 item
@@ -342,7 +400,7 @@ class LocalCosmosService:
         )
 
     def get_user_by_verification_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
-        items = self._read_items()
+        items = self._read_user_items()
         return next(
             (
                 item
@@ -354,7 +412,7 @@ class LocalCosmosService:
         )
 
     def get_user_by_password_reset_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
-        items = self._read_items()
+        items = self._read_user_items()
         return next(
             (
                 item
@@ -366,7 +424,7 @@ class LocalCosmosService:
         )
 
     def update_user(self, user_id: str, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        items = self._read_items()
+        items = self._read_user_items()
 
         for index, item in enumerate(items):
             if _document_type(item, default="") != "user":
@@ -380,7 +438,7 @@ class LocalCosmosService:
             updated_item["user_id"] = item["user_id"]
             _assign_document_type(updated_item, "user")
             items[index] = updated_item
-            self._write_items(items)
+            self._write_user_items(items)
             return updated_item
 
         return None
@@ -792,7 +850,7 @@ class LocalCosmosService:
         return None
 
     def delete_user(self, user_id: str) -> bool:
-        items = self._read_items()
+        items = self._read_user_items()
         remaining = [
             item
             for item in items
@@ -804,7 +862,7 @@ class LocalCosmosService:
         if len(remaining) == len(items):
             return False
 
-        self._write_items(remaining)
+        self._write_user_items(remaining)
         return True
 
     def log_audit_event(

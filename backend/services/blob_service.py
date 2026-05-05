@@ -25,6 +25,9 @@ class BlobService:
         self._connection_string = connection_string or os.getenv("BLOB_CONNECTION_STRING")
         if not self._connection_string:
             raise ValueError("Environment variable BLOB_CONNECTION_STRING is required.")
+        self._vault_files_container_name = (
+            os.getenv("BLOB_VAULT_FILES_CONTAINER", "vault-files").strip() or "vault-files"
+        )
 
         self._blob_service_client = BlobServiceClient.from_connection_string(
             self._connection_string
@@ -53,21 +56,10 @@ class BlobService:
         return parsed
 
     @staticmethod
-    def _container_name_for_vault(vault_id: str) -> str:
+    def _blob_name_for_vault(vault_id: str) -> str:
         cleaned = re.sub(r"[^a-z0-9-]", "-", vault_id.lower())
-        cleaned = re.sub(r"-+", "-", cleaned).strip("-")
-
-        container_name = f"vault-{cleaned}" if cleaned else "vault-default"
-        container_name = container_name[:63].rstrip("-")
-
-        if not container_name:
-            container_name = "vault-default"
-        if len(container_name) < 3:
-            container_name = (container_name + "000")[:3]
-        if not container_name[-1].isalnum():
-            container_name = f"{container_name[:-1]}0"
-
-        return container_name
+        cleaned = re.sub(r"-+", "-", cleaned).strip("-") or "vault-default"
+        return f"{cleaned}/{uuid4().hex}.blob"
 
     def upload_file(
         self,
@@ -78,9 +70,9 @@ class BlobService:
         file_size: Optional[int] = None,
         blob_content_type: Optional[str] = None,
     ) -> Dict[str, Any]:
-        container_name = self._container_name_for_vault(vault_id)
+        container_name = self._vault_files_container_name
         safe_file_name = PurePath(file_name).name if file_name else "upload.bin"
-        blob_name = f"{uuid4().hex}.blob"
+        blob_name = self._blob_name_for_vault(vault_id)
 
         container_client = self._blob_service_client.get_container_client(container_name)
         try:
