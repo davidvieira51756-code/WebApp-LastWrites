@@ -40,6 +40,7 @@ def _configure_monitoring() -> None:
 
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
+_deliveries_container = None
 _credential: Optional[DefaultAzureCredential] = None
 
 
@@ -89,6 +90,28 @@ def _get_credential() -> DefaultAzureCredential:
     return _credential
 
 
+def _get_deliveries_container():
+    global _cosmos_client
+    global _deliveries_container
+
+    if _deliveries_container is not None:
+        return _deliveries_container
+
+    connection_string = os.getenv("COSMOS_CONNECTION_STRING")
+    if not connection_string:
+        raise RuntimeError("Environment variable COSMOS_CONNECTION_STRING is required.")
+
+    database_name = os.getenv("COSMOS_DATABASE_NAME", "last-writes-db")
+    container_name = os.getenv("COSMOS_DELIVERIES_CONTAINER", "deliveries")
+
+    if _cosmos_client is None:
+        _cosmos_client = CosmosClient.from_connection_string(connection_string)
+
+    database_client = _cosmos_client.get_database_client(database_name)
+    _deliveries_container = database_client.get_container_client(container_name)
+    return _deliveries_container
+
+
 def _get_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     container = _get_vaults_container()
     query = "SELECT * FROM c WHERE c.id = @vault_id AND c.doc_type = 'vault'"
@@ -111,7 +134,7 @@ def _update_vault(vault_document: Dict[str, Any], update_data: Dict[str, Any]) -
 
 
 def _upsert_delivery(vault_document: Dict[str, Any]) -> None:
-    container = _get_vaults_container()
+    container = _get_deliveries_container()
     vault_id = str(vault_document.get("id", "")).strip()
     owner_user_id = str(vault_document.get("user_id", "")).strip()
     if not vault_id or not owner_user_id:

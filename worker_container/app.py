@@ -114,6 +114,27 @@ def _get_local_cosmos_file() -> Path:
     return Path(os.getenv("LOCAL_COSMOS_DATA_FILE", str(_default_local_data_dir() / "vaults.json")))
 
 
+def _get_local_users_file() -> Path:
+    configured_path = os.getenv("LOCAL_COSMOS_USERS_DATA_FILE", "").strip()
+    if configured_path:
+        return Path(configured_path)
+    return _get_local_cosmos_file().with_name("users.json")
+
+
+def _get_local_deliveries_file() -> Path:
+    configured_path = os.getenv("LOCAL_COSMOS_DELIVERIES_DATA_FILE", "").strip()
+    if configured_path:
+        return Path(configured_path)
+    return _get_local_cosmos_file().with_name("deliveries.json")
+
+
+def _get_local_audit_file() -> Path:
+    configured_path = os.getenv("LOCAL_COSMOS_AUDIT_DATA_FILE", "").strip()
+    if configured_path:
+        return Path(configured_path)
+    return _get_local_cosmos_file().with_name("audit_logs.json")
+
+
 def _get_local_keys_dir() -> Path:
     return Path(os.getenv("LOCAL_VAULT_KEYS_DIR", str(_default_local_data_dir() / "vault_keys")))
 
@@ -212,6 +233,45 @@ def _save_local_items(items: List[Dict[str, Any]]) -> None:
     data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
 
+def _load_local_user_items() -> List[Dict[str, Any]]:
+    data_file = _get_local_users_file()
+    if not data_file.exists():
+        return []
+    raw = data_file.read_text(encoding="utf-8").strip() or "[]"
+    items = json.loads(raw)
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _load_local_delivery_items() -> List[Dict[str, Any]]:
+    data_file = _get_local_deliveries_file()
+    if not data_file.exists():
+        return []
+    raw = data_file.read_text(encoding="utf-8").strip() or "[]"
+    items = json.loads(raw)
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _save_local_delivery_items(items: List[Dict[str, Any]]) -> None:
+    data_file = _get_local_deliveries_file()
+    data_file.parent.mkdir(parents=True, exist_ok=True)
+    data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
+def _load_local_audit_items() -> List[Dict[str, Any]]:
+    data_file = _get_local_audit_file()
+    if not data_file.exists():
+        return []
+    raw = data_file.read_text(encoding="utf-8").strip() or "[]"
+    items = json.loads(raw)
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _save_local_audit_items(items: List[Dict[str, Any]]) -> None:
+    data_file = _get_local_audit_file()
+    data_file.parent.mkdir(parents=True, exist_ok=True)
+    data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
 def _assign_document_type(item: Dict[str, Any], doc_type: str) -> Dict[str, Any]:
     item["doc_type"] = doc_type
     item["type"] = doc_type
@@ -277,7 +337,7 @@ def _update_local_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[
 
 def _upsert_local_delivery(vault_document: Dict[str, Any]) -> Dict[str, Any]:
     delivery_document = _build_delivery_document(vault_document)
-    items = _load_local_items()
+    items = _load_local_delivery_items()
     for index, item in enumerate(items):
         if str(item.get("doc_type", "")).strip().lower() != "delivery":
             continue
@@ -287,16 +347,16 @@ def _upsert_local_delivery(vault_document: Dict[str, Any]) -> Dict[str, Any]:
         updated_item.update(delivery_document)
         _assign_document_type(updated_item, "delivery")
         items[index] = updated_item
-        _save_local_items(items)
+        _save_local_delivery_items(items)
         return updated_item
 
     items.append(delivery_document)
-    _save_local_items(items)
+    _save_local_delivery_items(items)
     return delivery_document
 
 
 def _get_local_user(user_id: str) -> Optional[Dict[str, Any]]:
-    items = _load_local_items()
+    items = _load_local_user_items()
     return next(
         (
             item
@@ -310,6 +370,8 @@ def _get_local_user(user_id: str) -> Optional[Dict[str, Any]]:
 
 _cosmos_client: Optional[CosmosClient] = None
 _vaults_container = None
+_users_container = None
+_deliveries_container = None
 _audit_container = None
 
 
@@ -349,6 +411,44 @@ def _get_azure_audit_container():
     return _audit_container
 
 
+def _get_azure_users_container():
+    global _cosmos_client
+    global _users_container
+
+    if _users_container is not None:
+        return _users_container
+
+    connection_string = _get_required_env("COSMOS_CONNECTION_STRING")
+    database_name = os.getenv("COSMOS_DATABASE_NAME", "last-writes-db")
+    container_name = os.getenv("COSMOS_USERS_CONTAINER", "users")
+
+    if _cosmos_client is None:
+        _cosmos_client = CosmosClient.from_connection_string(connection_string)
+
+    database_client = _cosmos_client.get_database_client(database_name)
+    _users_container = database_client.get_container_client(container_name)
+    return _users_container
+
+
+def _get_azure_deliveries_container():
+    global _cosmos_client
+    global _deliveries_container
+
+    if _deliveries_container is not None:
+        return _deliveries_container
+
+    connection_string = _get_required_env("COSMOS_CONNECTION_STRING")
+    database_name = os.getenv("COSMOS_DATABASE_NAME", "last-writes-db")
+    container_name = os.getenv("COSMOS_DELIVERIES_CONTAINER", "deliveries")
+
+    if _cosmos_client is None:
+        _cosmos_client = CosmosClient.from_connection_string(connection_string)
+
+    database_client = _cosmos_client.get_database_client(database_name)
+    _deliveries_container = database_client.get_container_client(container_name)
+    return _deliveries_container
+
+
 def _get_azure_vault(vault_id: str) -> Optional[Dict[str, Any]]:
     container = _get_azure_cosmos_container()
     query = "SELECT * FROM c WHERE c.id = @vault_id AND c.doc_type = 'vault'"
@@ -364,7 +464,7 @@ def _get_azure_vault(vault_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _get_azure_user(user_id: str) -> Optional[Dict[str, Any]]:
-    container = _get_azure_cosmos_container()
+    container = _get_azure_users_container()
     query = "SELECT * FROM c WHERE c.id = @user_id AND c.doc_type = 'user'"
     parameters = [{"name": "@user_id", "value": user_id}]
     items = list(
@@ -389,7 +489,7 @@ def _update_azure_vault(vault_id: str, update_data: Dict[str, Any]) -> Optional[
 
 
 def _upsert_azure_delivery(vault_document: Dict[str, Any]) -> Dict[str, Any]:
-    container = _get_azure_cosmos_container()
+    container = _get_azure_deliveries_container()
     delivery_document = _build_delivery_document(vault_document)
     query = "SELECT * FROM c WHERE c.doc_type = 'delivery' AND c.vault_id = @vault_id"
     parameters = [{"name": "@vault_id", "value": delivery_document["vault_id"]}]
@@ -458,9 +558,9 @@ def _audit_partition_key(vault_id: Optional[str], owner_user_id: str) -> str:
 
 
 def _record_local_audit_event(audit_item: Dict[str, Any]) -> None:
-    items = _load_local_items()
+    items = _load_local_audit_items()
     items.append(audit_item)
-    _save_local_items(items)
+    _save_local_audit_items(items)
 
 
 def _record_azure_audit_event(audit_item: Dict[str, Any]) -> None:

@@ -279,6 +279,7 @@ class CosmosService:
         self._database_name = os.getenv("COSMOS_DATABASE_NAME", "last-writes-db")
         self._vault_container_name = os.getenv("COSMOS_VAULTS_CONTAINER", "vaults")
         self._user_container_name = os.getenv("COSMOS_USERS_CONTAINER", "users")
+        self._delivery_container_name = os.getenv("COSMOS_DELIVERIES_CONTAINER", "deliveries")
         self._audit_container_name = os.getenv("COSMOS_AUDIT_CONTAINER", "audit_logs")
         throughput_value = os.getenv("COSMOS_CONTAINER_THROUGHPUT", "400")
         self._container_throughput = int(throughput_value)
@@ -287,6 +288,7 @@ class CosmosService:
         self._database = None
         self._vault_container = None
         self._user_container = None
+        self._delivery_container = None
         self._audit_container = None
 
     def initialize(self) -> None:
@@ -305,16 +307,22 @@ class CosmosService:
                 partition_key=PartitionKey(path="/user_id"),
                 offer_throughput=self._container_throughput,
             )
+            self._delivery_container = self._database.create_container_if_not_exists(
+                id=self._delivery_container_name,
+                partition_key=PartitionKey(path="/user_id"),
+                offer_throughput=self._container_throughput,
+            )
             self._audit_container = self._database.create_container_if_not_exists(
                 id=self._audit_container_name,
                 partition_key=PartitionKey(path="/partition_key"),
                 offer_throughput=self._container_throughput,
             )
             logger.info(
-                "Cosmos DB initialized. database=%s users_container=%s vaults_container=%s audit_container=%s",
+                "Cosmos DB initialized. database=%s users_container=%s vaults_container=%s deliveries_container=%s audit_container=%s",
                 self._database_name,
                 self._user_container_name,
                 self._vault_container_name,
+                self._delivery_container_name,
                 self._audit_container_name,
             )
         except Exception:
@@ -330,6 +338,11 @@ class CosmosService:
         if self._user_container is None:
             raise RuntimeError("CosmosService is not initialized.")
         return self._user_container
+
+    def _get_delivery_container(self):
+        if self._delivery_container is None:
+            raise RuntimeError("CosmosService is not initialized.")
+        return self._delivery_container
 
     def _get_container(self):
         return self._get_vault_container()
@@ -813,7 +826,7 @@ class CosmosService:
             )
             existing_delivery = self.get_delivery_by_vault_id(vault_id)
             if existing_delivery is not None:
-                container.delete_item(
+                self._get_delivery_container().delete_item(
                     item=existing_delivery["id"],
                     partition_key=existing_delivery["user_id"],
                 )
@@ -824,7 +837,7 @@ class CosmosService:
             raise
 
     def get_delivery_by_vault_id(self, vault_id: str) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
+        container = self._get_delivery_container()
         query = "SELECT * FROM c WHERE c.doc_type = 'delivery' AND c.vault_id = @vault_id"
         parameters = [{"name": "@vault_id", "value": vault_id}]
 
@@ -845,7 +858,7 @@ class CosmosService:
         return items[0]
 
     def upsert_delivery(self, vault_document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        container = self._get_container()
+        container = self._get_delivery_container()
         delivery_document = _build_delivery_document(vault_document)
         if delivery_document is None:
             return None
@@ -902,8 +915,43 @@ class CosmosService:
                 logger.exception("Failed migrating legacy user document id=%s", user_id)
                 raise
 
+    def _migrate_legacy_delivery_documents(self) -> None:
+        vault_container = self._get_vault_container()
+        delivery_container = self._get_delivery_container()
+        try:
+            legacy_delivery_items = list(
+                vault_container.query_items(
+                    query="SELECT * FROM c WHERE c.doc_type = 'delivery'",
+                    enable_cross_partition_query=True,
+                )
+            )
+        except exceptions.CosmosHttpResponseError:
+            logger.exception("Cosmos DB scan failed during legacy delivery migration.")
+            raise
+
+        for legacy_delivery_item in legacy_delivery_items:
+            delivery_id = str(legacy_delivery_item.get("id", "")).strip()
+            delivery_partition_key = str(legacy_delivery_item.get("user_id", "")).strip()
+            if not delivery_id or not delivery_partition_key:
+                continue
+
+            try:
+                existing_delivery = self.get_delivery_by_vault_id(
+                    str(legacy_delivery_item.get("vault_id", "")).strip()
+                )
+                if existing_delivery is None:
+                    delivery_container.create_item(body=legacy_delivery_item)
+                vault_container.delete_item(
+                    item=legacy_delivery_item["id"],
+                    partition_key=delivery_partition_key,
+                )
+            except exceptions.CosmosHttpResponseError:
+                logger.exception("Failed migrating legacy delivery document id=%s", delivery_id)
+                raise
+
     def backfill_document_shapes(self) -> None:
         self._migrate_legacy_user_documents()
+        self._migrate_legacy_delivery_documents()
         container = self._get_container()
         try:
             items = list(container.query_items(query="SELECT * FROM c", enable_cross_partition_query=True))

@@ -257,18 +257,32 @@ class LocalCosmosService:
         self,
         data_file: Optional[str] = None,
         user_data_file: Optional[str] = None,
+        delivery_data_file: Optional[str] = None,
+        audit_data_file: Optional[str] = None,
     ) -> None:
         default_data_dir = Path(__file__).resolve().parents[1] / ".local_data"
         default_vaults_path = default_data_dir / "vaults.json"
         default_users_path = default_data_dir / "users.json"
+        default_deliveries_path = default_data_dir / "deliveries.json"
+        default_audit_path = default_data_dir / "audit_logs.json"
 
         configured_vaults_path = data_file or os.getenv("LOCAL_COSMOS_DATA_FILE")
         configured_users_path = user_data_file or os.getenv("LOCAL_COSMOS_USERS_DATA_FILE")
+        configured_deliveries_path = delivery_data_file or os.getenv("LOCAL_COSMOS_DELIVERIES_DATA_FILE")
+        configured_audit_path = audit_data_file or os.getenv("LOCAL_COSMOS_AUDIT_DATA_FILE")
         if not configured_users_path and configured_vaults_path:
             configured_users_path = str(Path(configured_vaults_path).with_name("users.json"))
+        if not configured_deliveries_path and configured_vaults_path:
+            configured_deliveries_path = str(Path(configured_vaults_path).with_name("deliveries.json"))
+        if not configured_audit_path and configured_vaults_path:
+            configured_audit_path = str(Path(configured_vaults_path).with_name("audit_logs.json"))
 
         self._data_file = Path(configured_vaults_path) if configured_vaults_path else default_vaults_path
         self._user_data_file = Path(configured_users_path) if configured_users_path else default_users_path
+        self._delivery_data_file = (
+            Path(configured_deliveries_path) if configured_deliveries_path else default_deliveries_path
+        )
+        self._audit_data_file = Path(configured_audit_path) if configured_audit_path else default_audit_path
 
     def initialize(self) -> None:
         self._data_file.parent.mkdir(parents=True, exist_ok=True)
@@ -277,7 +291,15 @@ class LocalCosmosService:
         self._user_data_file.parent.mkdir(parents=True, exist_ok=True)
         if not self._user_data_file.exists():
             self._user_data_file.write_text("[]", encoding="utf-8")
+        self._delivery_data_file.parent.mkdir(parents=True, exist_ok=True)
+        if not self._delivery_data_file.exists():
+            self._delivery_data_file.write_text("[]", encoding="utf-8")
+        self._audit_data_file.parent.mkdir(parents=True, exist_ok=True)
+        if not self._audit_data_file.exists():
+            self._audit_data_file.write_text("[]", encoding="utf-8")
         self._migrate_legacy_user_items()
+        self._migrate_legacy_delivery_items()
+        self._migrate_legacy_audit_items()
 
     @staticmethod
     def _read_json_file(path: Path) -> List[Dict[str, Any]]:
@@ -300,6 +322,20 @@ class LocalCosmosService:
 
     def _write_user_items(self, items: List[Dict[str, Any]]) -> None:
         self._user_data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+    def _read_delivery_items(self) -> List[Dict[str, Any]]:
+        self.initialize()
+        return self._read_json_file(self._delivery_data_file)
+
+    def _write_delivery_items(self, items: List[Dict[str, Any]]) -> None:
+        self._delivery_data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+    def _read_audit_items(self) -> List[Dict[str, Any]]:
+        self.initialize()
+        return self._read_json_file(self._audit_data_file)
+
+    def _write_audit_items(self, items: List[Dict[str, Any]]) -> None:
+        self._audit_data_file.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
     def _migrate_legacy_user_items(self) -> None:
         vault_items = self._read_json_file(self._data_file)
@@ -329,6 +365,68 @@ class LocalCosmosService:
                 item
                 for item in vault_items
                 if _document_type(item, default="") != "user"
+            ]
+        )
+
+    def _migrate_legacy_delivery_items(self) -> None:
+        vault_items = self._read_json_file(self._data_file)
+        legacy_delivery_items = [
+            item
+            for item in vault_items
+            if _document_type(item, default="") == "delivery"
+        ]
+        if not legacy_delivery_items:
+            return
+
+        delivery_items = self._read_json_file(self._delivery_data_file)
+        existing_delivery_ids = {
+            str(item.get("id", "")).strip()
+            for item in delivery_items
+            if str(item.get("id", "")).strip()
+        }
+        for legacy_delivery_item in legacy_delivery_items:
+            legacy_delivery_id = str(legacy_delivery_item.get("id", "")).strip()
+            if legacy_delivery_id and legacy_delivery_id not in existing_delivery_ids:
+                delivery_items.append(dict(legacy_delivery_item))
+                existing_delivery_ids.add(legacy_delivery_id)
+
+        self._write_delivery_items(delivery_items)
+        self._write_items(
+            [
+                item
+                for item in vault_items
+                if _document_type(item, default="") != "delivery"
+            ]
+        )
+
+    def _migrate_legacy_audit_items(self) -> None:
+        vault_items = self._read_json_file(self._data_file)
+        legacy_audit_items = [
+            item
+            for item in vault_items
+            if _document_type(item, default="") == "audit_log"
+        ]
+        if not legacy_audit_items:
+            return
+
+        audit_items = self._read_json_file(self._audit_data_file)
+        existing_audit_ids = {
+            str(item.get("id", "")).strip()
+            for item in audit_items
+            if str(item.get("id", "")).strip()
+        }
+        for legacy_audit_item in legacy_audit_items:
+            legacy_audit_id = str(legacy_audit_item.get("id", "")).strip()
+            if legacy_audit_id and legacy_audit_id not in existing_audit_ids:
+                audit_items.append(dict(legacy_audit_item))
+                existing_audit_ids.add(legacy_audit_id)
+
+        self._write_audit_items(audit_items)
+        self._write_items(
+            [
+                item
+                for item in vault_items
+                if _document_type(item, default="") != "audit_log"
             ]
         )
 
@@ -638,19 +736,26 @@ class LocalCosmosService:
             item
             for item in items
             if str(item.get("id")) != vault_id
-            and not (
-                _document_type(item, default="") == "delivery"
-                and str(item.get("vault_id", "")).strip() == vault_id
-            )
         ]
         if len(remaining) == len(items):
             return False
 
         self._write_items(remaining)
+        delivery_items = self._read_delivery_items()
+        remaining_deliveries = [
+            item
+            for item in delivery_items
+            if not (
+                _document_type(item, default="") == "delivery"
+                and str(item.get("vault_id", "")).strip() == vault_id
+            )
+        ]
+        if len(remaining_deliveries) != len(delivery_items):
+            self._write_delivery_items(remaining_deliveries)
         return True
 
     def get_delivery_by_vault_id(self, vault_id: str) -> Optional[Dict[str, Any]]:
-        items = self._read_items()
+        items = self._read_delivery_items()
         return next(
             (
                 item
@@ -666,7 +771,7 @@ class LocalCosmosService:
         if delivery_document is None:
             return None
 
-        items = self._read_items()
+        items = self._read_delivery_items()
         for index, item in enumerate(items):
             if _document_type(item, default="") != "delivery":
                 continue
@@ -677,11 +782,11 @@ class LocalCosmosService:
             updated_item.update(delivery_document)
             _assign_document_type(updated_item, "delivery")
             items[index] = updated_item
-            self._write_items(items)
+            self._write_delivery_items(items)
             return updated_item
 
         items.append(delivery_document)
-        self._write_items(items)
+        self._write_delivery_items(items)
         return delivery_document
 
     def backfill_document_shapes(self) -> None:
@@ -702,6 +807,38 @@ class LocalCosmosService:
 
         if changed:
             self._write_items(items)
+
+        delivery_items = self._read_delivery_items()
+        delivery_changed = False
+        for index, item in enumerate(delivery_items):
+            normalized_type = _document_type(item)
+            needs_update = (
+                str(item.get("doc_type", "")).strip().lower() != normalized_type
+                or str(item.get("type", "")).strip().lower() != normalized_type
+            )
+            if needs_update:
+                patched_item = dict(item)
+                _assign_document_type(patched_item, normalized_type)
+                delivery_items[index] = patched_item
+                delivery_changed = True
+        if delivery_changed:
+            self._write_delivery_items(delivery_items)
+
+        audit_items = self._read_audit_items()
+        audit_changed = False
+        for index, item in enumerate(audit_items):
+            normalized_type = _document_type(item)
+            needs_update = (
+                str(item.get("doc_type", "")).strip().lower() != normalized_type
+                or str(item.get("type", "")).strip().lower() != normalized_type
+            )
+            if needs_update:
+                patched_item = dict(item)
+                _assign_document_type(patched_item, normalized_type)
+                audit_items[index] = patched_item
+                audit_changed = True
+        if audit_changed:
+            self._write_audit_items(audit_items)
 
         for item in self._read_items():
             if _document_type(item) == "vault":
@@ -877,7 +1014,7 @@ class LocalCosmosService:
         metadata: Optional[Dict[str, Any]] = None,
         event_at: Optional[str] = None,
     ) -> Dict[str, Any]:
-        items = self._read_items()
+        items = self._read_audit_items()
         audit_item = {
             "id": str(uuid4()),
             "partition_key": self._audit_partition_key(vault_id, owner_user_id),
@@ -892,7 +1029,7 @@ class LocalCosmosService:
         }
         _assign_document_type(audit_item, "audit_log")
         items.append(audit_item)
-        self._write_items(items)
+        self._write_audit_items(items)
         return audit_item
 
     def list_vault_audit_events(
@@ -906,7 +1043,7 @@ class LocalCosmosService:
         partition_key = self._audit_partition_key(vault_id, owner_user_id)
         items = [
             item
-            for item in self._read_items()
+            for item in self._read_audit_items()
             if _document_type(item, default="") == "audit_log"
             and str(item.get("partition_key", "")) == partition_key
             and str(item.get("owner_user_id", "")) == owner_user_id

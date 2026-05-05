@@ -264,7 +264,13 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(len(delivered_vault["delivery_packages"]), 2)
         internal_vault_id = self.backend_main.app.state.cosmos_service.get_vault_by_short_id(vault_id)["id"]
 
-        stored_items = json.loads(Path(os.environ["LOCAL_COSMOS_DATA_FILE"]).read_text(encoding="utf-8"))
+        deliveries_path = Path(
+            os.environ.get(
+                "LOCAL_COSMOS_DELIVERIES_DATA_FILE",
+                str(Path(os.environ["LOCAL_COSMOS_DATA_FILE"]).with_name("deliveries.json")),
+            )
+        )
+        stored_items = json.loads(deliveries_path.read_text(encoding="utf-8"))
         delivery_document = next(
             item
             for item in stored_items
