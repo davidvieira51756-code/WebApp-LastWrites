@@ -3,11 +3,28 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 from azure.communication.email import EmailClient
 
 logger = logging.getLogger(__name__)
+
+
+def _format_timestamp(value: str) -> str:
+    normalized_value = str(value or "").strip()
+    if not normalized_value:
+        return normalized_value
+
+    iso_match = normalized_value[:19]
+    if len(iso_match) == 19 and iso_match[10] == "T":
+        return f"{iso_match[:10]}, {iso_match[11:19]}"
+
+    try:
+        parsed = datetime.fromisoformat(normalized_value.replace("Z", "+00:00"))
+        return parsed.strftime("%Y-%m-%d, %H:%M:%S")
+    except ValueError:
+        return normalized_value
 
 
 @dataclass(frozen=True)
@@ -225,13 +242,15 @@ class EmailService:
         grace_period_expires_at: str,
     ) -> EmailSendResult:
         vault_url = self.build_owner_vault_url(public_vault_id)
+        formatted_grace_period_started_at = _format_timestamp(grace_period_started_at)
+        formatted_grace_period_expires_at = _format_timestamp(grace_period_expires_at)
         subject = f"[Last Writes] Vault '{vault_name}' entered grace period"
         plain_text = "\n".join(
             [
                 f"Your vault '{vault_name}' has entered grace period.",
                 f"Activation threshold reached by: {requester_label}",
-                f"Grace period started at: {grace_period_started_at}",
-                f"Grace period expires at: {grace_period_expires_at}",
+                f"Grace period started at: {formatted_grace_period_started_at}",
+                f"Grace period expires at: {formatted_grace_period_expires_at}",
                 f"Review the vault after signing in: {vault_url}",
             ]
         )
@@ -239,8 +258,8 @@ class EmailService:
             [
                 f"<p>Your vault <strong>{vault_name}</strong> has entered grace period.</p>",
                 f"<p>Activation threshold reached by: {requester_label}</p>",
-                f"<p>Grace period started at: {grace_period_started_at}</p>",
-                f"<p>Grace period expires at: {grace_period_expires_at}</p>",
+                f"<p>Grace period started at: {formatted_grace_period_started_at}</p>",
+                f"<p>Grace period expires at: {formatted_grace_period_expires_at}</p>",
                 f'<p>Review the vault after signing in: <a href="{vault_url}">{vault_url}</a></p>',
             ]
         )

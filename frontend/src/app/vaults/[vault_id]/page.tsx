@@ -90,24 +90,6 @@ function normalizeVaultId(rawVaultId: string | string[] | undefined): string {
   return rawVaultId ?? "";
 }
 
-function formatBytes(sizeInBytes: number | null | undefined): string {
-  if (typeof sizeInBytes !== "number" || Number.isNaN(sizeInBytes) || sizeInBytes < 0) {
-    return "Unknown";
-  }
-  if (sizeInBytes < 1024) {
-    return `${sizeInBytes} B`;
-  }
-
-  const units = ["KB", "MB", "GB", "TB"];
-  let size = sizeInBytes / 1024;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  return `${size.toFixed(1)} ${units[unitIndex]}`;
-}
-
 function statusBadgeVariant(
   status: string,
 ): "default" | "success" | "warning" | "error" {
@@ -130,11 +112,16 @@ function formatStatusLabel(status: string): string {
 
 function formatIsoDate(value: string | null | undefined): string {
   if (!value) return "—";
+  const isoMatch = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/);
+  if (isoMatch) {
+    return `${isoMatch[1]}, ${isoMatch[2]}`;
+  }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
     return value;
   }
-  return parsed.toLocaleString();
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}, ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
 }
 
 function getDownloadFileName(response: Response, fallbackName: string): string {
@@ -1208,8 +1195,8 @@ export default function VaultDetailsPage() {
               <Card variant="elevated" style={{ gap: t.space.s }}>
                 <Text variant="h3">Delivery Package</Text>
                 <Text variant="bodySmall" color="secondary">
-                  When the grace period expires, the worker decrypts the vault files, generates a
-                  cover PDF for each recipient, and publishes separate ZIP packages for delivery.
+                  When the grace period expires, the vault contents are prepared for each
+                  recipient and the final delivery ZIP packages become available here.
                 </Text>
 
                 {vault?.delivery_error ? (
@@ -1515,7 +1502,6 @@ export default function VaultDetailsPage() {
                       >
                         <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
                           <Text variant="label">{fileItem.file_name}</Text>
-                          <Text variant="caption" color="muted">File ID: {fileItem.id}</Text>
                         </div>
                         <Button
                           type="button"
@@ -1543,19 +1529,10 @@ export default function VaultDetailsPage() {
                         }}
                       >
                         <Text variant="caption" color="secondary">
-                          Size: {formatBytes(fileItem.size_bytes)}
-                        </Text>
-                        <Text variant="caption" color="secondary">
-                          Stored: {formatBytes(fileItem.ciphertext_size_bytes)}
-                        </Text>
-                        <Text variant="caption" color="secondary">
                           Type: {fileItem.content_type || "Unknown"}
                         </Text>
                         <Text variant="caption" color="secondary">
-                          Uploaded: {fileItem.uploaded_at || "Unknown"}
-                        </Text>
-                        <Text variant="caption" color="secondary">
-                          Encryption: {fileItem.encrypted ? fileItem.algorithm || "Encrypted" : "Legacy plaintext"}
+                          Uploaded: {formatIsoDate(fileItem.uploaded_at)}
                         </Text>
                         <Text variant="caption" color="secondary">
                           Recipients: {fileItem.recipient_emails?.length ? fileItem.recipient_emails.join(", ") : "No recipients assigned"}

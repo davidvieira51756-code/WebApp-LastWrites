@@ -82,6 +82,23 @@ def _date_from_iso(raw_value: str) -> str:
         return raw_value.split("T", 1)[0]
 
 
+def _format_timestamp(raw_value: str) -> str:
+    normalized_value = str(raw_value or "").strip()
+    if not normalized_value:
+        return normalized_value
+
+    iso_match = normalized_value[:19]
+    if len(iso_match) == 19 and iso_match[10] == "T":
+        return f"{iso_match[:10]}, {iso_match[11:19]}"
+
+    try:
+        return datetime.fromisoformat(normalized_value.replace("Z", "+00:00")).strftime(
+            "%Y-%m-%d, %H:%M:%S"
+        )
+    except ValueError:
+        return normalized_value
+
+
 def _get_required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -632,13 +649,14 @@ def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
     vault_name = str(vault_document.get("name", "Unnamed Vault")).strip() or "Unnamed Vault"
     access_url = _recipient_access_url(public_vault_id) if public_vault_id else None
     delivered_at = str(vault_document.get("delivered_at", "")).strip() or _now_iso()
+    formatted_delivered_at = _format_timestamp(delivered_at)
     plain_text_lines = [
         f"The delivery package for vault '{vault_name}' is now available.",
-        f"Delivered at: {delivered_at}",
+        f"Delivered at: {formatted_delivered_at}",
     ]
     html_lines = [
         f"<p>The delivery package for vault <strong>{vault_name}</strong> is now available.</p>",
-        f"<p>Delivered at: {delivered_at}</p>",
+        f"<p>Delivered at: {formatted_delivered_at}</p>",
     ]
     if access_url:
         plain_text_lines.append(f"Access it here after signing in: {access_url}")
