@@ -24,6 +24,8 @@ from pydantic import BaseModel, Field
 try:
     from backend.models.auth import (
         AuthChangePasswordRequest,
+        AuthCryptoProfileResponse,
+        AuthCryptoProfileUpdateRequest,
         AuthDeleteAccountRequest,
         AuthLoginRequest,
         AuthMeResponse,
@@ -62,6 +64,8 @@ try:
 except ModuleNotFoundError:
     from models.auth import (
         AuthChangePasswordRequest,
+        AuthCryptoProfileResponse,
+        AuthCryptoProfileUpdateRequest,
         AuthDeleteAccountRequest,
         AuthLoginRequest,
         AuthMeResponse,
@@ -111,8 +115,10 @@ SAFE_FILENAME_REGEX = re.compile(r"[^A-Za-z0-9._() -]+")
 SHORT_ID_ALPHABET = string.ascii_lowercase + string.digits
 FINAL_IMMUTABLE_VAULT_STATUSES = {"delivered", "delivered_archived"}
 FINAL_IMMUTABLE_VAULT_ERROR = "This vault has already been delivered and archived. It can no longer be modified."
-ZERO_KNOWLEDGE_FILE_SCHEMA_VERSION = 3
+ZERO_KNOWLEDGE_FILE_SCHEMA_VERSION = 4
 ZERO_KNOWLEDGE_KDF_ALGORITHM = "HKDF-SHA256"
+ZERO_KNOWLEDGE_OWNER_WRAP_ALGORITHM = "AES-256-GCM"
+ZERO_KNOWLEDGE_RECIPIENT_WRAP_ALGORITHM = "RSA-OAEP-256"
 DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES = {
     "application/json",
     "application/msword",
@@ -433,6 +439,58 @@ def normalize_recovery_key_verifier(value: Optional[str]) -> Optional[str]:
     return normalized_value
 
 
+def normalize_encryption_public_jwk(value: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(value, dict):
+        return None
+
+    normalized = {
+        "kty": str(value.get("kty", "")).strip(),
+        "alg": str(value.get("alg", "")).strip(),
+        "n": str(value.get("n", "")).strip(),
+        "e": str(value.get("e", "")).strip(),
+        "ext": str(value.get("ext", "true")).strip().lower(),
+        "key_ops": value.get("key_ops"),
+    }
+    if (
+        normalized["kty"] != "RSA"
+        or not normalized["n"]
+        or not normalized["e"]
+        or normalized["alg"] not in {"RSA-OAEP", "RSA-OAEP-256"}
+    ):
+        return None
+    return normalized
+
+
+def normalize_encrypted_private_key_bundle(value: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(value, dict):
+        return None
+
+    normalized = {
+        "schema_version": str(value.get("schema_version", "")).strip(),
+        "wrapping_algorithm": str(value.get("wrapping_algorithm", "")).strip(),
+        "kdf_algorithm": str(value.get("kdf_algorithm", "")).strip(),
+        "salt": str(value.get("salt", "")).strip(),
+        "iv": str(value.get("iv", "")).strip(),
+        "ciphertext": str(value.get("ciphertext", "")).strip(),
+    }
+    if (
+        normalized["schema_version"] != "1"
+        or normalized["wrapping_algorithm"] != "AES-256-GCM"
+        or normalized["kdf_algorithm"] != "PBKDF2-SHA256"
+        or not normalized["salt"]
+        or not normalized["iv"]
+        or not normalized["ciphertext"]
+    ):
+        return None
+    return normalized
+
+
+def user_has_document_encryption_key(user_item: Optional[Dict[str, Any]]) -> bool:
+    if not user_item:
+        return False
+    return bool(normalize_encryption_public_jwk(user_item.get("document_encryption_public_jwk")))
+
+
 def build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
     if not user_item:
         return None
@@ -627,19 +685,53 @@ def parse_recipient_emails_json(raw_value: Optional[str]) -> Optional[List[str]]
 
 
 def _normalize_zero_knowledge_metadata(raw_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    recipient_wrapped_keys_raw = raw_metadata.get("recipient_wrapped_keys", [])
+    if not isinstance(recipient_wrapped_keys_raw, list):
+        recipient_wrapped_keys_raw = []
+
+    normalized_recipient_wrapped_keys: List[Dict[str, str]] = []
+    seen_recipient_emails: set[str] = set()
+    for item in recipient_wrapped_keys_raw:
+        if not isinstance(item, dict):
+            continue
+        recipient_email = str(item.get("recipient_email", "")).strip().lower()
+        wrapped_file_key = str(item.get("wrapped_file_key", "")).strip()
+        algorithm = str(item.get("algorithm", ZERO_KNOWLEDGE_RECIPIENT_WRAP_ALGORITHM)).strip()
+        if (
+            not recipient_email
+            or not wrapped_file_key
+            or algorithm != ZERO_KNOWLEDGE_RECIPIENT_WRAP_ALGORITHM
+            or recipient_email in seen_recipient_emails
+        ):
+            continue
+        seen_recipient_emails.add(recipient_email)
+        normalized_recipient_wrapped_keys.append(
+            {
+                "recipient_email": recipient_email,
+                "wrapped_file_key": wrapped_file_key,
+                "algorithm": algorithm,
+            }
+        )
+
     normalized_metadata = {
         "encrypted": bool(raw_metadata.get("encrypted", True)),
         "zero_knowledge": bool(raw_metadata.get("zero_knowledge", True)),
         "algorithm": str(raw_metadata.get("algorithm", "")).strip(),
         "schema_version": int(raw_metadata.get("schema_version", 0) or 0),
-        "kdf_algorithm": str(raw_metadata.get("kdf_algorithm", "")).strip(),
-        "kdf_salt": str(raw_metadata.get("kdf_salt", "")).strip(),
         "iv": str(raw_metadata.get("iv", "")).strip(),
         "authentication_tag_appended": bool(raw_metadata.get("authentication_tag_appended", False)),
         "plaintext_sha256": str(raw_metadata.get("plaintext_sha256", "")).strip() or None,
         "ciphertext_sha256": str(raw_metadata.get("ciphertext_sha256", "")).strip() or None,
         "encryption_context": str(raw_metadata.get("encryption_context", "")).strip() or None,
         "plaintext_size_bytes": int(raw_metadata.get("plaintext_size_bytes", 0) or 0),
+        "owner_wrapped_file_key": str(raw_metadata.get("owner_wrapped_file_key", "")).strip() or None,
+        "owner_wrap_algorithm": str(raw_metadata.get("owner_wrap_algorithm", "")).strip(),
+        "owner_wrap_kdf_algorithm": str(raw_metadata.get("owner_wrap_kdf_algorithm", "")).strip(),
+        "owner_wrap_salt": str(raw_metadata.get("owner_wrap_salt", "")).strip() or None,
+        "owner_wrap_iv": str(raw_metadata.get("owner_wrap_iv", "")).strip() or None,
+        "recipient_wrapped_keys": normalized_recipient_wrapped_keys,
+        "kdf_algorithm": None,
+        "kdf_salt": None,
     }
 
     if not normalized_metadata["encrypted"] or not normalized_metadata["zero_knowledge"]:
@@ -648,14 +740,20 @@ def _normalize_zero_knowledge_metadata(raw_metadata: Dict[str, Any]) -> Dict[str
         raise ValueError("Zero-knowledge uploads must use AES-256-GCM.")
     if normalized_metadata["schema_version"] != ZERO_KNOWLEDGE_FILE_SCHEMA_VERSION:
         raise ValueError("Unsupported zero-knowledge file schema version.")
-    if normalized_metadata["kdf_algorithm"] != ZERO_KNOWLEDGE_KDF_ALGORITHM:
-        raise ValueError("Unsupported zero-knowledge key derivation algorithm.")
-    if not normalized_metadata["kdf_salt"] or not normalized_metadata["iv"]:
+    if not normalized_metadata["iv"]:
         raise ValueError("Zero-knowledge upload metadata is incomplete.")
     if not normalized_metadata["authentication_tag_appended"]:
         raise ValueError("Zero-knowledge uploads must include the authentication tag in ciphertext.")
     if normalized_metadata["plaintext_size_bytes"] < 1:
         raise ValueError("Zero-knowledge uploads must include the original plaintext size.")
+    if (
+        not normalized_metadata["owner_wrapped_file_key"]
+        or normalized_metadata["owner_wrap_algorithm"] != ZERO_KNOWLEDGE_OWNER_WRAP_ALGORITHM
+        or normalized_metadata["owner_wrap_kdf_algorithm"] != ZERO_KNOWLEDGE_KDF_ALGORITHM
+        or not normalized_metadata["owner_wrap_salt"]
+        or not normalized_metadata["owner_wrap_iv"]
+    ):
+        raise ValueError("Zero-knowledge owner key wrap metadata is incomplete.")
 
     return normalized_metadata
 
@@ -677,6 +775,31 @@ def parse_zero_knowledge_metadata_json(raw_value: Optional[str]) -> Optional[Dic
         raise ValueError("Zero-knowledge metadata payload must be a JSON object.")
 
     return _normalize_zero_knowledge_metadata(parsed_value)
+
+
+def validate_zero_knowledge_recipient_wraps(
+    metadata: Dict[str, Any],
+    *,
+    assigned_recipient_emails: List[str],
+) -> None:
+    wrapped_keys = metadata.get("recipient_wrapped_keys", [])
+    if not isinstance(wrapped_keys, list):
+        wrapped_keys = []
+
+    available_recipient_emails = {
+        str(item.get("recipient_email", "")).strip().lower()
+        for item in wrapped_keys
+        if isinstance(item, dict)
+    }
+    missing_recipient_emails = [
+        recipient_email
+        for recipient_email in assigned_recipient_emails
+        if recipient_email not in available_recipient_emails
+    ]
+    if missing_recipient_emails:
+        raise ValueError(
+            "Missing wrapped file keys for: " + ", ".join(sorted(missing_recipient_emails))
+        )
 
 
 def sanitize_filename(file_name: str) -> str:
@@ -868,10 +991,9 @@ def _list_delivery_files_for_actor(
             detail="The delivery files are not available for this recipient yet.",
         )
 
-    return [
-        file_item
-        for file_item in _list_vault_files(vault_item)
-        if normalized_email in (
+    allowed_files: List[Dict[str, Any]] = []
+    for file_item in _list_vault_files(vault_item):
+        recipient_emails = (
             [
                 str(candidate).strip().lower()
                 for candidate in file_item.get("recipient_emails", [])
@@ -879,7 +1001,28 @@ def _list_delivery_files_for_actor(
             if isinstance(file_item.get("recipient_emails"), list)
             else []
         )
-    ]
+        if normalized_email not in recipient_emails:
+            continue
+
+        sanitized_file_item = dict(file_item)
+        if bool(sanitized_file_item.get("zero_knowledge", False)):
+            sanitized_file_item["owner_wrapped_file_key"] = None
+            sanitized_file_item["owner_wrap_algorithm"] = None
+            sanitized_file_item["owner_wrap_kdf_algorithm"] = None
+            sanitized_file_item["owner_wrap_salt"] = None
+            sanitized_file_item["owner_wrap_iv"] = None
+            wrapped_keys = sanitized_file_item.get("recipient_wrapped_keys", [])
+            if not isinstance(wrapped_keys, list):
+                wrapped_keys = []
+            sanitized_file_item["recipient_wrapped_keys"] = [
+                item
+                for item in wrapped_keys
+                if isinstance(item, dict)
+                and str(item.get("recipient_email", "")).strip().lower() == normalized_email
+            ]
+        allowed_files.append(sanitized_file_item)
+
+    return allowed_files
 
 
 def _get_delivery_file_for_actor(
@@ -1512,6 +1655,70 @@ def update_current_user_profile(
     )
 
 
+@app.get("/auth/crypto-profile", response_model=AuthCryptoProfileResponse)
+def get_current_user_crypto_profile(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> AuthCryptoProfileResponse:
+    return AuthCryptoProfileResponse(
+        initialized=user_has_document_encryption_key(current_user),
+        encryption_public_jwk=normalize_encryption_public_jwk(
+            current_user.get("document_encryption_public_jwk")
+        ),
+        encrypted_private_key_bundle=normalize_encrypted_private_key_bundle(
+            current_user.get("document_encrypted_private_key_bundle")
+        ),
+    )
+
+
+@app.put("/auth/crypto-profile", response_model=AuthCryptoProfileResponse)
+def update_current_user_crypto_profile(
+    payload: AuthCryptoProfileUpdateRequest,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> AuthCryptoProfileResponse:
+    cosmos_service = get_cosmos_service(request)
+    user_id = str(current_user.get("id", "")).strip()
+
+    public_jwk = normalize_encryption_public_jwk(payload.encryption_public_jwk)
+    private_key_bundle = normalize_encrypted_private_key_bundle(payload.encrypted_private_key_bundle)
+    if public_jwk is None or private_key_bundle is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid document encryption key profile is required.",
+        )
+
+    try:
+        updated_user = cosmos_service.update_user(
+            user_id,
+            {
+                "document_encryption_public_jwk": public_jwk,
+                "document_encrypted_private_key_bundle": private_key_bundle,
+            },
+        )
+    except Exception:
+        logger.exception("Failed to update crypto profile. user_id=%s", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update crypto profile.",
+        ) from None
+
+    if updated_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User account was not found.",
+        )
+
+    return AuthCryptoProfileResponse(
+        initialized=user_has_document_encryption_key(updated_user),
+        encryption_public_jwk=normalize_encryption_public_jwk(
+            updated_user.get("document_encryption_public_jwk")
+        ),
+        encrypted_private_key_bundle=normalize_encrypted_private_key_bundle(
+            updated_user.get("document_encrypted_private_key_bundle")
+        ),
+    )
+
+
 @app.post("/auth/me/request-password-reset")
 def request_current_user_password_reset(
     payload: PasswordResetEmailRequest,
@@ -1854,6 +2061,7 @@ def _build_recipient_vault_summary(
     )
 
     owner_display_name = build_user_display_name(vault_item.get("owner_profile"))
+    recipient_user = vault_item.get("recipient_user")
     return RecipientVaultSummary(
         id=str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")),
         name=str(vault_item.get("name", "")),
@@ -1870,7 +2078,7 @@ def _build_recipient_vault_summary(
         grace_period_expires_at=vault_item.get("grace_period_expires_at"),
         delivered_at=vault_item.get("delivered_at"),
         delivery_available=recipient_delivery_available or bool(vault_item.get("delivery_blob_name")),
-        recovery_key_verifier=normalize_recovery_key_verifier(vault_item.get("recovery_key_verifier")),
+        has_document_encryption_key=user_has_document_encryption_key(recipient_user),
     )
 
 
@@ -1896,6 +2104,7 @@ def list_incoming_vaults(
             owner_id: cosmos_service.get_user_by_id(owner_id)
             for owner_id in owner_ids
         }
+        recipient_user = cosmos_service.get_user_by_email(recipient_email)
     except Exception:
         logger.exception(
             "Unhandled error while listing incoming vaults for recipient=%s",
@@ -1908,7 +2117,11 @@ def list_incoming_vaults(
 
     return [
         _build_recipient_vault_summary(
-            {**vault_item, "owner_profile": owner_profiles.get(str(vault_item.get("user_id", "")).strip())},
+            {
+                **vault_item,
+                "owner_profile": owner_profiles.get(str(vault_item.get("user_id", "")).strip()),
+                "recipient_user": recipient_user,
+            },
             recipient_email,
         )
         for vault_item in vault_items
@@ -2095,6 +2308,7 @@ def get_vault_activation_summary(
 
     try:
         vault_item = resolve_vault_by_public_id(cosmos_service, vault_id)
+        recipient_user = cosmos_service.get_user_by_email(recipient_email)
         owner_profile = (
             None
             if vault_item is None
@@ -2123,7 +2337,7 @@ def get_vault_activation_summary(
         )
 
     return _build_recipient_vault_summary(
-        {**vault_item, "owner_profile": owner_profile},
+        {**vault_item, "owner_profile": owner_profile, "recipient_user": recipient_user},
         recipient_email,
     )
 
@@ -2467,6 +2681,45 @@ def list_vault_recipients(
     }
 
 
+@app.get("/vaults/{vault_id}/recipient-crypto-directory")
+def list_vault_recipient_crypto_directory(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    cosmos_service = get_cosmos_service(request)
+    vault_item = get_owned_vault_or_404(
+        cosmos_service=cosmos_service,
+        public_vault_id=vault_id,
+        user_id=str(current_user.get("id", "")),
+    )
+
+    recipients = vault_item.get("recipients", [])
+    if not isinstance(recipients, list):
+        recipients = []
+
+    directory = []
+    for recipient in recipients:
+        recipient_email = get_recipient_email(recipient)
+        user_item = cosmos_service.get_user_by_email(recipient_email) if recipient_email else None
+        public_jwk = normalize_encryption_public_jwk(
+            None if user_item is None else user_item.get("document_encryption_public_jwk")
+        )
+        directory.append(
+            {
+                "email": recipient_email,
+                "can_activate": get_recipient_can_activate(recipient),
+                "has_document_encryption_key": public_jwk is not None,
+                "document_encryption_public_jwk": public_jwk,
+            }
+        )
+
+    return {
+        "vault_id": str(vault_item.get("short_id", "")).strip() or vault_id,
+        "recipients": directory,
+    }
+
+
 @app.post("/vaults/{vault_id}/recipients")
 def add_vault_recipient(
     vault_id: str,
@@ -2729,7 +2982,6 @@ def list_delivery_files(
     return DeliveryFileAccessResponse(
         vault_id=str(vault_item.get("short_id", "")).strip() or vault_id,
         zero_knowledge_enabled=bool(vault_item.get("zero_knowledge_enabled", False)),
-        recovery_key_verifier=normalize_recovery_key_verifier(vault_item.get("recovery_key_verifier")),
         files=allowed_files,
     )
 
@@ -2920,6 +3172,18 @@ def update_vault_file_recipients(
             payload.recipient_emails,
             vault_item.get("recipients", []),
         )
+        existing_recipient_emails = (
+            normalize_file_recipient_emails(
+                file_metadata.get("recipient_emails"),
+                vault_item.get("recipients", []),
+            )
+            if bool(file_metadata.get("zero_knowledge", False))
+            else []
+        )
+        if bool(file_metadata.get("zero_knowledge", False)) and assigned_recipient_emails != existing_recipient_emails:
+            raise ValueError(
+                "Recipient assignments for zero-knowledge files are fixed at upload time. Re-upload the file to change them."
+            )
         existing_files = vault_item.get("files", [])
         if not isinstance(existing_files, list):
             existing_files = []
@@ -3049,6 +3313,10 @@ async def upload_vault_file(
         )
 
         if zero_knowledge_metadata is not None:
+            validate_zero_knowledge_recipient_wraps(
+                zero_knowledge_metadata,
+                assigned_recipient_emails=assigned_recipient_emails,
+            )
             ciphertext_bytes = upload_bytes
             uploaded_blob_metadata = blob_service.upload_bytes(
                 vault_id=internal_vault_id,

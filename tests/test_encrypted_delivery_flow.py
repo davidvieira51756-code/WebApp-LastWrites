@@ -155,47 +155,137 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         return b64url_encode(digest.finalize())
 
     @staticmethod
-    def _encrypt_zero_knowledge_payload(plaintext: bytes, recovery_key: bytes, vault_id: str) -> dict:
-        salt = secrets.token_bytes(16)
-        iv = secrets.token_bytes(12)
-        aes_key = HKDF(
+    def _public_jwk_from_private_key(private_key: rsa.RSAPrivateKey) -> dict[str, str]:
+        public_numbers = private_key.public_key().public_numbers()
+        modulus = public_numbers.n.to_bytes((public_numbers.n.bit_length() + 7) // 8, "big")
+        exponent = public_numbers.e.to_bytes((public_numbers.e.bit_length() + 7) // 8, "big")
+        return {
+            "kty": "RSA",
+            "alg": "RSA-OAEP-256",
+            "n": b64url_encode(modulus),
+            "e": b64url_encode(exponent),
+            "ext": "true",
+            "key_ops": ["encrypt"],
+        }
+
+    def _install_document_crypto_profile(self, token: str, public_jwk: dict[str, str]) -> None:
+        response = self.client.put(
+            "/auth/crypto-profile",
+            headers=self._auth_headers(token),
+            json={
+                "encryption_public_jwk": public_jwk,
+                "encrypted_private_key_bundle": {
+                    "schema_version": "1",
+                    "wrapping_algorithm": "AES-256-GCM",
+                    "kdf_algorithm": "PBKDF2-SHA256",
+                    "salt": b64url_encode(secrets.token_bytes(16)),
+                    "iv": b64url_encode(secrets.token_bytes(12)),
+                    "ciphertext": b64url_encode(secrets.token_bytes(128)),
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    @staticmethod
+    def _encrypt_zero_knowledge_payload(
+        plaintext: bytes,
+        recovery_key: bytes,
+        vault_id: str,
+        *,
+        recipient_public_keys: list[dict[str, object]] | None = None,
+    ) -> dict:
+        file_key = secrets.token_bytes(32)
+        file_iv = secrets.token_bytes(12)
+        owner_wrap_salt = secrets.token_bytes(16)
+        owner_wrap_iv = secrets.token_bytes(12)
+        owner_wrap_key = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=salt,
-            info=f"lastwrites:vault-file:{vault_id}".encode("utf-8"),
+            salt=owner_wrap_salt,
+            info=f"lastwrites:owner-file-key:{vault_id}".encode("utf-8"),
         ).derive(recovery_key)
-        ciphertext = AESGCM(aes_key).encrypt(iv, plaintext, None)
+        ciphertext = AESGCM(file_key).encrypt(file_iv, plaintext, None)
+        owner_wrapped_file_key = AESGCM(owner_wrap_key).encrypt(owner_wrap_iv, file_key, None)
         digest_plaintext = hashes.Hash(hashes.SHA256())
         digest_plaintext.update(plaintext)
         digest_ciphertext = hashes.Hash(hashes.SHA256())
         digest_ciphertext.update(ciphertext)
+        recipient_wrapped_keys = []
+        for item in recipient_public_keys or []:
+            recipient_email = str(item["recipient_email"]).strip().lower()
+            public_key = item["public_key"]
+            wrapped_file_key = public_key.encrypt(
+                file_key,
+                asym_padding.OAEP(
+                    mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None,
+                ),
+            )
+            recipient_wrapped_keys.append(
+                {
+                    "recipient_email": recipient_email,
+                    "wrapped_file_key": b64url_encode(wrapped_file_key),
+                    "algorithm": "RSA-OAEP-256",
+                }
+            )
         return {
             "ciphertext": ciphertext,
             "metadata": {
                 "encrypted": True,
                 "zero_knowledge": True,
                 "algorithm": "AES-256-GCM",
-                "schema_version": 3,
-                "kdf_algorithm": "HKDF-SHA256",
-                "kdf_salt": b64url_encode(salt),
-                "iv": b64url_encode(iv),
+                "schema_version": 4,
+                "iv": b64url_encode(file_iv),
                 "authentication_tag_appended": True,
                 "plaintext_size_bytes": len(plaintext),
                 "plaintext_sha256": b64url_encode(digest_plaintext.finalize()),
                 "ciphertext_sha256": b64url_encode(digest_ciphertext.finalize()),
                 "encryption_context": f"vault:{vault_id}",
+                "owner_wrapped_file_key": b64url_encode(owner_wrapped_file_key),
+                "owner_wrap_algorithm": "AES-256-GCM",
+                "owner_wrap_kdf_algorithm": "HKDF-SHA256",
+                "owner_wrap_salt": b64url_encode(owner_wrap_salt),
+                "owner_wrap_iv": b64url_encode(owner_wrap_iv),
+                "recipient_wrapped_keys": recipient_wrapped_keys,
             },
         }
 
     @staticmethod
     def _decrypt_zero_knowledge_payload(ciphertext: bytes, recovery_key: bytes, vault_id: str, metadata: dict) -> bytes:
-        aes_key = HKDF(
+        owner_wrap_key = HKDF(
             algorithm=hashes.SHA256(),
             length=32,
-            salt=b64url_decode(str(metadata["kdf_salt"])),
-            info=f"lastwrites:vault-file:{vault_id}".encode("utf-8"),
+            salt=b64url_decode(str(metadata["owner_wrap_salt"])),
+            info=f"lastwrites:owner-file-key:{vault_id}".encode("utf-8"),
         ).derive(recovery_key)
-        return AESGCM(aes_key).decrypt(
+        file_key = AESGCM(owner_wrap_key).decrypt(
+            b64url_decode(str(metadata["owner_wrap_iv"])),
+            b64url_decode(str(metadata["owner_wrapped_file_key"])),
+            None,
+        )
+        return AESGCM(file_key).decrypt(
+            b64url_decode(str(metadata["iv"])),
+            ciphertext,
+            None,
+        )
+
+    @staticmethod
+    def _decrypt_zero_knowledge_payload_for_recipient(
+        ciphertext: bytes,
+        recipient_private_key: rsa.RSAPrivateKey,
+        metadata: dict,
+    ) -> bytes:
+        wrapped_file_key = b64url_decode(str(metadata["recipient_wrapped_key"]))
+        file_key = recipient_private_key.decrypt(
+            wrapped_file_key,
+            asym_padding.OAEP(
+                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+        return AESGCM(file_key).decrypt(
             b64url_decode(str(metadata["iv"])),
             ciphertext,
             None,
@@ -210,8 +300,14 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         recovery_key: bytes,
         *,
         recipient_emails: list[str] | None,
+        recipient_public_keys: list[dict[str, object]] | None = None,
     ) -> dict:
-        encryption_payload = self._encrypt_zero_knowledge_payload(content, recovery_key, vault_id)
+        encryption_payload = self._encrypt_zero_knowledge_payload(
+            content,
+            recovery_key,
+            vault_id,
+            recipient_public_keys=recipient_public_keys,
+        )
         data = {
             "zero_knowledge_metadata_json": json.dumps(encryption_payload["metadata"]),
         }
@@ -329,10 +425,13 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         )
 
         self.assertTrue(uploaded_file["zero_knowledge"])
-        self.assertEqual(uploaded_file["kdf_algorithm"], "HKDF-SHA256")
+        self.assertEqual(uploaded_file["owner_wrap_kdf_algorithm"], "HKDF-SHA256")
         self.assertTrue(uploaded_file["authentication_tag_appended"])
         self.assertFalse(uploaded_file.get("wrapped_key"))
         self.assertFalse(uploaded_file.get("key_kid"))
+        self.assertTrue(uploaded_file["owner_wrapped_file_key"])
+        self.assertTrue(uploaded_file["owner_wrap_salt"])
+        self.assertTrue(uploaded_file["owner_wrap_iv"])
 
         ciphertext_path = (
             Path(os.environ["LOCAL_BLOB_ROOT_DIR"])
@@ -542,6 +641,8 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         )
         vault_id = vault["id"]
         recipient_email = f"zk-recipient-{uuid4().hex[:8]}@example.com"
+        recipient_private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+        recipient_public_jwk = self._public_jwk_from_private_key(recipient_private_key)
 
         add_recipient_response = self.client.post(
             f"/vaults/{vault_id}/recipients",
@@ -557,11 +658,18 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             b"recipient secret payload",
             recovery_key,
             recipient_emails=[recipient_email],
+            recipient_public_keys=[
+                {
+                    "recipient_email": recipient_email,
+                    "public_key": recipient_private_key.public_key(),
+                }
+            ],
         )
 
         self._deliver_vault(vault_id)
 
         recipient_token = self._register_and_login(recipient_email)
+        self._install_document_crypto_profile(recipient_token, recipient_public_jwk)
         list_delivery_files_response = self.client.get(
             f"/vaults/{vault_id}/delivery-files",
             headers=self._auth_headers(recipient_token),
@@ -569,9 +677,9 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(list_delivery_files_response.status_code, 200, list_delivery_files_response.text)
         delivery_files_payload = list_delivery_files_response.json()
         self.assertTrue(delivery_files_payload["zero_knowledge_enabled"])
-        self.assertEqual(delivery_files_payload["recovery_key_verifier"], vault["recovery_key_verifier"])
         self.assertEqual(len(delivery_files_payload["files"]), 1)
         self.assertTrue(delivery_files_payload["files"][0]["zero_knowledge"])
+        self.assertEqual(len(delivery_files_payload["files"][0]["recipient_wrapped_keys"]), 1)
 
         delivery_package_response = self.client.get(
             f"/vaults/{vault_id}/delivery-package",
@@ -589,11 +697,11 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(manifest["format"], "lastwrites-zero-knowledge-delivery-bundle-v1")
         self.assertEqual(manifest["recipient_email"], recipient_email)
         self.assertTrue(manifest["files"][0]["zero_knowledge"])
-        decrypted = self._decrypt_zero_knowledge_payload(
+        self.assertTrue(manifest["files"][0]["recipient_wrapped_key"])
+        decrypted = self._decrypt_zero_knowledge_payload_for_recipient(
             archive.read(encrypted_entries[0]),
-            recovery_key,
-            vault_id,
-            uploaded_file,
+            recipient_private_key,
+            manifest["files"][0],
         )
         self.assertEqual(decrypted, b"recipient secret payload")
 

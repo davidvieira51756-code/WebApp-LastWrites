@@ -18,12 +18,10 @@ import BrandLogo from "@/components/BrandLogo";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import {
-  clearStoredRecoveryKeyForVault,
-  decryptVaultFile,
-  getStoredRecoveryKeyForVault,
-  storeRecoveryKeyForVault,
-  verifyRecoveryKey,
+  decryptVaultFileForRecipient,
 } from "@/lib/zeroKnowledge";
+import { getCachedDocumentPrivateKey } from "@/lib/documentAccess";
+import { buildZipArchive } from "@/lib/zip";
 
 type RecipientVaultSummary = {
   id: string;
@@ -38,7 +36,7 @@ type RecipientVaultSummary = {
   grace_period_expires_at?: string | null;
   delivered_at?: string | null;
   delivery_available?: boolean;
-  recovery_key_verifier?: string | null;
+  has_document_encryption_key: boolean;
 };
 
 type DeliveryFile = {
@@ -46,14 +44,17 @@ type DeliveryFile = {
   file_name: string;
   content_type?: string | null;
   zero_knowledge?: boolean;
-  kdf_salt?: string | null;
   iv?: string | null;
+  recipient_wrapped_keys?: Array<{
+    recipient_email: string;
+    wrapped_file_key: string;
+    algorithm?: string | null;
+  }>;
 };
 
 type DeliveryFilesResponse = {
   vault_id: string;
   zero_knowledge_enabled: boolean;
-  recovery_key_verifier?: string | null;
   files: DeliveryFile[];
 };
 
@@ -154,9 +155,6 @@ export default function RecipientActivationPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [deliveryFiles, setDeliveryFiles] = useState<DeliveryFile[]>([]);
   const [isLoadingDeliveryFiles, setIsLoadingDeliveryFiles] = useState(false);
-  const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
-  const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
-  const [isDownloadingFileId, setIsDownloadingFileId] = useState<string | null>(null);
 
   const authRedirectPath = useMemo(() => {
     if (!vaultId) {
@@ -277,40 +275,6 @@ export default function RecipientActivationPage() {
     }
   }, [fetchDeliveryFiles, summary?.delivery_available]);
 
-  useEffect(() => {
-    if (!vaultId || !summary?.recovery_key_verifier) {
-      setRecoveryKey(null);
-      return;
-    }
-    const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
-    if (!storedRecoveryKey) {
-      setRecoveryKey(null);
-      return;
-    }
-
-    let isCancelled = false;
-    void (async () => {
-      const isValid = await verifyRecoveryKey(
-        storedRecoveryKey,
-        vaultId,
-        summary.recovery_key_verifier,
-      );
-      if (isCancelled) {
-        return;
-      }
-      if (isValid) {
-        setRecoveryKey(storedRecoveryKey);
-      } else {
-        clearStoredRecoveryKeyForVault(vaultId);
-        setRecoveryKey(null);
-      }
-    })();
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [summary?.recovery_key_verifier, vaultId]);
-
   const handleSignOut = useCallback(() => {
     clearAuthSession();
     setAuthToken(null);
@@ -403,42 +367,6 @@ export default function RecipientActivationPage() {
     }
   };
 
-  const handleUnlockRecoveryKey = async () => {
-    setActionMessage(null);
-    setActionError(null);
-
-    if (!vaultId || !summary?.recovery_key_verifier) {
-      setActionError("This delivery does not expose a recovery verifier.");
-      return;
-    }
-
-    const isValid = await verifyRecoveryKey(
-      recoveryKeyInput,
-      vaultId,
-      summary.recovery_key_verifier,
-    );
-    if (!isValid) {
-      setActionError("Recovery key is incorrect.");
-      return;
-    }
-
-    storeRecoveryKeyForVault(vaultId, recoveryKeyInput);
-    setRecoveryKey(getStoredRecoveryKeyForVault(vaultId));
-    setRecoveryKeyInput("");
-    setActionMessage("Recovery key unlocked on this device for the current session.");
-  };
-
-  const handleForgetRecoveryKey = () => {
-    if (!vaultId) {
-      return;
-    }
-    clearStoredRecoveryKeyForVault(vaultId);
-    setRecoveryKey(null);
-    setRecoveryKeyInput("");
-    setActionMessage("Recovery key removed from this device session.");
-    setActionError(null);
-  };
-
   const handleDownloadPackage = async () => {
     setActionMessage(null);
     setActionError(null);
@@ -450,28 +378,124 @@ export default function RecipientActivationPage() {
 
     setIsDownloadingPackage(true);
     try {
-      const response = await fetch(
-        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-package`,
+      const deliveryFilesResponse = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-files`,
         {
-          method: "GET",
           headers: buildAuthHeaders(authToken, false),
         },
       );
 
-      if (isUnauthorizedStatus(response.status)) {
+      if (isUnauthorizedStatus(deliveryFilesResponse.status)) {
         handleUnauthorized();
         return;
       }
 
-      if (!response.ok) {
-        const message = await getErrorDetail(response, "Failed to download the delivery package.");
+      if (!deliveryFilesResponse.ok) {
+        const message = await getErrorDetail(
+          deliveryFilesResponse,
+          "Failed to load the delivery files.",
+        );
         throw new Error(message);
       }
 
-      const blob = await response.blob();
+      const deliveryFilesPayload = (await deliveryFilesResponse.json()) as DeliveryFilesResponse;
+      const zeroKnowledgeFiles = (deliveryFilesPayload.files || []).filter((fileItem) => fileItem.zero_knowledge);
+      if (!zeroKnowledgeFiles.length) {
+        const response = await fetch(
+          `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-package`,
+          {
+            method: "GET",
+            headers: buildAuthHeaders(authToken, false),
+          },
+        );
+
+        if (isUnauthorizedStatus(response.status)) {
+          handleUnauthorized();
+          return;
+        }
+        if (!response.ok) {
+          const message = await getErrorDetail(response, "Failed to download the delivery package.");
+          throw new Error(message);
+        }
+
+        const blob = await response.blob();
+        triggerBrowserDownload(
+          blob,
+          getDownloadFileName(response, buildDeliveryZipFallbackName(summary)),
+        );
+        return;
+      }
+
+      if (!signedInEmail) {
+        throw new Error("Sign in again before downloading this delivery.");
+      }
+
+      const recipientPrivateKey = await getCachedDocumentPrivateKey(signedInEmail);
+      if (!recipientPrivateKey) {
+        throw new Error("Your document access key is not unlocked on this device. Sign in again and retry.");
+      }
+
+      const zipEntries: Array<{ fileName: string; data: Uint8Array }> = [];
+      const readmeLines = [
+        "Last Writes delivery package",
+        "",
+        `Vault: ${summary?.name || vaultId}`,
+        summary?.owner_display_name ? `Owner: ${summary.owner_display_name}` : "",
+        summary?.delivered_at ? `Delivered At: ${formatIsoDate(summary.delivered_at)}` : "",
+        "",
+        "This ZIP was decrypted locally in your browser for your account.",
+      ].filter(Boolean);
+      zipEntries.push({
+        fileName: "README.txt",
+        data: new TextEncoder().encode(readmeLines.join("\n")),
+      });
+
+      for (const fileItem of deliveryFilesPayload.files || []) {
+        const fileResponse = await fetch(
+          `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileItem.id)}/download`,
+          {
+            headers: buildAuthHeaders(authToken, false),
+          },
+        );
+        if (isUnauthorizedStatus(fileResponse.status)) {
+          handleUnauthorized();
+          return;
+        }
+        if (!fileResponse.ok) {
+          throw new Error(await getErrorDetail(fileResponse, `Failed to download ${fileItem.file_name}.`));
+        }
+
+        if (fileItem.zero_knowledge) {
+          const wrappedFileKey = fileItem.recipient_wrapped_keys?.[0]?.wrapped_file_key;
+          if (!wrappedFileKey || !fileItem.iv) {
+            throw new Error(`Encrypted delivery metadata is incomplete for ${fileItem.file_name}.`);
+          }
+          const ciphertext = await fileResponse.arrayBuffer();
+          const plaintext = await decryptVaultFileForRecipient(ciphertext, {
+            recipientPrivateKey,
+            wrappedFileKey,
+            iv: fileItem.iv,
+          });
+          zipEntries.push({
+            fileName: fileItem.file_name,
+            data: plaintext,
+          });
+        } else {
+          zipEntries.push({
+            fileName: fileItem.file_name,
+            data: new Uint8Array(await fileResponse.arrayBuffer()),
+          });
+        }
+      }
+
+      const zipBytes = buildZipArchive(zipEntries);
+      const zipBuffer = zipBytes.buffer.slice(
+        zipBytes.byteOffset,
+        zipBytes.byteOffset + zipBytes.byteLength,
+      ) as ArrayBuffer;
       triggerBrowserDownload(
-        blob,
-        getDownloadFileName(response, buildDeliveryZipFallbackName(summary)),
+        new Blob([zipBuffer], { type: "application/zip" }),
+        buildDeliveryZipFallbackName(summary),
       );
     } catch (error) {
       const message =
@@ -479,66 +503,6 @@ export default function RecipientActivationPage() {
       setActionError(message);
     } finally {
       setIsDownloadingPackage(false);
-    }
-  };
-
-  const handleDownloadDeliveryFile = async (fileItem: DeliveryFile) => {
-    setActionMessage(null);
-    setActionError(null);
-
-    if (!apiUrl || !vaultId || !authToken) {
-      setActionError("API URL or vault identifier is missing.");
-      return;
-    }
-
-    setIsDownloadingFileId(fileItem.id);
-    try {
-      const response = await fetch(
-        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileItem.id)}/download`,
-        {
-          headers: buildAuthHeaders(authToken, false),
-        },
-      );
-
-      if (isUnauthorizedStatus(response.status)) {
-        handleUnauthorized();
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(await getErrorDetail(response, "Failed to download delivery file."));
-      }
-
-      if (fileItem.zero_knowledge) {
-        if (!recoveryKey || !fileItem.kdf_salt || !fileItem.iv) {
-          throw new Error("Unlock the delivery with the recovery key before downloading files.");
-        }
-        const ciphertext = await response.arrayBuffer();
-        const plaintext = await decryptVaultFile(ciphertext, {
-          recoveryKey,
-          vaultId,
-          kdfSalt: fileItem.kdf_salt,
-          iv: fileItem.iv,
-        });
-        const plaintextBuffer = plaintext.buffer.slice(
-          plaintext.byteOffset,
-          plaintext.byteOffset + plaintext.byteLength,
-        ) as ArrayBuffer;
-        triggerBrowserDownload(
-          new Blob([plaintextBuffer], {
-            type: fileItem.content_type || "application/octet-stream",
-          }),
-          fileItem.file_name,
-        );
-      } else {
-        const blob = await response.blob();
-        triggerBrowserDownload(blob, getDownloadFileName(response, fileItem.file_name));
-      }
-    } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : "Unexpected error while downloading the file.",
-      );
-    } finally {
-      setIsDownloadingFileId(null);
     }
   };
 
@@ -701,158 +665,102 @@ export default function RecipientActivationPage() {
 
         {!isLoading && !pageError && summary ? (
           <Card variant="elevated" style={{ gap: t.space.s }}>
-            <Text variant="h3">Request Activation</Text>
-            <Text variant="bodySmall" color="secondary">
-              By requesting activation, you are signalling that you believe the owner is no
-              longer able to check in. Once the required number of recipients ({threshold})
-              have requested activation, the grace period will start. If the owner does not
-              check in before it ends, the vault will be delivered.
-            </Text>
-
             {summary.delivery_available ? (
-              <Card variant="secondary" style={{ padding: t.space.m, gap: t.space.xs }}>
-                <Text variant="label">The delivery package is ready.</Text>
+              <Card variant="secondary" style={{ padding: t.space.m, gap: t.space.s }}>
+                <Text variant="h3">Delivery Ready</Text>
                 <Text variant="bodySmall" color="secondary">
-                  Your final delivery files are now available. You can still download the archival
-                  ZIP package, and if this vault uses zero-knowledge encryption you can decrypt the
-                  individual files here after entering the recovery key shared by the owner.
+                  Your final delivery package is ready. The app will prepare a ZIP for download on
+                  this device using your account access.
                 </Text>
-                {summary.recovery_key_verifier ? (
-                  recoveryKey ? (
-                    <>
-                      <Alert
-                        variant="success"
-                        message="Recovery key unlocked on this device for the current session."
-                      />
-                      <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
-                        <Button type="button" variant="Primary" onClick={handleForgetRecoveryKey}>
-                          Forget Recovery Key
-                        </Button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <Input
-                        id="delivery-recovery-key"
-                        type="password"
-                        label="Recovery Key"
-                        value={recoveryKeyInput}
-                        onChange={(event) => setRecoveryKeyInput(event.target.value)}
-                        placeholder="Enter the vault recovery key"
-                      />
-                      <Button
-                        type="button"
-                        variant="SolidPrimary"
-                        onClick={() => void handleUnlockRecoveryKey()}
-                      >
-                        Unlock Delivery Files
-                      </Button>
-                    </>
-                  )
+                {deliveryFiles.length ? (
+                  <Text variant="bodySmall" color="secondary">
+                    {deliveryFiles.length} file{deliveryFiles.length === 1 ? "" : "s"} ready in this delivery.
+                  </Text>
                 ) : null}
-
                 {isLoadingDeliveryFiles ? (
                   <Alert variant="info" message="Loading delivery files..." />
                 ) : null}
-
-                {deliveryFiles.length > 0 ? (
-                  <div style={{ display: "grid", gap: t.space.xs }}>
-                    {deliveryFiles.map((fileItem) => (
-                      <Card
-                        key={fileItem.id}
-                        variant="secondary"
-                        style={{ padding: t.space.s, gap: t.space.xs }}
-                      >
-                        <Text variant="label">{fileItem.file_name}</Text>
-                        <Text variant="caption" color="muted">
-                          {fileItem.zero_knowledge
-                            ? "Zero-knowledge file"
-                            : "Encrypted file"}
-                        </Text>
-                        <Button
-                          type="button"
-                          variant="Primary"
-                          onClick={() => void handleDownloadDeliveryFile(fileItem)}
-                          disabled={
-                            isDownloadingFileId === fileItem.id ||
-                            (fileItem.zero_knowledge && !recoveryKey)
-                          }
-                        >
-                          {isDownloadingFileId === fileItem.id ? "Preparing..." : "Download File"}
-                        </Button>
-                      </Card>
-                    ))}
-                  </div>
+                {!summary.has_document_encryption_key ? (
+                  <Alert
+                    variant="info"
+                    message="Your account is still preparing its document access key. Sign out and sign in again if download is not available yet."
+                  />
                 ) : null}
 
                 <Button
                   type="button"
-                  variant="Primary"
+                  variant="SolidPrimary"
                   onClick={() => void handleDownloadPackage()}
-                  disabled={isDownloadingPackage}
+                  disabled={isDownloadingPackage || isLoadingDeliveryFiles}
                 >
-                  {isDownloadingPackage ? "Downloading..." : "Download delivery ZIP"}
-                </Button>
-              </Card>
-            ) : null}
-
-            {!summary.can_activate && !summary.delivery_available ? (
-              <Alert
-                variant="info"
-                message="The owner has not allowed this recipient to request activation for this vault."
-              />
-            ) : null}
-
-            {isTerminal ? (
-              <Alert
-                variant="info"
-                message={
-                  summary.delivery_available
-                    ? "This vault has already been delivered."
-                    : "This vault is no longer accepting activation requests."
-                }
-              />
-            ) : null}
-
-            {summary.has_requested_activation ? (
-              <Card variant="secondary" style={{ padding: t.space.m, gap: t.space.xs }}>
-                <Text variant="label">You have already requested activation.</Text>
-                <Text variant="bodySmall" color="secondary">
-                  You can withdraw your request if you change your mind. Withdrawing while the
-                  grace period is active will reset the timer if the threshold drops below the
-                  required number.
-                </Text>
-                <Button
-                  type="button"
-                  variant="Destructive"
-                  onClick={() => void handleWithdrawRequest()}
-                  disabled={isWithdrawing || isActivationBlocked}
-                >
-                  {isWithdrawing ? "Withdrawing..." : "Withdraw my request"}
+                  {isDownloadingPackage ? "Preparing ZIP..." : "Download Delivery ZIP"}
                 </Button>
               </Card>
             ) : (
-              <form
-                onSubmit={handleSubmitRequest}
-                style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
-              >
-                <Input
-                  id="activation-reason"
-                  label="Reason (optional)"
-                  value={reason}
-                  onChange={(event) => setReason(event.target.value)}
-                  placeholder="Why are you requesting activation?"
-                  maxLength={1000}
-                />
-                <Button
-                  type="submit"
-                  size="full"
-                  variant="SolidPrimary"
-                  disabled={isSubmitting || isActivationBlocked}
-                >
-                  {isSubmitting ? "Submitting..." : "Request activation"}
-                </Button>
-              </form>
+              <>
+                <Text variant="h3">Request Activation</Text>
+                <Text variant="bodySmall" color="secondary">
+                  By requesting activation, you are signalling that you believe the owner is no
+                  longer able to check in. Once the required number of recipients ({threshold})
+                  have requested activation, the grace period will start. If the owner does not
+                  check in before it ends, the vault will be delivered.
+                </Text>
+
+                {!summary.can_activate ? (
+                  <Alert
+                    variant="info"
+                    message="The owner has not allowed this recipient to request activation for this vault."
+                  />
+                ) : null}
+
+                {isTerminal ? (
+                  <Alert
+                    variant="info"
+                    message="This vault is no longer accepting activation requests."
+                  />
+                ) : null}
+
+                {summary.has_requested_activation ? (
+                  <Card variant="secondary" style={{ padding: t.space.m, gap: t.space.xs }}>
+                    <Text variant="label">You have already requested activation.</Text>
+                    <Text variant="bodySmall" color="secondary">
+                      You can withdraw your request if you change your mind. Withdrawing while the
+                      grace period is active will reset the timer if the threshold drops below the
+                      required number.
+                    </Text>
+                    <Button
+                      type="button"
+                      variant="Destructive"
+                      onClick={() => void handleWithdrawRequest()}
+                      disabled={isWithdrawing || isActivationBlocked}
+                    >
+                      {isWithdrawing ? "Withdrawing..." : "Withdraw my request"}
+                    </Button>
+                  </Card>
+                ) : (
+                  <form
+                    onSubmit={handleSubmitRequest}
+                    style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
+                  >
+                    <Input
+                      id="activation-reason"
+                      label="Reason (optional)"
+                      value={reason}
+                      onChange={(event) => setReason(event.target.value)}
+                      placeholder="Why are you requesting activation?"
+                      maxLength={1000}
+                    />
+                    <Button
+                      type="submit"
+                      size="full"
+                      variant="SolidPrimary"
+                      disabled={isSubmitting || isActivationBlocked}
+                    >
+                      {isSubmitting ? "Submitting..." : "Request activation"}
+                    </Button>
+                  </form>
+                )}
+              </>
             )}
 
             {actionError ? <Alert variant="error" message={actionError} /> : null}

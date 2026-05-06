@@ -976,8 +976,8 @@ def _build_zero_knowledge_delivery_bundle(
         "Last Writes secure delivery bundle",
         "",
         "This package contains encrypted files and metadata.",
-        "Use the vault recovery key shared by the owner to decrypt zero-knowledge files in the app.",
-        "Legacy files, when present, are included as regular plaintext downloads for compatibility.",
+        "Recipients decrypt zero-knowledge files with their own account access in the app.",
+        "Do not share this bundle outside its intended recipient account.",
     ]
 
     with ZipFile(output_zip, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zip_file:
@@ -988,6 +988,18 @@ def _build_zero_knowledge_delivery_bundle(
             file_name = str(file_metadata.get("file_name", "")).strip() or f"file-{index}.bin"
             archive_stem = _safe_file_name(file_name)
             if _is_zero_knowledge_file(file_metadata):
+                wrapped_keys = file_metadata.get("recipient_wrapped_keys", [])
+                if not isinstance(wrapped_keys, list):
+                    wrapped_keys = []
+                recipient_wrapped_key = next(
+                    (
+                        item
+                        for item in wrapped_keys
+                        if isinstance(item, dict)
+                        and str(item.get("recipient_email", "")).strip().lower() == recipient_email
+                    ),
+                    None,
+                )
                 archive_name = f"encrypted/{index:02d}-{archive_stem}.lwenc"
                 zip_file.writestr(archive_name, payload["ciphertext"])
                 manifest["files"].append(
@@ -1001,8 +1013,6 @@ def _build_zero_knowledge_delivery_bundle(
                         "zero_knowledge": True,
                         "algorithm": file_metadata.get("algorithm"),
                         "schema_version": file_metadata.get("schema_version"),
-                        "kdf_algorithm": file_metadata.get("kdf_algorithm"),
-                        "kdf_salt": file_metadata.get("kdf_salt"),
                         "iv": file_metadata.get("iv"),
                         "authentication_tag_appended": bool(
                             file_metadata.get("authentication_tag_appended", False)
@@ -1010,6 +1020,8 @@ def _build_zero_knowledge_delivery_bundle(
                         "plaintext_sha256": file_metadata.get("plaintext_sha256"),
                         "ciphertext_sha256": file_metadata.get("ciphertext_sha256"),
                         "encryption_context": file_metadata.get("encryption_context"),
+                        "recipient_wrapped_key": None if recipient_wrapped_key is None else recipient_wrapped_key.get("wrapped_file_key"),
+                        "recipient_wrap_algorithm": None if recipient_wrapped_key is None else recipient_wrapped_key.get("algorithm"),
                     }
                 )
             else:

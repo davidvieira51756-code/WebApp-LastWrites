@@ -2,7 +2,7 @@
 
 const RECOVERY_KEY_SESSION_PREFIX = "lw.zk.recovery.";
 const RECOVERY_KEY_BACKUP_CONFIRMED_PREFIX = "lw.zk.recovery.backed-up.";
-const ZERO_KNOWLEDGE_SCHEMA_VERSION = 3;
+const ZERO_KNOWLEDGE_SCHEMA_VERSION = 4;
 const ZERO_KNOWLEDGE_KDF_ALGORITHM = "HKDF-SHA256";
 
 type ZeroKnowledgeFileMetadata = {
@@ -10,14 +10,22 @@ type ZeroKnowledgeFileMetadata = {
   zero_knowledge: true;
   algorithm: "AES-256-GCM";
   schema_version: number;
-  kdf_algorithm: string;
-  kdf_salt: string;
   iv: string;
   authentication_tag_appended: true;
   plaintext_size_bytes: number;
   plaintext_sha256: string;
   ciphertext_sha256: string;
   encryption_context: string;
+  owner_wrapped_file_key: string;
+  owner_wrap_algorithm: "AES-256-GCM";
+  owner_wrap_kdf_algorithm: string;
+  owner_wrap_salt: string;
+  owner_wrap_iv: string;
+  recipient_wrapped_keys: Array<{
+    recipient_email: string;
+    wrapped_file_key: string;
+    algorithm: "RSA-OAEP-256";
+  }>;
 };
 
 type EncryptVaultFileResult = {
@@ -116,14 +124,14 @@ async function importRecoveryKeyMaterial(recoveryKey: string): Promise<CryptoKey
   return crypto.subtle.importKey("raw", toArrayBuffer(recoveryKeyBytes), "HKDF", false, ["deriveKey"]);
 }
 
-async function deriveVaultFileKey(
+async function deriveOwnerWrapKey(
   recoveryKey: string,
   {
     vaultId,
-    kdfSalt,
+    ownerWrapSalt,
   }: {
     vaultId: string;
-    kdfSalt: string;
+    ownerWrapSalt: string;
   },
 ): Promise<CryptoKey> {
   const crypto = assertCrypto();
@@ -132,8 +140,8 @@ async function deriveVaultFileKey(
     {
       name: "HKDF",
       hash: "SHA-256",
-      salt: toArrayBuffer(b64urlDecode(kdfSalt)),
-      info: toArrayBuffer(encodeText(`lastwrites:vault-file:${vaultId}`)),
+      salt: toArrayBuffer(b64urlDecode(ownerWrapSalt)),
+      info: toArrayBuffer(encodeText(`lastwrites:owner-file-key:${vaultId}`)),
     },
     masterKey,
     { name: "AES-GCM", length: 256 },
@@ -174,29 +182,82 @@ export async function encryptVaultFile(
   {
     recoveryKey,
     vaultId,
+    recipientPublicKeys,
   }: {
     recoveryKey: string;
     vaultId: string;
+    recipientPublicKeys: Array<{ recipientEmail: string; publicJwk: JsonWebKey }>;
   },
 ): Promise<EncryptVaultFileResult> {
   const crypto = assertCrypto();
   const normalizedRecoveryKey = normalizeRecoveryKey(recoveryKey);
   const plaintextBytes = toUint8Array(plaintext);
-  const kdfSaltBytes = crypto.getRandomValues(new Uint8Array(16));
-  const ivBytes = crypto.getRandomValues(new Uint8Array(12));
-  const kdfSalt = b64urlEncode(kdfSaltBytes);
-  const aesKey = await deriveVaultFileKey(normalizedRecoveryKey, { vaultId, kdfSalt });
+  const fileIvBytes = crypto.getRandomValues(new Uint8Array(12));
+  const ownerWrapSaltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const ownerWrapIvBytes = crypto.getRandomValues(new Uint8Array(12));
+  const fileKeyBytes = crypto.getRandomValues(new Uint8Array(32));
+  const fileKey = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(fileKeyBytes),
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+  const ownerWrapSalt = b64urlEncode(ownerWrapSaltBytes);
+  const ownerWrapKey = await deriveOwnerWrapKey(normalizedRecoveryKey, { vaultId, ownerWrapSalt });
   const ciphertextBuffer = await crypto.subtle.encrypt(
     {
       name: "AES-GCM",
-      iv: toArrayBuffer(ivBytes),
+      iv: toArrayBuffer(fileIvBytes),
     },
-    aesKey,
+    fileKey,
     toArrayBuffer(plaintextBytes),
   );
   const ciphertext = new Uint8Array(ciphertextBuffer);
+  const ownerWrappedFileKey = new Uint8Array(
+    await crypto.subtle.encrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(ownerWrapIvBytes),
+      },
+      ownerWrapKey,
+      toArrayBuffer(fileKeyBytes),
+    ),
+  );
   const plaintextSha = await sha256Bytes(plaintextBytes);
   const ciphertextSha = await sha256Bytes(ciphertext);
+  const recipientWrappedKeys: ZeroKnowledgeFileMetadata["recipient_wrapped_keys"] = [];
+
+  for (const recipientPublicKey of recipientPublicKeys) {
+    const recipientEmail = recipientPublicKey.recipientEmail.trim().toLowerCase();
+    if (!recipientEmail) {
+      continue;
+    }
+    const importedPublicKey = await crypto.subtle.importKey(
+      "jwk",
+      recipientPublicKey.publicJwk,
+      {
+        name: "RSA-OAEP",
+        hash: "SHA-256",
+      },
+      true,
+      ["encrypt"],
+    );
+    const wrappedFileKey = new Uint8Array(
+      await crypto.subtle.encrypt(
+        {
+          name: "RSA-OAEP",
+        },
+        importedPublicKey,
+        toArrayBuffer(fileKeyBytes),
+      ),
+    );
+    recipientWrappedKeys.push({
+      recipient_email: recipientEmail,
+      wrapped_file_key: b64urlEncode(wrappedFileKey),
+      algorithm: "RSA-OAEP-256",
+    });
+  }
 
   return {
     ciphertext,
@@ -205,14 +266,18 @@ export async function encryptVaultFile(
       zero_knowledge: true,
       algorithm: "AES-256-GCM",
       schema_version: ZERO_KNOWLEDGE_SCHEMA_VERSION,
-      kdf_algorithm: ZERO_KNOWLEDGE_KDF_ALGORITHM,
-      kdf_salt: kdfSalt,
-      iv: b64urlEncode(ivBytes),
+      iv: b64urlEncode(fileIvBytes),
       authentication_tag_appended: true,
       plaintext_size_bytes: plaintextBytes.byteLength,
       plaintext_sha256: b64urlEncode(plaintextSha),
       ciphertext_sha256: b64urlEncode(ciphertextSha),
       encryption_context: `vault:${vaultId}`,
+      owner_wrapped_file_key: b64urlEncode(ownerWrappedFileKey),
+      owner_wrap_algorithm: "AES-256-GCM",
+      owner_wrap_kdf_algorithm: ZERO_KNOWLEDGE_KDF_ALGORITHM,
+      owner_wrap_salt: ownerWrapSalt,
+      owner_wrap_iv: b64urlEncode(ownerWrapIvBytes),
+      recipient_wrapped_keys: recipientWrappedKeys,
     },
   };
 }
@@ -222,26 +287,87 @@ export async function decryptVaultFile(
   {
     recoveryKey,
     vaultId,
-    kdfSalt,
+    ownerWrappedFileKey,
+    ownerWrapSalt,
+    ownerWrapIv,
     iv,
   }: {
     recoveryKey: string;
     vaultId: string;
-    kdfSalt: string;
+    ownerWrappedFileKey: string;
+    ownerWrapSalt: string;
+    ownerWrapIv: string;
     iv: string;
   },
 ): Promise<Uint8Array> {
   const crypto = assertCrypto();
-  const aesKey = await deriveVaultFileKey(normalizeRecoveryKey(recoveryKey), {
+  const ownerWrapKey = await deriveOwnerWrapKey(normalizeRecoveryKey(recoveryKey), {
     vaultId,
-    kdfSalt,
+    ownerWrapSalt,
   });
+  const fileKeyBytes = new Uint8Array(
+    await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(b64urlDecode(ownerWrapIv)),
+      },
+      ownerWrapKey,
+      toArrayBuffer(b64urlDecode(ownerWrappedFileKey)),
+    ),
+  );
+  const fileKey = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(fileKeyBytes),
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"],
+  );
   const plaintext = await crypto.subtle.decrypt(
     {
       name: "AES-GCM",
       iv: toArrayBuffer(b64urlDecode(iv)),
     },
-    aesKey,
+    fileKey,
+    toArrayBuffer(toUint8Array(ciphertext)),
+  );
+  return new Uint8Array(plaintext);
+}
+
+export async function decryptVaultFileForRecipient(
+  ciphertext: ArrayBuffer | Uint8Array,
+  {
+    recipientPrivateKey,
+    wrappedFileKey,
+    iv,
+  }: {
+    recipientPrivateKey: CryptoKey;
+    wrappedFileKey: string;
+    iv: string;
+  },
+): Promise<Uint8Array> {
+  const crypto = assertCrypto();
+  const fileKeyBytes = new Uint8Array(
+    await crypto.subtle.decrypt(
+      {
+        name: "RSA-OAEP",
+      },
+      recipientPrivateKey,
+      toArrayBuffer(b64urlDecode(wrappedFileKey)),
+    ),
+  );
+  const fileKey = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(fileKeyBytes),
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["decrypt"],
+  );
+  const plaintext = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: toArrayBuffer(b64urlDecode(iv)),
+    },
+    fileKey,
     toArrayBuffer(toUint8Array(ciphertext)),
   );
   return new Uint8Array(plaintext);

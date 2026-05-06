@@ -7,6 +7,7 @@ export const AUTH_TOKEN_COOKIE = "lw_auth_token";
 export const AUTH_EXP_COOKIE = "lw_auth_exp";
 const ZERO_KNOWLEDGE_RECOVERY_PREFIX = "lw.zk.recovery.";
 const ZERO_KNOWLEDGE_BACKUP_PREFIX = "lw.zk.recovery.backed-up.";
+const DOCUMENT_ACCESS_PRIVATE_KEY_PREFIX = "lw.docaccess.private.";
 
 export type StoredAuthSession = {
   accessToken: string;
@@ -51,7 +52,8 @@ export function clearAuthSession(): void {
       const key = window.sessionStorage.key(index);
       if (
         key?.startsWith(ZERO_KNOWLEDGE_RECOVERY_PREFIX) ||
-        key?.startsWith(ZERO_KNOWLEDGE_BACKUP_PREFIX)
+        key?.startsWith(ZERO_KNOWLEDGE_BACKUP_PREFIX) ||
+        key?.startsWith(DOCUMENT_ACCESS_PRIVATE_KEY_PREFIX)
       ) {
         keysToRemove.push(key);
       }

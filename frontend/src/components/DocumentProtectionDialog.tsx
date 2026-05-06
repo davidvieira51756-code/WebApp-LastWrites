@@ -21,9 +21,9 @@ const SECURITY_POINTS = [
       "Each vault has a recovery key that you must save. We keep only a verifier, not the readable key itself, so losing it means the encrypted files cannot be recovered by the platform.",
   },
   {
-    title: "Recipients get encrypted delivery bundles",
+    title: "Recipients unlock deliveries with their own account access",
     body:
-      "When a vault is delivered, recipients receive encrypted files and metadata for decryption in the client. The delivery worker can package the files without opening their contents.",
+      "When a vault is delivered, each recipient gets access to their own encrypted delivery set. The app unlocks those files in the client for the signed-in recipient without sharing the owner's recovery key.",
   },
 ];
 
@@ -143,19 +143,6 @@ export default function DocumentProtectionDialog({
             ))}
           </div>
 
-          <Card
-            variant="outline"
-            style={{
-              padding: t.space.m,
-              backgroundColor: t.isDark ? "rgba(39, 39, 42, 0.24)" : "rgba(244, 244, 245, 0.72)",
-            }}
-          >
-            <Text variant="bodySmall" color="secondary">
-              Important: this guarantee applies to vault file contents. Visible vault
-              metadata and recipient emails are still service metadata and are not hidden by
-              file-level zero-knowledge encryption.
-            </Text>
-          </Card>
         </div>
       </Card>
     </div>

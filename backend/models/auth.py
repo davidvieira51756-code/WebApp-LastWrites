@@ -74,3 +74,14 @@ class AuthChangePasswordRequest(BaseModel):
 
 class AuthDeleteAccountRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=256)
+
+
+class AuthCryptoProfileResponse(BaseModel):
+    initialized: bool = False
+    encryption_public_jwk: dict[str, str] | None = None
+    encrypted_private_key_bundle: dict[str, str] | None = None
+
+
+class AuthCryptoProfileUpdateRequest(BaseModel):
+    encryption_public_jwk: dict[str, str]
+    encrypted_private_key_bundle: dict[str, str]

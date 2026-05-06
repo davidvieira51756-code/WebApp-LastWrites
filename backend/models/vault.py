@@ -25,6 +25,14 @@ class ActivationRequest(BaseModel):
 class VaultRecipient(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
     can_activate: bool = True
+    has_document_encryption_key: bool = False
+    document_encryption_public_jwk: Optional[Dict[str, str]] = None
+
+
+class RecipientWrappedFileKey(BaseModel):
+    recipient_email: str = Field(..., min_length=3, max_length=320)
+    wrapped_file_key: str = Field(..., min_length=16)
+    algorithm: str = Field(default="RSA-OAEP-256", min_length=3, max_length=64)
 
 
 class DeliveryPackageMetadata(BaseModel):
@@ -70,6 +78,12 @@ class VaultFileMetadata(BaseModel):
     kdf_salt: Optional[str] = None
     encryption_context: Optional[str] = Field(default=None, max_length=256)
     authentication_tag_appended: bool = False
+    owner_wrapped_file_key: Optional[str] = None
+    owner_wrap_algorithm: Optional[str] = Field(default=None, max_length=128)
+    owner_wrap_kdf_algorithm: Optional[str] = Field(default=None, max_length=128)
+    owner_wrap_salt: Optional[str] = None
+    owner_wrap_iv: Optional[str] = None
+    recipient_wrapped_keys: List[RecipientWrappedFileKey] = Field(default_factory=list)
 
 
 class VaultBase(BaseModel):
@@ -159,13 +173,12 @@ class RecipientVaultSummary(BaseModel):
     grace_period_expires_at: Optional[str] = None
     delivered_at: Optional[str] = None
     delivery_available: bool = False
-    recovery_key_verifier: Optional[str] = Field(default=None, min_length=16, max_length=256)
+    has_document_encryption_key: bool = False
 
 
 class DeliveryFileAccessResponse(BaseModel):
     vault_id: str
     zero_knowledge_enabled: bool = False
-    recovery_key_verifier: Optional[str] = Field(default=None, min_length=16, max_length=256)
     files: List[VaultFileMetadata] = Field(default_factory=list)
 
 

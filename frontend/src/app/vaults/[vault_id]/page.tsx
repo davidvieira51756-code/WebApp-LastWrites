@@ -15,7 +15,6 @@ import {
   useCatTheme,
 } from "@/components/catmagui";
 import BrandLogo from "@/components/BrandLogo";
-import RecoveryKeyBackupPanel from "@/components/RecoveryKeyBackupPanel";
 import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
@@ -24,8 +23,6 @@ import {
   decryptVaultFile,
   encryptVaultFile,
   getStoredRecoveryKeyForVault,
-  hasConfirmedRecoveryKeyBackupForVault,
-  setRecoveryKeyBackupConfirmedForVault,
   storeRecoveryKeyForVault,
   verifyRecoveryKey,
 } from "@/lib/zeroKnowledge";
@@ -39,6 +36,8 @@ type ActivationRequestItem = {
 type VaultRecipient = {
   email: string;
   can_activate: boolean;
+  has_document_encryption_key?: boolean;
+  document_encryption_public_jwk?: JsonWebKey | null;
 };
 
 type DeliveryPackage = {
@@ -93,16 +92,25 @@ type VaultFile = {
   authentication_tag_appended?: boolean;
   plaintext_sha256?: string | null;
   ciphertext_sha256?: string | null;
+  owner_wrapped_file_key?: string | null;
+  owner_wrap_algorithm?: string | null;
+  owner_wrap_kdf_algorithm?: string | null;
+  owner_wrap_salt?: string | null;
+  owner_wrap_iv?: string | null;
+  recipient_wrapped_keys?: Array<{
+    recipient_email: string;
+    wrapped_file_key: string;
+    algorithm?: string | null;
+  }>;
 };
 
 type VaultFilesResponse = {
   vault_id: string;
   files: VaultFile[];
 };
-
-type PendingRecoveryKeyBackup = {
-  recoveryKey: string;
-  vaultName: string;
+type VaultRecipientCryptoDirectoryResponse = {
+  vault_id: string;
+  recipients: VaultRecipient[];
 };
 
 const EMAIL_REGEX =
@@ -251,8 +259,8 @@ export default function VaultDetailsPage() {
   const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
   const [recoveryKeyMessage, setRecoveryKeyMessage] = useState<string | null>(null);
   const [recoveryKeyError, setRecoveryKeyError] = useState<string | null>(null);
-  const [pendingRecoveryKeyBackup, setPendingRecoveryKeyBackup] =
-    useState<PendingRecoveryKeyBackup | null>(null);
+  const [recipientCryptoDirectory, setRecipientCryptoDirectory] = useState<VaultRecipient[]>([]);
+  const [selectedUploadRecipientEmails, setSelectedUploadRecipientEmails] = useState<string[]>([]);
 
   const [isDeletingRecipient, setIsDeletingRecipient] = useState<string | null>(null);
   const [isDeletingFileId, setIsDeletingFileId] = useState<string | null>(null);
@@ -328,16 +336,23 @@ export default function VaultDetailsPage() {
       setPageError(null);
 
       try {
-        const [vaultResponse, filesResponse] = await Promise.all([
+        const [vaultResponse, filesResponse, recipientCryptoResponse] = await Promise.all([
           fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`, {
             headers: buildAuthHeaders(authToken, false),
           }),
           fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`, {
             headers: buildAuthHeaders(authToken, false),
           }),
+          fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/recipient-crypto-directory`, {
+            headers: buildAuthHeaders(authToken, false),
+          }),
         ]);
 
-        if (isUnauthorizedStatus(vaultResponse.status) || isUnauthorizedStatus(filesResponse.status)) {
+        if (
+          isUnauthorizedStatus(vaultResponse.status) ||
+          isUnauthorizedStatus(filesResponse.status) ||
+          isUnauthorizedStatus(recipientCryptoResponse.status)
+        ) {
           handleUnauthorized();
           return;
         }
@@ -350,9 +365,18 @@ export default function VaultDetailsPage() {
           const message = await getErrorDetail(filesResponse, "Failed to fetch vault files.");
           throw new Error(message);
         }
+        if (!recipientCryptoResponse.ok) {
+          const message = await getErrorDetail(
+            recipientCryptoResponse,
+            "Failed to fetch recipient encryption keys.",
+          );
+          throw new Error(message);
+        }
 
         const vaultPayload = (await vaultResponse.json()) as VaultDetail;
         const filesPayload = (await filesResponse.json()) as VaultFilesResponse;
+        const recipientCryptoPayload =
+          (await recipientCryptoResponse.json()) as VaultRecipientCryptoDirectoryResponse;
 
         setVault(vaultPayload);
         setEditableName(vaultPayload.name || "");
@@ -361,6 +385,9 @@ export default function VaultDetailsPage() {
         setEditableGracePeriodUnit(vaultPayload.grace_period_unit === "hours" ? "hours" : "days");
         setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
+        setRecipientCryptoDirectory(
+          Array.isArray(recipientCryptoPayload.recipients) ? recipientCryptoPayload.recipients : [],
+        );
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Unexpected error while loading vault details.";
@@ -380,10 +407,22 @@ export default function VaultDetailsPage() {
   }, [authToken, fetchVaultData, isCheckingAuth]);
 
   useEffect(() => {
+    const availableRecipientEmails = recipientCryptoDirectory
+      .filter((recipient) => recipient.has_document_encryption_key)
+      .map((recipient) => recipient.email);
+
+    setSelectedUploadRecipientEmails((currentValue) => {
+      if (currentValue.length === 0) {
+        return availableRecipientEmails;
+      }
+      return currentValue.filter((email) => availableRecipientEmails.includes(email));
+    });
+  }, [recipientCryptoDirectory]);
+
+  useEffect(() => {
     if (!vaultId || !vault?.zero_knowledge_enabled || !vault.recovery_key_verifier) {
       setRecoveryKey(null);
       setRecoveryKeyInput("");
-      setPendingRecoveryKeyBackup(null);
       return;
     }
 
@@ -391,7 +430,6 @@ export default function VaultDetailsPage() {
     const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
     if (!storedRecoveryKey) {
       setRecoveryKey(null);
-      setPendingRecoveryKeyBackup(null);
       return;
     }
 
@@ -407,25 +445,16 @@ export default function VaultDetailsPage() {
       if (isValid) {
         setRecoveryKey(storedRecoveryKey);
         setRecoveryKeyInput("");
-        if (!hasConfirmedRecoveryKeyBackupForVault(vaultId)) {
-          setPendingRecoveryKeyBackup({
-            recoveryKey: storedRecoveryKey,
-            vaultName: vault?.name || "Vault",
-          });
-        } else {
-          setPendingRecoveryKeyBackup(null);
-        }
       } else {
         clearStoredRecoveryKeyForVault(vaultId);
         setRecoveryKey(null);
-        setPendingRecoveryKeyBackup(null);
       }
     })();
 
     return () => {
       isCancelled = true;
     };
-  }, [vault?.name, vault?.recovery_key_verifier, vault?.zero_knowledge_enabled, vaultId]);
+  }, [vault?.recovery_key_verifier, vault?.zero_knowledge_enabled, vaultId]);
 
   const handleUnlockRecoveryKey = async () => {
     setRecoveryKeyMessage(null);
@@ -450,14 +479,6 @@ export default function VaultDetailsPage() {
     const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
     setRecoveryKey(storedRecoveryKey);
     setRecoveryKeyInput("");
-    if (!hasConfirmedRecoveryKeyBackupForVault(vaultId) && storedRecoveryKey) {
-      setPendingRecoveryKeyBackup({
-        recoveryKey: storedRecoveryKey,
-        vaultName: vault?.name || "Vault",
-      });
-    } else {
-      setPendingRecoveryKeyBackup(null);
-    }
     setRecoveryKeyMessage("Vault unlocked on this device for the current session.");
   };
 
@@ -615,18 +636,30 @@ export default function VaultDetailsPage() {
       setUploadError("Unlock this vault with the recovery key before uploading files.");
       return;
     }
-    if (vault?.zero_knowledge_enabled && pendingRecoveryKeyBackup) {
-      setUploadError("Save and confirm the recovery key before uploading zero-knowledge files.");
-      return;
-    }
 
     setIsUploadingFile(true);
     try {
       const formData = new FormData();
+      const assignedRecipientEmails = vault?.zero_knowledge_enabled
+        ? selectedUploadRecipientEmails
+        : [];
       if (vault?.zero_knowledge_enabled) {
+        const recipientPublicKeys = assignedRecipientEmails.map((recipientEmail) => {
+          const matchingRecipient = recipientCryptoDirectory.find(
+            (recipient) => recipient.email === recipientEmail,
+          );
+          if (!matchingRecipient?.document_encryption_public_jwk) {
+            throw new Error(`Recipient ${recipientEmail} is missing a document encryption key.`);
+          }
+          return {
+            recipientEmail,
+            publicJwk: matchingRecipient.document_encryption_public_jwk,
+          };
+        });
         const encryptedPayload = await encryptVaultFile(await selectedFile.arrayBuffer(), {
           recoveryKey: recoveryKey as string,
           vaultId,
+          recipientPublicKeys,
         });
         const ciphertextBuffer = encryptedPayload.ciphertext.buffer.slice(
           encryptedPayload.ciphertext.byteOffset,
@@ -645,7 +678,7 @@ export default function VaultDetailsPage() {
       } else {
         formData.append("file", selectedFile);
       }
-      formData.append("recipient_emails_json", JSON.stringify([]));
+      formData.append("recipient_emails_json", JSON.stringify(assignedRecipientEmails));
 
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`, {
         method: "POST",
@@ -751,17 +784,22 @@ export default function VaultDetailsPage() {
 
       const matchingFile = files.find((fileItem) => fileItem.id === fileId);
       if (matchingFile?.zero_knowledge) {
-        if (pendingRecoveryKeyBackup) {
-          throw new Error("Save and confirm the recovery key before downloading zero-knowledge files.");
-        }
-        if (!recoveryKey || !matchingFile.kdf_salt || !matchingFile.iv) {
+        if (
+          !recoveryKey ||
+          !matchingFile.owner_wrapped_file_key ||
+          !matchingFile.owner_wrap_salt ||
+          !matchingFile.owner_wrap_iv ||
+          !matchingFile.iv
+        ) {
           throw new Error("Unlock this vault with the recovery key before downloading files.");
         }
         const ciphertext = await response.arrayBuffer();
         const plaintext = await decryptVaultFile(ciphertext, {
           recoveryKey,
           vaultId,
-          kdfSalt: matchingFile.kdf_salt,
+          ownerWrappedFileKey: matchingFile.owner_wrapped_file_key,
+          ownerWrapSalt: matchingFile.owner_wrap_salt,
+          ownerWrapIv: matchingFile.owner_wrap_iv,
           iv: matchingFile.iv,
         });
         const plaintextBuffer = plaintext.buffer.slice(
@@ -1254,26 +1292,7 @@ export default function VaultDetailsPage() {
                       leaves your browser and is required to encrypt uploads and decrypt downloads.
                     </Text>
 
-                    {pendingRecoveryKeyBackup ? (
-                      <RecoveryKeyBackupPanel
-                        recoveryKey={pendingRecoveryKeyBackup.recoveryKey}
-                        vaultId={vault?.id || vaultId}
-                        vaultName={pendingRecoveryKeyBackup.vaultName}
-                        title="Save This Recovery Key Before Continuing"
-                        description="This vault is now protected with zero-knowledge encryption. Save the recovery key now before you continue using encrypted files on this device."
-                        warningMessage="If you lose this recovery key, the server cannot recover zero-knowledge files for this vault."
-                        confirmLabel="I have saved this recovery key somewhere safe and understand that losing it can permanently lock my encrypted files."
-                        confirmButtonLabel="I Saved The Recovery Key"
-                        onConfirmed={() => {
-                          if (!vaultId) {
-                            return;
-                          }
-                          setRecoveryKeyBackupConfirmedForVault(vaultId);
-                          setPendingRecoveryKeyBackup(null);
-                          setRecoveryKeyMessage("Recovery key backup confirmed for this device session.");
-                        }}
-                      />
-                    ) : recoveryKey ? (
+                    {recoveryKey ? (
                       <>
                         <Alert variant="success" message="Vault unlocked on this device for the current session." />
                         <Text variant="bodySmall" color="secondary">
@@ -1704,6 +1723,59 @@ export default function VaultDetailsPage() {
                     fontFamily: "var(--font-geist-sans), sans-serif",
                   }}
                 />
+                {vault?.zero_knowledge_enabled ? (
+                  <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
+                    <Text variant="label">Recipients For This File</Text>
+                    {recipientCryptoDirectory.length ? (
+                      <div style={{ display: "grid", gap: t.space.xs }}>
+                        {recipientCryptoDirectory.map((recipient) => (
+                          <label
+                            key={`upload-${recipient.email}`}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: t.space.xs,
+                              color: t.colors.text.secondary,
+                              fontSize: t.typography.bodySmall.fontSize,
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedUploadRecipientEmails.includes(recipient.email)}
+                              disabled={!recipient.has_document_encryption_key}
+                              onChange={(event) => {
+                                setSelectedUploadRecipientEmails((currentValue) =>
+                                  event.target.checked
+                                    ? [...currentValue, recipient.email].filter(
+                                        (value, index, values) => values.indexOf(value) === index,
+                                      )
+                                    : currentValue.filter((value) => value !== recipient.email),
+                                );
+                              }}
+                            />
+                            <span>
+                              {recipient.email}
+                              {!recipient.has_document_encryption_key
+                                ? " - no document key yet"
+                                : ""}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : (
+                      <Alert
+                        variant="info"
+                        message="Add recipients first if this file should be included in any beneficiary delivery."
+                      />
+                    )}
+                    {recipientCryptoDirectory.some((recipient) => !recipient.has_document_encryption_key) ? (
+                      <Alert
+                        variant="info"
+                        message="Recipients without a document encryption key cannot be included in new zero-knowledge files yet."
+                      />
+                    ) : null}
+                  </Card>
+                ) : null}
                 <Button
                   type="submit"
                   size="full"
@@ -1712,7 +1784,7 @@ export default function VaultDetailsPage() {
                     isUploadingFile ||
                     isArchivedFinal ||
                     !selectedFile ||
-                    (vault?.zero_knowledge_enabled && (!recoveryKey || Boolean(pendingRecoveryKeyBackup)))
+                    (vault?.zero_knowledge_enabled && !recoveryKey)
                   }
                 >
                   {isUploadingFile ? "Uploading..." : vault?.zero_knowledge_enabled ? "Encrypt And Add File" : "Add File"}
@@ -1778,7 +1850,19 @@ export default function VaultDetailsPage() {
 
                       <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
                         <Text variant="label">Attached file recipients</Text>
-                        {vault?.recipients.length ? (
+                        {fileItem.zero_knowledge ? (
+                          <>
+                            <Alert
+                              variant="info"
+                              message="Recipient assignments for zero-knowledge files are fixed at upload time. Re-upload the file if you need a different recipient set."
+                            />
+                            <Text variant="bodySmall" color="secondary">
+                              {fileItem.recipient_emails?.length
+                                ? fileItem.recipient_emails.join(", ")
+                                : "No recipients assigned"}
+                            </Text>
+                          </>
+                        ) : vault?.recipients.length ? (
                           <div style={{ display: "grid", gap: t.space.xs }}>
                             {vault.recipients.map((recipient) => {
                               const currentRecipientEmails = fileItem.recipient_emails ?? [];

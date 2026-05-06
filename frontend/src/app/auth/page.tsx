@@ -8,6 +8,7 @@ import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catm
 import BrandLogo from "@/components/BrandLogo";
 import { getApiUrl, getErrorDetail } from "@/lib/api";
 import { getAuthToken, setAuthSession } from "@/lib/auth";
+import { ensureUserDocumentEncryptionProfile } from "@/lib/documentAccess";
 
 type AuthMode = "signin" | "signup";
 
@@ -152,6 +153,10 @@ function AuthPageContent() {
           expiresAt: payload.expires_at,
           email: payload.email,
           userId: payload.user_id,
+        });
+        await ensureUserDocumentEncryptionProfile(apiUrl, payload.access_token, {
+          email: payload.email,
+          password,
         });
         router.replace(nextPath);
         return;
