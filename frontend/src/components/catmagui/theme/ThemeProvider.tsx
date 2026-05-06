@@ -30,19 +30,25 @@ export function CatmaguiThemeProvider({
   children,
   initialMode = "system",
 }: CatmaguiThemeProviderProps) {
-  const [mode, setModeState] = useState<CatThemeMode>(initialMode);
-  const [prefersDark, setPrefersDark] = useState(false);
-
-  useEffect(() => {
+  const [mode, setModeState] = useState<CatThemeMode>(() => {
     if (typeof window === "undefined") {
-      return;
+      return initialMode;
     }
 
     const persistedMode = window.localStorage.getItem(STORAGE_KEY) as CatThemeMode | null;
     if (persistedMode === "light" || persistedMode === "dark" || persistedMode === "system") {
-      setModeState(persistedMode);
+      return persistedMode;
     }
-  }, []);
+
+    return initialMode;
+  });
+  const [prefersDark, setPrefersDark] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -50,7 +56,6 @@ export function CatmaguiThemeProvider({
     }
 
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-    setPrefersDark(mediaQuery.matches);
 
     const listener = (event: MediaQueryListEvent) => {
       setPrefersDark(event.matches);

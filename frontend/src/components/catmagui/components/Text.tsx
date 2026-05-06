@@ -8,12 +8,11 @@ type TextVariant = "h1" | "h2" | "h3" | "body" | "bodySmall" | "label" | "captio
 type TextColor = "primary" | "secondary" | "muted" | "inverse" | "brand";
 type TextWeight = "normal" | "medium" | "semibold" | "bold";
 
-type TextProps = {
+type TextProps = React.HTMLAttributes<HTMLElement> & {
   children: React.ReactNode;
   variant?: TextVariant;
   color?: TextColor | string;
   weight?: TextWeight;
-  style?: React.CSSProperties;
   numberOfLines?: number;
 };
 
@@ -31,6 +30,7 @@ export function Text({
   weight,
   style,
   numberOfLines,
+  ...props
 }: TextProps) {
   const t = useCatTheme();
 
@@ -75,6 +75,7 @@ export function Text({
         ...lineClamp,
         ...style,
       }}
+      {...props}
     >
       {children}
     </Component>

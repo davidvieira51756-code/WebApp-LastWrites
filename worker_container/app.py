@@ -10,7 +10,7 @@ import sys
 import tempfile
 import unicodedata
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -718,7 +718,12 @@ def _send_delivery_notification(vault_document: Dict[str, Any]) -> None:
 def _download_blob_bytes(container_name: str, blob_name: str) -> bytes:
     if _is_local_dev_mode():
         root_dir = _get_local_blob_root()
-        target_path = (root_dir / container_name / Path(blob_name).name).resolve()
+        blob_parts = [
+            part
+            for part in PurePath(blob_name).parts
+            if part not in ("", ".", "..")
+        ]
+        target_path = (root_dir / container_name / Path(*blob_parts)).resolve()
         if not target_path.exists():
             raise FileNotFoundError(
                 f"Blob not found. container={container_name} blob={blob_name}"

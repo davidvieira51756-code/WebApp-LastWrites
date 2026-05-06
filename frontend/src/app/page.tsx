@@ -13,6 +13,7 @@ import {
     useCatTheme,
 } from "@/components/catmagui";
 import BrandLogo from "@/components/BrandLogo";
+import DocumentProtectionDialog from "@/components/DocumentProtectionDialog";
 import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
@@ -75,6 +76,7 @@ export default function DashboardPage() {
     const [signedInEmail, setSignedInEmail] = useState<string | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [incomingError, setIncomingError] = useState<string | null>(null);
+    const [isProtectionDialogOpen, setIsProtectionDialogOpen] = useState(false);
 
     const redirectToAuth = useCallback(() => {
         clearAuthSession();
@@ -299,6 +301,43 @@ export default function DashboardPage() {
                         style={{ marginBottom: t.space.m }}
                     />
                 ) : null}
+
+                <Card
+                    variant="elevated"
+                    style={{
+                        marginBottom: t.space.m,
+                        gap: t.space.s,
+                        background: t.isDark
+                            ? "linear-gradient(135deg, rgba(216, 27, 96, 0.12), rgba(9, 9, 11, 0.96))"
+                            : "linear-gradient(135deg, rgba(216, 27, 96, 0.08), rgba(255, 255, 255, 0.98))",
+                    }}
+                >
+                    <div
+                        style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: t.space.m,
+                            flexWrap: "wrap",
+                        }}
+                    >
+                        <div style={{ display: "grid", gap: t.space.xs, flex: 1, minWidth: 260 }}>
+                            <Text variant="h3">How do we protect your documents?</Text>
+                            <Text variant="bodySmall" color="secondary" style={{ maxWidth: 760 }}>
+                                Read a plain-language explanation of the encryption, key separation,
+                                and integrity checks used when files are stored and delivered.
+                            </Text>
+                        </div>
+
+                        <Button
+                            type="button"
+                            variant="SolidPrimary"
+                            onClick={() => setIsProtectionDialogOpen(true)}
+                        >
+                            Read Security Details
+                        </Button>
+                    </div>
+                </Card>
 
                 <section
                     style={{
@@ -525,6 +564,11 @@ export default function DashboardPage() {
                     </Card>
                 </section>
             </div>
+
+            <DocumentProtectionDialog
+                isOpen={isProtectionDialogOpen}
+                onClose={() => setIsProtectionDialogOpen(false)}
+            />
         </main>
     );
 }

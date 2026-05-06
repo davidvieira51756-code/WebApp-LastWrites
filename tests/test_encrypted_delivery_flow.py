@@ -318,6 +318,58 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertIn(shared_file["file_name"], second_archive_names)
         self.assertNotIn(first_file["file_name"], second_archive_names)
 
+    def test_recipient_cannot_request_another_recipients_delivery_package(self) -> None:
+        owner_email = f"delivery-owner-{uuid4().hex[:8]}@example.com"
+        owner_token = self._register_and_login(owner_email)
+
+        vault = self._create_vault(
+            owner_token,
+            name="Recipient Package Isolation",
+            owner_message="Each recipient should only see their own package.",
+        )
+        vault_id = vault["id"]
+        first_recipient_email = f"isolation-a-{uuid4().hex[:8]}@example.com"
+        second_recipient_email = f"isolation-b-{uuid4().hex[:8]}@example.com"
+
+        for recipient_email in (first_recipient_email, second_recipient_email):
+            add_recipient_response = self.client.post(
+                f"/vaults/{vault_id}/recipients",
+                headers=self._auth_headers(owner_token),
+                json={"email": recipient_email, "can_activate": True},
+            )
+            self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        first_file = self._upload_file_for_recipients(
+            owner_token,
+            vault_id,
+            "first-only.txt",
+            b"first recipient data",
+            recipient_emails=[first_recipient_email],
+        )
+        second_file = self._upload_file_for_recipients(
+            owner_token,
+            vault_id,
+            "second-only.txt",
+            b"second recipient data",
+            recipient_emails=[second_recipient_email],
+        )
+
+        self._deliver_vault(vault_id)
+
+        first_recipient_token = self._register_and_login(first_recipient_email)
+        response = self.client.get(
+            f"/vaults/{vault_id}/delivery-package",
+            headers=self._auth_headers(first_recipient_token),
+            params={"recipient_email": second_recipient_email},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+        archive = ZipFile(io.BytesIO(response.content))
+        archive_names = set(archive.namelist())
+        self.assertIn("Delivery.pdf", archive_names)
+        self.assertIn(first_file["file_name"], archive_names)
+        self.assertNotIn(second_file["file_name"], archive_names)
+
     def test_profile_update_and_short_id_public_access(self) -> None:
         email = f"profile-owner-{uuid4().hex[:8]}@example.com"
         token = self._register_and_login(email)
@@ -567,7 +619,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(captured_emails[0]["recipient"], owner_email)
         self.assertEqual(captured_emails[0]["public_vault_id"], vault_id)
         self.assertEqual(captured_emails[0]["vault_name"], "Grace Email Vault")
-        self.assertEqual(captured_emails[0]["requester_label"], "Integration Test User")
+        self.assertRegex(captured_emails[0]["requester_label"], r"^user_[a-f0-9]{8}$")
 
     def test_local_legacy_rsa_2048_keys_remain_readable_after_rotation_to_4096(self) -> None:
         vault_id = f"legacy-{uuid4().hex[:8]}"

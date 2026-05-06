@@ -6,13 +6,12 @@ import { useCatTheme } from "../theme";
 
 type CardVariant = "default" | "secondary" | "elevated" | "outline" | "invisible";
 
-type CardProps = {
+type CardProps = React.HTMLAttributes<HTMLElement> & {
   children: React.ReactNode;
   variant?: CardVariant;
-  style?: React.CSSProperties;
 };
 
-export function Card({ children, variant = "default", style }: CardProps) {
+export function Card({ children, variant = "default", style, ...props }: CardProps) {
   const t = useCatTheme();
 
   const variants: Record<CardVariant, React.CSSProperties> = {
@@ -52,6 +51,7 @@ export function Card({ children, variant = "default", style }: CardProps) {
         ...variants[variant],
         ...style,
       }}
+      {...props}
     >
       {children}
     </section>
