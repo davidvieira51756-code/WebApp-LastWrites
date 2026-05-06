@@ -17,6 +17,13 @@ import {
 import BrandLogo from "@/components/BrandLogo";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
+import {
+  clearStoredRecoveryKeyForVault,
+  decryptVaultFile,
+  getStoredRecoveryKeyForVault,
+  storeRecoveryKeyForVault,
+  verifyRecoveryKey,
+} from "@/lib/zeroKnowledge";
 
 type RecipientVaultSummary = {
   id: string;
@@ -31,6 +38,23 @@ type RecipientVaultSummary = {
   grace_period_expires_at?: string | null;
   delivered_at?: string | null;
   delivery_available?: boolean;
+  recovery_key_verifier?: string | null;
+};
+
+type DeliveryFile = {
+  id: string;
+  file_name: string;
+  content_type?: string | null;
+  zero_knowledge?: boolean;
+  kdf_salt?: string | null;
+  iv?: string | null;
+};
+
+type DeliveryFilesResponse = {
+  vault_id: string;
+  zero_knowledge_enabled: boolean;
+  recovery_key_verifier?: string | null;
+  files: DeliveryFile[];
 };
 
 function normalizeVaultId(rawVaultId: string | string[] | undefined): string {
@@ -128,6 +152,11 @@ export default function RecipientActivationPage() {
   const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [deliveryFiles, setDeliveryFiles] = useState<DeliveryFile[]>([]);
+  const [isLoadingDeliveryFiles, setIsLoadingDeliveryFiles] = useState(false);
+  const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
+  const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
+  const [isDownloadingFileId, setIsDownloadingFileId] = useState<string | null>(null);
 
   const authRedirectPath = useMemo(() => {
     if (!vaultId) {
@@ -207,6 +236,80 @@ export default function RecipientActivationPage() {
       void fetchSummary();
     }
   }, [authToken, fetchSummary, isCheckingAuth]);
+
+  const fetchDeliveryFiles = useCallback(async () => {
+    if (!apiUrl || !vaultId || !authToken || !summary?.delivery_available) {
+      return;
+    }
+
+    setIsLoadingDeliveryFiles(true);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-files`,
+        {
+          headers: buildAuthHeaders(authToken, false),
+        },
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(await getErrorDetail(response, "Failed to load delivery files."));
+      }
+
+      const payload = (await response.json()) as DeliveryFilesResponse;
+      setDeliveryFiles(Array.isArray(payload.files) ? payload.files : []);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Unexpected delivery file load error.");
+      setDeliveryFiles([]);
+    } finally {
+      setIsLoadingDeliveryFiles(false);
+    }
+  }, [apiUrl, authToken, handleUnauthorized, summary?.delivery_available, vaultId]);
+
+  useEffect(() => {
+    if (summary?.delivery_available) {
+      void fetchDeliveryFiles();
+    } else {
+      setDeliveryFiles([]);
+    }
+  }, [fetchDeliveryFiles, summary?.delivery_available]);
+
+  useEffect(() => {
+    if (!vaultId || !summary?.recovery_key_verifier) {
+      setRecoveryKey(null);
+      return;
+    }
+    const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
+    if (!storedRecoveryKey) {
+      setRecoveryKey(null);
+      return;
+    }
+
+    let isCancelled = false;
+    void (async () => {
+      const isValid = await verifyRecoveryKey(
+        storedRecoveryKey,
+        vaultId,
+        summary.recovery_key_verifier,
+      );
+      if (isCancelled) {
+        return;
+      }
+      if (isValid) {
+        setRecoveryKey(storedRecoveryKey);
+      } else {
+        clearStoredRecoveryKeyForVault(vaultId);
+        setRecoveryKey(null);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [summary?.recovery_key_verifier, vaultId]);
 
   const handleSignOut = useCallback(() => {
     clearAuthSession();
@@ -300,6 +403,42 @@ export default function RecipientActivationPage() {
     }
   };
 
+  const handleUnlockRecoveryKey = async () => {
+    setActionMessage(null);
+    setActionError(null);
+
+    if (!vaultId || !summary?.recovery_key_verifier) {
+      setActionError("This delivery does not expose a recovery verifier.");
+      return;
+    }
+
+    const isValid = await verifyRecoveryKey(
+      recoveryKeyInput,
+      vaultId,
+      summary.recovery_key_verifier,
+    );
+    if (!isValid) {
+      setActionError("Recovery key is incorrect.");
+      return;
+    }
+
+    storeRecoveryKeyForVault(vaultId, recoveryKeyInput);
+    setRecoveryKey(getStoredRecoveryKeyForVault(vaultId));
+    setRecoveryKeyInput("");
+    setActionMessage("Recovery key unlocked on this device for the current session.");
+  };
+
+  const handleForgetRecoveryKey = () => {
+    if (!vaultId) {
+      return;
+    }
+    clearStoredRecoveryKeyForVault(vaultId);
+    setRecoveryKey(null);
+    setRecoveryKeyInput("");
+    setActionMessage("Recovery key removed from this device session.");
+    setActionError(null);
+  };
+
   const handleDownloadPackage = async () => {
     setActionMessage(null);
     setActionError(null);
@@ -340,6 +479,66 @@ export default function RecipientActivationPage() {
       setActionError(message);
     } finally {
       setIsDownloadingPackage(false);
+    }
+  };
+
+  const handleDownloadDeliveryFile = async (fileItem: DeliveryFile) => {
+    setActionMessage(null);
+    setActionError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setActionError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsDownloadingFileId(fileItem.id);
+    try {
+      const response = await fetch(
+        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileItem.id)}/download`,
+        {
+          headers: buildAuthHeaders(authToken, false),
+        },
+      );
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(await getErrorDetail(response, "Failed to download delivery file."));
+      }
+
+      if (fileItem.zero_knowledge) {
+        if (!recoveryKey || !fileItem.kdf_salt || !fileItem.iv) {
+          throw new Error("Unlock the delivery with the recovery key before downloading files.");
+        }
+        const ciphertext = await response.arrayBuffer();
+        const plaintext = await decryptVaultFile(ciphertext, {
+          recoveryKey,
+          vaultId,
+          kdfSalt: fileItem.kdf_salt,
+          iv: fileItem.iv,
+        });
+        const plaintextBuffer = plaintext.buffer.slice(
+          plaintext.byteOffset,
+          plaintext.byteOffset + plaintext.byteLength,
+        ) as ArrayBuffer;
+        triggerBrowserDownload(
+          new Blob([plaintextBuffer], {
+            type: fileItem.content_type || "application/octet-stream",
+          }),
+          fileItem.file_name,
+        );
+      } else {
+        const blob = await response.blob();
+        triggerBrowserDownload(blob, getDownloadFileName(response, fileItem.file_name));
+      }
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : "Unexpected error while downloading the file.",
+      );
+    } finally {
+      setIsDownloadingFileId(null);
     }
   };
 
@@ -514,12 +713,81 @@ export default function RecipientActivationPage() {
               <Card variant="secondary" style={{ padding: t.space.m, gap: t.space.xs }}>
                 <Text variant="label">The delivery package is ready.</Text>
                 <Text variant="bodySmall" color="secondary">
-                  The vault has already been processed into your final ZIP package. You can download
-                  it directly from here.
+                  Your final delivery files are now available. You can still download the archival
+                  ZIP package, and if this vault uses zero-knowledge encryption you can decrypt the
+                  individual files here after entering the recovery key shared by the owner.
                 </Text>
+                {summary.recovery_key_verifier ? (
+                  recoveryKey ? (
+                    <>
+                      <Alert
+                        variant="success"
+                        message="Recovery key unlocked on this device for the current session."
+                      />
+                      <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+                        <Button type="button" variant="Primary" onClick={handleForgetRecoveryKey}>
+                          Forget Recovery Key
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <Input
+                        id="delivery-recovery-key"
+                        type="password"
+                        label="Recovery Key"
+                        value={recoveryKeyInput}
+                        onChange={(event) => setRecoveryKeyInput(event.target.value)}
+                        placeholder="Enter the vault recovery key"
+                      />
+                      <Button
+                        type="button"
+                        variant="SolidPrimary"
+                        onClick={() => void handleUnlockRecoveryKey()}
+                      >
+                        Unlock Delivery Files
+                      </Button>
+                    </>
+                  )
+                ) : null}
+
+                {isLoadingDeliveryFiles ? (
+                  <Alert variant="info" message="Loading delivery files..." />
+                ) : null}
+
+                {deliveryFiles.length > 0 ? (
+                  <div style={{ display: "grid", gap: t.space.xs }}>
+                    {deliveryFiles.map((fileItem) => (
+                      <Card
+                        key={fileItem.id}
+                        variant="secondary"
+                        style={{ padding: t.space.s, gap: t.space.xs }}
+                      >
+                        <Text variant="label">{fileItem.file_name}</Text>
+                        <Text variant="caption" color="muted">
+                          {fileItem.zero_knowledge
+                            ? "Zero-knowledge file"
+                            : "Legacy compatibility file"}
+                        </Text>
+                        <Button
+                          type="button"
+                          variant="Primary"
+                          onClick={() => void handleDownloadDeliveryFile(fileItem)}
+                          disabled={
+                            isDownloadingFileId === fileItem.id ||
+                            (fileItem.zero_knowledge && !recoveryKey)
+                          }
+                        >
+                          {isDownloadingFileId === fileItem.id ? "Preparing..." : "Download File"}
+                        </Button>
+                      </Card>
+                    ))}
+                  </div>
+                ) : null}
+
                 <Button
                   type="button"
-                  variant="SolidPrimary"
+                  variant="Primary"
                   onClick={() => void handleDownloadPackage()}
                   disabled={isDownloadingPackage}
                 >

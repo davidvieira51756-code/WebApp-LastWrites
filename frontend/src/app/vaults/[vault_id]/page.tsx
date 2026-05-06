@@ -18,6 +18,16 @@ import BrandLogo from "@/components/BrandLogo";
 import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
+import {
+  buildRecoveryKeyVerifier,
+  clearStoredRecoveryKeyForVault,
+  decryptVaultFile,
+  encryptVaultFile,
+  generateRecoveryKey,
+  getStoredRecoveryKeyForVault,
+  storeRecoveryKeyForVault,
+  verifyRecoveryKey,
+} from "@/lib/zeroKnowledge";
 
 type ActivationRequestItem = {
   recipient_email: string;
@@ -60,6 +70,8 @@ type VaultDetail = {
   delivered_at?: string | null;
   delivery_error?: string | null;
   delivery_packages?: DeliveryPackage[];
+  zero_knowledge_enabled?: boolean;
+  recovery_key_verifier?: string | null;
 };
 
 type VaultFile = {
@@ -73,6 +85,13 @@ type VaultFile = {
   encrypted?: boolean;
   algorithm?: string | null;
   recipient_emails?: string[];
+  zero_knowledge?: boolean;
+  kdf_salt?: string | null;
+  iv?: string | null;
+  encryption_context?: string | null;
+  authentication_tag_appended?: boolean;
+  plaintext_sha256?: string | null;
+  ciphertext_sha256?: string | null;
 };
 
 type VaultFilesResponse = {
@@ -222,6 +241,11 @@ export default function VaultDetailsPage() {
 
   const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
+  const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
+  const [recoveryKeyMessage, setRecoveryKeyMessage] = useState<string | null>(null);
+  const [recoveryKeyError, setRecoveryKeyError] = useState<string | null>(null);
+  const [isEnablingZeroKnowledge, setIsEnablingZeroKnowledge] = useState(false);
 
   const [isDeletingRecipient, setIsDeletingRecipient] = useState<string | null>(null);
   const [isDeletingFileId, setIsDeletingFileId] = useState<string | null>(null);
@@ -347,6 +371,126 @@ export default function VaultDetailsPage() {
       void fetchVaultData(true);
     }
   }, [authToken, fetchVaultData, isCheckingAuth]);
+
+  useEffect(() => {
+    if (!vaultId || !vault?.zero_knowledge_enabled || !vault.recovery_key_verifier) {
+      setRecoveryKey(null);
+      setRecoveryKeyInput("");
+      return;
+    }
+
+    let isCancelled = false;
+    const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
+    if (!storedRecoveryKey) {
+      setRecoveryKey(null);
+      return;
+    }
+
+    void (async () => {
+      const isValid = await verifyRecoveryKey(
+        storedRecoveryKey,
+        vaultId,
+        vault.recovery_key_verifier,
+      );
+      if (isCancelled) {
+        return;
+      }
+      if (isValid) {
+        setRecoveryKey(storedRecoveryKey);
+        setRecoveryKeyInput("");
+      } else {
+        clearStoredRecoveryKeyForVault(vaultId);
+        setRecoveryKey(null);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [vault?.recovery_key_verifier, vault?.zero_knowledge_enabled, vaultId]);
+
+  const handleUnlockRecoveryKey = async () => {
+    setRecoveryKeyMessage(null);
+    setRecoveryKeyError(null);
+
+    if (!vaultId || !vault?.recovery_key_verifier) {
+      setRecoveryKeyError("This vault is missing its recovery verifier.");
+      return;
+    }
+
+    const isValid = await verifyRecoveryKey(
+      recoveryKeyInput,
+      vaultId,
+      vault.recovery_key_verifier,
+    );
+    if (!isValid) {
+      setRecoveryKeyError("Recovery key is incorrect.");
+      return;
+    }
+
+    storeRecoveryKeyForVault(vaultId, recoveryKeyInput);
+    setRecoveryKey(getStoredRecoveryKeyForVault(vaultId));
+    setRecoveryKeyInput("");
+    setRecoveryKeyMessage("Vault unlocked on this device for the current session.");
+  };
+
+  const handleForgetRecoveryKey = () => {
+    if (!vaultId) {
+      return;
+    }
+    clearStoredRecoveryKeyForVault(vaultId);
+    setRecoveryKey(null);
+    setRecoveryKeyInput("");
+    setRecoveryKeyMessage("Recovery key removed from this device session.");
+    setRecoveryKeyError(null);
+  };
+
+  const handleEnableZeroKnowledge = async () => {
+    setRecoveryKeyMessage(null);
+    setRecoveryKeyError(null);
+    setUpdateMessage(null);
+    setUpdateError(null);
+
+    if (!apiUrl || !vaultId || !authToken) {
+      setRecoveryKeyError("API URL or vault identifier is missing.");
+      return;
+    }
+
+    setIsEnablingZeroKnowledge(true);
+    try {
+      const generatedRecoveryKey = generateRecoveryKey();
+      const recoveryKeyVerifier = await buildRecoveryKeyVerifier(generatedRecoveryKey);
+      const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`, {
+        method: "PATCH",
+        headers: buildAuthHeaders(authToken, true),
+        body: JSON.stringify({
+          zero_knowledge_enabled: true,
+          recovery_key_verifier: recoveryKeyVerifier,
+        }),
+      });
+
+      if (isUnauthorizedStatus(response.status)) {
+        handleUnauthorized();
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(await getErrorDetail(response, "Failed to enable zero-knowledge mode."));
+      }
+
+      storeRecoveryKeyForVault(vaultId, generatedRecoveryKey);
+      setRecoveryKey(generatedRecoveryKey);
+      setRecoveryKeyMessage(
+        `Zero-knowledge mode enabled. Save this recovery key now: ${generatedRecoveryKey}`,
+      );
+      await fetchVaultData(false);
+    } catch (error) {
+      setRecoveryKeyError(
+        error instanceof Error ? error.message : "Unexpected zero-knowledge enablement error.",
+      );
+    } finally {
+      setIsEnablingZeroKnowledge(false);
+    }
+  };
 
   const handleSignOut = useCallback(() => {
     clearAuthSession();
@@ -498,11 +642,36 @@ export default function VaultDetailsPage() {
       setUploadError("API URL or vault identifier is missing.");
       return;
     }
+    if (vault?.zero_knowledge_enabled && !recoveryKey) {
+      setUploadError("Unlock this vault with the recovery key before uploading files.");
+      return;
+    }
 
     setIsUploadingFile(true);
     try {
       const formData = new FormData();
-      formData.append("file", selectedFile);
+      if (vault?.zero_knowledge_enabled) {
+        const encryptedPayload = await encryptVaultFile(await selectedFile.arrayBuffer(), {
+          recoveryKey: recoveryKey as string,
+          vaultId,
+        });
+        const ciphertextBuffer = encryptedPayload.ciphertext.buffer.slice(
+          encryptedPayload.ciphertext.byteOffset,
+          encryptedPayload.ciphertext.byteOffset + encryptedPayload.ciphertext.byteLength,
+        ) as ArrayBuffer;
+        formData.append(
+          "file",
+          new File([ciphertextBuffer], selectedFile.name, {
+            type: selectedFile.type || "text/plain",
+          }),
+        );
+        formData.append(
+          "zero_knowledge_metadata_json",
+          JSON.stringify(encryptedPayload.metadata),
+        );
+      } else {
+        formData.append("file", selectedFile);
+      }
       formData.append("recipient_emails_json", JSON.stringify([]));
 
       const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files`, {
@@ -608,11 +777,32 @@ export default function VaultDetailsPage() {
       }
 
       const matchingFile = files.find((fileItem) => fileItem.id === fileId);
-      const blob = await response.blob();
-      triggerBrowserDownload(
-        blob,
-        getDownloadFileName(response, matchingFile?.file_name || `${fileId}.bin`),
-      );
+      if (matchingFile?.zero_knowledge) {
+        if (!recoveryKey || !matchingFile.kdf_salt || !matchingFile.iv) {
+          throw new Error("Unlock this vault with the recovery key before downloading files.");
+        }
+        const ciphertext = await response.arrayBuffer();
+        const plaintext = await decryptVaultFile(ciphertext, {
+          recoveryKey,
+          vaultId,
+          kdfSalt: matchingFile.kdf_salt,
+          iv: matchingFile.iv,
+        });
+        const plaintextBuffer = plaintext.buffer.slice(
+          plaintext.byteOffset,
+          plaintext.byteOffset + plaintext.byteLength,
+        ) as ArrayBuffer;
+        const blob = new Blob([plaintextBuffer], {
+          type: matchingFile.content_type || "application/octet-stream",
+        });
+        triggerBrowserDownload(blob, matchingFile.file_name || `${fileId}.bin`);
+      } else {
+        const blob = await response.blob();
+        triggerBrowserDownload(
+          blob,
+          getDownloadFileName(response, matchingFile?.file_name || `${fileId}.bin`),
+        );
+      }
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unexpected error while downloading file.";
@@ -1080,6 +1270,61 @@ export default function VaultDetailsPage() {
           >
             <div style={{ display: "grid", gap: t.space.m }}>
               <Card variant="elevated" style={{ gap: t.space.s }}>
+                <Text variant="h3">Private File Access</Text>
+                {vault?.zero_knowledge_enabled ? (
+                  <>
+                    <Text variant="bodySmall" color="secondary">
+                      This vault uses zero-knowledge file encryption. The recovery key never
+                      leaves your browser and is required to encrypt uploads and decrypt downloads.
+                    </Text>
+
+                    {recoveryKey ? (
+                      <>
+                        <Alert variant="success" message="Vault unlocked on this device for the current session." />
+                        <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+                          <Button type="button" variant="Primary" onClick={handleForgetRecoveryKey}>
+                            Forget Recovery Key
+                          </Button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <Input
+                          id="vault-recovery-key"
+                          type="password"
+                          label="Recovery Key"
+                          value={recoveryKeyInput}
+                          onChange={(event) => setRecoveryKeyInput(event.target.value)}
+                          placeholder="Paste the vault recovery key"
+                        />
+                        <Button type="button" variant="SolidPrimary" onClick={() => void handleUnlockRecoveryKey()}>
+                          Unlock Vault
+                        </Button>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <Text variant="bodySmall" color="secondary">
+                      This vault still uses the legacy server-side decryption flow. Enable
+                      zero-knowledge mode to make future file uploads unreadable to the server.
+                    </Text>
+                    <Button
+                      type="button"
+                      variant="SolidPrimary"
+                      disabled={isArchivedFinal || isEnablingZeroKnowledge}
+                      onClick={() => void handleEnableZeroKnowledge()}
+                    >
+                      {isEnablingZeroKnowledge ? "Enabling..." : "Enable Zero-Knowledge Mode"}
+                    </Button>
+                  </>
+                )}
+
+                {recoveryKeyError ? <Alert variant="error" message={recoveryKeyError} /> : null}
+                {recoveryKeyMessage ? <Alert variant="success" message={recoveryKeyMessage} /> : null}
+              </Card>
+
+              <Card variant="elevated" style={{ gap: t.space.s }}>
                 <Text variant="h3">Vault Settings</Text>
                 <form
                   onSubmit={handleUpdateVault}
@@ -1141,7 +1386,7 @@ export default function VaultDetailsPage() {
                     label="Message For Recipients"
                     value={editableOwnerMessage}
                     onChange={(event) => setEditableOwnerMessage(event.target.value)}
-                    placeholder="This message appears on the generated cover PDF."
+                    placeholder="Visible delivery note. Do not put secrets here."
                     maxLength={4000}
                     disabled={isArchivedFinal}
                     multiline
@@ -1444,7 +1689,8 @@ export default function VaultDetailsPage() {
                 <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
                   <Text variant="h3">Attached Files</Text>
                   <Text variant="bodySmall" color="secondary">
-                    Add files here first. After a file is attached, you can add or remove recipients for that specific file at any time.
+                    Add files here first. In zero-knowledge vaults the browser encrypts each file
+                    before upload, so the recovery key must be unlocked on this device.
                   </Text>
                 </div>
                 <Badge label={`${files.length} files`} size="sm" outlineOnly />
@@ -1479,9 +1725,14 @@ export default function VaultDetailsPage() {
                   type="submit"
                   size="full"
                   variant="SolidPrimary"
-                  disabled={isUploadingFile || isArchivedFinal || !selectedFile}
+                  disabled={
+                    isUploadingFile ||
+                    isArchivedFinal ||
+                    !selectedFile ||
+                    (vault?.zero_knowledge_enabled && !recoveryKey)
+                  }
                 >
-                  {isUploadingFile ? "Uploading..." : "Add File"}
+                  {isUploadingFile ? "Uploading..." : vault?.zero_knowledge_enabled ? "Encrypt And Add File" : "Add File"}
                 </Button>
               </form>
 
@@ -1502,6 +1753,9 @@ export default function VaultDetailsPage() {
                       >
                         <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
                           <Text variant="label">{fileItem.file_name}</Text>
+                          <Text variant="caption" color="muted">
+                            {fileItem.zero_knowledge ? "Zero-knowledge encrypted in browser" : "Legacy server-side delivery flow"}
+                          </Text>
                         </div>
                         <Button
                           type="button"

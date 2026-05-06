@@ -4,6 +4,7 @@ import importlib
 import io
 import json
 import os
+import secrets
 import sys
 import tempfile
 import unittest
@@ -13,13 +14,15 @@ from zipfile import ZipFile
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding, rsa
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from fastapi.testclient import TestClient
-from backend.services.file_crypto_service import b64url_encode
+from backend.services.file_crypto_service import b64url_decode, b64url_encode
 from backend.services.vault_key_service import LocalVaultKeyService, _build_key_name
 
 
@@ -81,6 +84,23 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         return {"Authorization": f"Bearer {token}"}
 
     def _create_vault(self, token: str, *, name: str, owner_message: str) -> dict:
+        return self._create_vault_with_options(
+            token,
+            name=name,
+            owner_message=owner_message,
+            zero_knowledge_enabled=False,
+            recovery_key_verifier=None,
+        )
+
+    def _create_vault_with_options(
+        self,
+        token: str,
+        *,
+        name: str,
+        owner_message: str,
+        zero_knowledge_enabled: bool,
+        recovery_key_verifier: str | None,
+    ) -> dict:
         response = self.client.post(
             "/vaults",
             headers=self._auth_headers(token),
@@ -90,6 +110,8 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
                 "grace_period_days": 7,
                 "recipients": [],
                 "activation_threshold": 1,
+                "zero_knowledge_enabled": zero_knowledge_enabled,
+                "recovery_key_verifier": recovery_key_verifier,
             },
         )
         self.assertEqual(response.status_code, 201, response.text)
@@ -120,6 +142,85 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             f"/vaults/{vault_id}/files",
             headers=self._auth_headers(token),
             files={"file": (file_name, content, "text/plain")},
+            data=data,
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()["file"]
+
+    @staticmethod
+    def _build_recovery_key_verifier(recovery_key: bytes) -> str:
+        digest = hashes.Hash(hashes.SHA256())
+        digest.update(b"lastwrites:recovery-key:v1:")
+        digest.update(recovery_key)
+        return b64url_encode(digest.finalize())
+
+    @staticmethod
+    def _encrypt_zero_knowledge_payload(plaintext: bytes, recovery_key: bytes, vault_id: str) -> dict:
+        salt = secrets.token_bytes(16)
+        iv = secrets.token_bytes(12)
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=f"lastwrites:vault-file:{vault_id}".encode("utf-8"),
+        ).derive(recovery_key)
+        ciphertext = AESGCM(aes_key).encrypt(iv, plaintext, None)
+        digest_plaintext = hashes.Hash(hashes.SHA256())
+        digest_plaintext.update(plaintext)
+        digest_ciphertext = hashes.Hash(hashes.SHA256())
+        digest_ciphertext.update(ciphertext)
+        return {
+            "ciphertext": ciphertext,
+            "metadata": {
+                "encrypted": True,
+                "zero_knowledge": True,
+                "algorithm": "AES-256-GCM",
+                "schema_version": 3,
+                "kdf_algorithm": "HKDF-SHA256",
+                "kdf_salt": b64url_encode(salt),
+                "iv": b64url_encode(iv),
+                "authentication_tag_appended": True,
+                "plaintext_size_bytes": len(plaintext),
+                "plaintext_sha256": b64url_encode(digest_plaintext.finalize()),
+                "ciphertext_sha256": b64url_encode(digest_ciphertext.finalize()),
+                "encryption_context": f"vault:{vault_id}",
+            },
+        }
+
+    @staticmethod
+    def _decrypt_zero_knowledge_payload(ciphertext: bytes, recovery_key: bytes, vault_id: str, metadata: dict) -> bytes:
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b64url_decode(str(metadata["kdf_salt"])),
+            info=f"lastwrites:vault-file:{vault_id}".encode("utf-8"),
+        ).derive(recovery_key)
+        return AESGCM(aes_key).decrypt(
+            b64url_decode(str(metadata["iv"])),
+            ciphertext,
+            None,
+        )
+
+    def _upload_zero_knowledge_file_for_recipients(
+        self,
+        token: str,
+        vault_id: str,
+        file_name: str,
+        content: bytes,
+        recovery_key: bytes,
+        *,
+        recipient_emails: list[str] | None,
+    ) -> dict:
+        encryption_payload = self._encrypt_zero_knowledge_payload(content, recovery_key, vault_id)
+        data = {
+            "zero_knowledge_metadata_json": json.dumps(encryption_payload["metadata"]),
+        }
+        if recipient_emails is not None:
+            data["recipient_emails_json"] = json.dumps(recipient_emails)
+        response = self.client.post(
+            f"/vaults/{vault_id}/files",
+            headers=self._auth_headers(token),
+            files={"file": (file_name, encryption_payload["ciphertext"], "text/plain")},
             data=data,
         )
         self.assertEqual(response.status_code, 201, response.text)
@@ -200,6 +301,63 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(download_response.status_code, 200, download_response.text)
         self.assertEqual(download_response.content, plaintext)
         self.assertIn("attachment", download_response.headers.get("content-disposition", ""))
+
+    def test_zero_knowledge_upload_and_owner_download_stays_ciphertext_on_server(self) -> None:
+        email = f"zk-owner-{uuid4().hex[:8]}@example.com"
+        token = self._register_and_login(email)
+        recovery_key = secrets.token_bytes(32)
+
+        vault = self._create_vault_with_options(
+            token,
+            name="Zero Knowledge Vault",
+            owner_message="Private file vault.",
+            zero_knowledge_enabled=True,
+            recovery_key_verifier=self._build_recovery_key_verifier(recovery_key),
+        )
+        self.assertTrue(vault["zero_knowledge_enabled"])
+        self.assertTrue(vault["recovery_key_verifier"])
+        self.assertFalse(vault.get("key_kid"))
+
+        plaintext = b"owner zero knowledge payload"
+        uploaded_file = self._upload_zero_knowledge_file_for_recipients(
+            token,
+            vault["id"],
+            "zk-owner.txt",
+            plaintext,
+            recovery_key,
+            recipient_emails=None,
+        )
+
+        self.assertTrue(uploaded_file["zero_knowledge"])
+        self.assertEqual(uploaded_file["kdf_algorithm"], "HKDF-SHA256")
+        self.assertTrue(uploaded_file["authentication_tag_appended"])
+        self.assertFalse(uploaded_file.get("wrapped_key"))
+        self.assertFalse(uploaded_file.get("key_kid"))
+
+        ciphertext_path = (
+            Path(os.environ["LOCAL_BLOB_ROOT_DIR"])
+            / uploaded_file["container_name"]
+            / uploaded_file["blob_name"]
+        )
+        self.assertTrue(ciphertext_path.exists())
+        stored_ciphertext = ciphertext_path.read_bytes()
+        self.assertNotEqual(stored_ciphertext, plaintext)
+
+        download_response = self.client.get(
+            f"/vaults/{vault['id']}/files/{uploaded_file['id']}/download",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(download_response.status_code, 200, download_response.text)
+        self.assertEqual(download_response.content, stored_ciphertext)
+        self.assertNotEqual(download_response.content, plaintext)
+
+        decrypted = self._decrypt_zero_knowledge_payload(
+            download_response.content,
+            recovery_key,
+            vault["id"],
+            uploaded_file,
+        )
+        self.assertEqual(decrypted, plaintext)
 
     def test_worker_generates_recipient_specific_delivery_zips_for_encrypted_vault(self) -> None:
         email = f"worker-owner-{uuid4().hex[:8]}@example.com"
@@ -369,6 +527,75 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertIn("Delivery.pdf", archive_names)
         self.assertIn(first_file["file_name"], archive_names)
         self.assertNotIn(second_file["file_name"], archive_names)
+
+    def test_zero_knowledge_delivery_package_keeps_files_encrypted(self) -> None:
+        owner_email = f"zk-delivery-owner-{uuid4().hex[:8]}@example.com"
+        owner_token = self._register_and_login(owner_email)
+        recovery_key = secrets.token_bytes(32)
+
+        vault = self._create_vault_with_options(
+            owner_token,
+            name="Zero Knowledge Delivery Vault",
+            owner_message="Use the recovery key shared by the owner.",
+            zero_knowledge_enabled=True,
+            recovery_key_verifier=self._build_recovery_key_verifier(recovery_key),
+        )
+        vault_id = vault["id"]
+        recipient_email = f"zk-recipient-{uuid4().hex[:8]}@example.com"
+
+        add_recipient_response = self.client.post(
+            f"/vaults/{vault_id}/recipients",
+            headers=self._auth_headers(owner_token),
+            json={"email": recipient_email, "can_activate": True},
+        )
+        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        uploaded_file = self._upload_zero_knowledge_file_for_recipients(
+            owner_token,
+            vault_id,
+            "zk-delivery.txt",
+            b"recipient secret payload",
+            recovery_key,
+            recipient_emails=[recipient_email],
+        )
+
+        self._deliver_vault(vault_id)
+
+        recipient_token = self._register_and_login(recipient_email)
+        list_delivery_files_response = self.client.get(
+            f"/vaults/{vault_id}/delivery-files",
+            headers=self._auth_headers(recipient_token),
+        )
+        self.assertEqual(list_delivery_files_response.status_code, 200, list_delivery_files_response.text)
+        delivery_files_payload = list_delivery_files_response.json()
+        self.assertTrue(delivery_files_payload["zero_knowledge_enabled"])
+        self.assertEqual(delivery_files_payload["recovery_key_verifier"], vault["recovery_key_verifier"])
+        self.assertEqual(len(delivery_files_payload["files"]), 1)
+        self.assertTrue(delivery_files_payload["files"][0]["zero_knowledge"])
+
+        delivery_package_response = self.client.get(
+            f"/vaults/{vault_id}/delivery-package",
+            headers=self._auth_headers(recipient_token),
+        )
+        self.assertEqual(delivery_package_response.status_code, 200, delivery_package_response.text)
+        archive = ZipFile(io.BytesIO(delivery_package_response.content))
+        archive_names = set(archive.namelist())
+        self.assertIn("README.txt", archive_names)
+        self.assertIn("manifest.json", archive_names)
+        encrypted_entries = [name for name in archive_names if name.endswith(".lwenc")]
+        self.assertEqual(len(encrypted_entries), 1)
+
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        self.assertEqual(manifest["format"], "lastwrites-zero-knowledge-delivery-bundle-v1")
+        self.assertEqual(manifest["recipient_email"], recipient_email)
+        self.assertTrue(manifest["files"][0]["zero_knowledge"])
+        decrypted = self._decrypt_zero_knowledge_payload(
+            archive.read(encrypted_entries[0]),
+            recovery_key,
+            vault_id,
+            uploaded_file,
+        )
+        self.assertEqual(decrypted, b"recipient secret payload")
 
     def test_profile_update_and_short_id_public_access(self) -> None:
         email = f"profile-owner-{uuid4().hex[:8]}@example.com"

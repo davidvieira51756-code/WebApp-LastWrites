@@ -11,24 +11,24 @@ type DocumentProtectionDialogProps = {
 
 const SECURITY_POINTS = [
   {
-    title: "Encrypted before storage",
+    title: "Zero-knowledge vaults encrypt in your browser",
     body:
-      "Every uploaded file is encrypted with AES-256-GCM before it is written to storage, so the blob store does not keep a readable plaintext copy of your document.",
+      "New secure vaults encrypt each file in the browser with AES-256-GCM before upload. The server stores ciphertext only and does not receive the recovery key needed to read the document.",
   },
   {
-    title: "Keys are separated from files",
+    title: "Recovery keys stay with the user",
     body:
-      "Each vault uses its own RSA key pair. The one-time file key is wrapped with RSA-OAEP-256, while the private key stays in the vault key service instead of beside the file itself.",
+      "Each zero-knowledge vault has a recovery key that you must save. We keep only a verifier, not the readable key itself, so losing it means the encrypted files cannot be recovered by the platform.",
   },
   {
-    title: "Integrity is checked",
+    title: "Recipients get encrypted delivery bundles",
     body:
-      "We keep SHA-256 integrity metadata and verify the decrypted file before serving it back, which helps detect tampering or corruption.",
+      "When a zero-knowledge vault is delivered, recipients receive encrypted files and metadata for decryption in the client. The delivery worker can package the files without opening their contents.",
   },
   {
-    title: "Access stays controlled",
+    title: "Legacy vaults remain compatible",
     body:
-      "Plaintext is only produced inside authenticated workflows such as an owner download or a final delivery package for an entitled recipient. This protects files at rest and limits exposure, but it is not a zero-knowledge design.",
+      "Older vaults can still use the previous server-side delivery flow. The app now marks which vaults and files are zero-knowledge so the security model is explicit instead of implied.",
   },
 ];
 
@@ -116,9 +116,9 @@ export default function DocumentProtectionDialog({
                 How we protect your documents
               </Text>
               <Text variant="bodySmall" color="secondary" style={{ maxWidth: 620 }}>
-                Last Writes encrypts uploaded files before storage and keeps the file
-                encryption key separate from the ciphertext. That means direct storage
-                access alone is not enough to read the document.
+                Last Writes now supports zero-knowledge vaults where your browser encrypts
+                files before upload and the recovery key stays with you. Direct access to
+                storage or the API is not enough to read those documents.
               </Text>
             </div>
 
@@ -156,9 +156,9 @@ export default function DocumentProtectionDialog({
             }}
           >
             <Text variant="bodySmall" color="secondary">
-              Important: this is strong server-side protection, not a claim that the
-              application can never decrypt a file. The backend must decrypt files to
-              deliver them to the owner or to assemble the final recipient package.
+              Important: only zero-knowledge vault files get this guarantee. Visible vault
+              metadata, recipient emails, and any legacy vault files still follow the older
+              compatibility model unless you migrate them into a zero-knowledge vault.
             </Text>
           </Card>
         </div>

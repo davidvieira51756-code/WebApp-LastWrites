@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
 import { buildAuthHeaders, isUnauthorizedStatus } from "@/lib/api";
+import { buildRecoveryKeyVerifier, generateRecoveryKey, storeRecoveryKeyForVault } from "@/lib/zeroKnowledge";
 
 export type ActivationRequestItem = {
     recipient_email: string;
@@ -39,6 +40,8 @@ export type Vault = {
     delivery_file_name?: string | null;
     delivered_at?: string | null;
     delivery_error?: string | null;
+    zero_knowledge_enabled?: boolean;
+    recovery_key_verifier?: string | null;
 };
 
 type CreateVaultFormProps = {
@@ -63,6 +66,7 @@ export default function CreateVaultForm({
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
+    const [createdRecoveryKey, setCreatedRecoveryKey] = useState<string | null>(null);
 
     const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -89,6 +93,8 @@ export default function CreateVaultForm({
 
         setIsSubmitting(true);
         try {
+            const recoveryKey = generateRecoveryKey();
+            const recoveryKeyVerifier = await buildRecoveryKeyVerifier(recoveryKey);
             const response = await fetch(`${apiUrl}/vaults`, {
                 method: "POST",
                 headers: buildAuthHeaders(authToken, true),
@@ -99,6 +105,8 @@ export default function CreateVaultForm({
                     grace_period_unit: gracePeriodUnit,
                     recipients: [],
                     activation_threshold: normalizedThreshold,
+                    zero_knowledge_enabled: true,
+                    recovery_key_verifier: recoveryKeyVerifier,
                 }),
             });
 
@@ -121,7 +129,12 @@ export default function CreateVaultForm({
             }
 
             const createdVault = (await response.json()) as Vault;
+            if (createdVault.recovery_key_verifier !== recoveryKeyVerifier) {
+                throw new Error("Vault recovery key verification failed. Please try again.");
+            }
             onCreated(createdVault);
+            storeRecoveryKeyForVault(createdVault.id, recoveryKey);
+            setCreatedRecoveryKey(recoveryKey);
             setName("");
             setOwnerMessage("");
             setGracePeriodValue(30);
@@ -147,7 +160,8 @@ export default function CreateVaultForm({
             <Text variant="h3">Create New Vault</Text>
             <Text variant="bodySmall" color="secondary">
                 Define a secure vault, set the grace period, and choose how many recipients must
-                request activation before the grace-period timer starts.
+                request activation before the grace-period timer starts. New vaults now use
+                zero-knowledge file encryption with a recovery key you must save.
             </Text>
 
             <form
@@ -245,6 +259,22 @@ export default function CreateVaultForm({
 
             {successMessage ? (
                 <Alert message={successMessage} variant="success" />
+            ) : null}
+
+            {createdRecoveryKey ? (
+                <Card variant="outline" style={{ gap: t.space.xs }}>
+                    <Text variant="label" weight="semibold">Vault Recovery Key</Text>
+                    <Text variant="bodySmall" color="secondary">
+                        Save this key now. It is required to decrypt uploaded files and the server
+                        does not keep a readable copy of it.
+                    </Text>
+                    <Input
+                        id="created-vault-recovery-key"
+                        label="Recovery Key"
+                        value={createdRecoveryKey}
+                        readOnly
+                    />
+                </Card>
             ) : null}
         </Card>
     );

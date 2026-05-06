@@ -37,6 +37,7 @@ try:
     )
     from backend.models.vault import (
         ActivationRequestCreate,
+        DeliveryFileAccessResponse,
         RecipientVaultSummary,
         AuditLogEntry,
         VaultCreate,
@@ -74,6 +75,7 @@ except ModuleNotFoundError:
     )
     from models.vault import (
         ActivationRequestCreate,
+        DeliveryFileAccessResponse,
         RecipientVaultSummary,
         AuditLogEntry,
         VaultCreate,
@@ -109,6 +111,8 @@ SAFE_FILENAME_REGEX = re.compile(r"[^A-Za-z0-9._() -]+")
 SHORT_ID_ALPHABET = string.ascii_lowercase + string.digits
 FINAL_IMMUTABLE_VAULT_STATUSES = {"delivered", "delivered_archived"}
 FINAL_IMMUTABLE_VAULT_ERROR = "This vault has already been delivered and archived. It can no longer be modified."
+ZERO_KNOWLEDGE_FILE_SCHEMA_VERSION = 3
+ZERO_KNOWLEDGE_KDF_ALGORITHM = "HKDF-SHA256"
 DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES = {
     "application/json",
     "application/msword",
@@ -420,6 +424,15 @@ def resolve_display_name_preference(value: str) -> str:
     return normalized_value
 
 
+def normalize_recovery_key_verifier(value: Optional[str]) -> Optional[str]:
+    normalized_value = str(value or "").strip()
+    if not normalized_value:
+        return None
+    if len(normalized_value) < 16:
+        raise ValueError("Recovery key verifier is too short.")
+    return normalized_value
+
+
 def build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
     if not user_item:
         return None
@@ -613,6 +626,59 @@ def parse_recipient_emails_json(raw_value: Optional[str]) -> Optional[List[str]]
     return [str(item or "") for item in parsed_value]
 
 
+def _normalize_zero_knowledge_metadata(raw_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    normalized_metadata = {
+        "encrypted": bool(raw_metadata.get("encrypted", True)),
+        "zero_knowledge": bool(raw_metadata.get("zero_knowledge", True)),
+        "algorithm": str(raw_metadata.get("algorithm", "")).strip(),
+        "schema_version": int(raw_metadata.get("schema_version", 0) or 0),
+        "kdf_algorithm": str(raw_metadata.get("kdf_algorithm", "")).strip(),
+        "kdf_salt": str(raw_metadata.get("kdf_salt", "")).strip(),
+        "iv": str(raw_metadata.get("iv", "")).strip(),
+        "authentication_tag_appended": bool(raw_metadata.get("authentication_tag_appended", False)),
+        "plaintext_sha256": str(raw_metadata.get("plaintext_sha256", "")).strip() or None,
+        "ciphertext_sha256": str(raw_metadata.get("ciphertext_sha256", "")).strip() or None,
+        "encryption_context": str(raw_metadata.get("encryption_context", "")).strip() or None,
+        "plaintext_size_bytes": int(raw_metadata.get("plaintext_size_bytes", 0) or 0),
+    }
+
+    if not normalized_metadata["encrypted"] or not normalized_metadata["zero_knowledge"]:
+        raise ValueError("Zero-knowledge uploads must be encrypted on the client.")
+    if normalized_metadata["algorithm"] != "AES-256-GCM":
+        raise ValueError("Zero-knowledge uploads must use AES-256-GCM.")
+    if normalized_metadata["schema_version"] != ZERO_KNOWLEDGE_FILE_SCHEMA_VERSION:
+        raise ValueError("Unsupported zero-knowledge file schema version.")
+    if normalized_metadata["kdf_algorithm"] != ZERO_KNOWLEDGE_KDF_ALGORITHM:
+        raise ValueError("Unsupported zero-knowledge key derivation algorithm.")
+    if not normalized_metadata["kdf_salt"] or not normalized_metadata["iv"]:
+        raise ValueError("Zero-knowledge upload metadata is incomplete.")
+    if not normalized_metadata["authentication_tag_appended"]:
+        raise ValueError("Zero-knowledge uploads must include the authentication tag in ciphertext.")
+    if normalized_metadata["plaintext_size_bytes"] < 1:
+        raise ValueError("Zero-knowledge uploads must include the original plaintext size.")
+
+    return normalized_metadata
+
+
+def parse_zero_knowledge_metadata_json(raw_value: Optional[str]) -> Optional[Dict[str, Any]]:
+    if raw_value is None:
+        return None
+
+    normalized_value = raw_value.strip()
+    if not normalized_value:
+        return None
+
+    try:
+        parsed_value = json.loads(normalized_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Zero-knowledge metadata payload must be valid JSON.") from exc
+
+    if not isinstance(parsed_value, dict):
+        raise ValueError("Zero-knowledge metadata payload must be a JSON object.")
+
+    return _normalize_zero_knowledge_metadata(parsed_value)
+
+
 def sanitize_filename(file_name: str) -> str:
     base_name = os.path.basename(str(file_name or "")).strip()
     normalized_name = base_name.replace("\x00", "")
@@ -762,11 +828,93 @@ def _get_vault_recipient(vault_item: Dict[str, Any], recipient_email: str) -> Op
     return None
 
 
+def _list_vault_files(vault_item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    files = vault_item.get("files", [])
+    if not isinstance(files, list):
+        return []
+    return [file_item for file_item in files if isinstance(file_item, dict)]
+
+
+def _recipient_has_delivery_package(vault_item: Dict[str, Any], recipient_email: str) -> bool:
+    normalized_email = recipient_email.strip().lower()
+    delivery_packages = vault_item.get("delivery_packages", [])
+    if not isinstance(delivery_packages, list):
+        return False
+
+    return any(
+        isinstance(package, dict)
+        and str(package.get("recipient_email", "")).strip().lower() == normalized_email
+        and str(package.get("container_name", "")).strip()
+        and str(package.get("blob_name", "")).strip()
+        for package in delivery_packages
+    )
+
+
+def _list_delivery_files_for_actor(
+    vault_item: Dict[str, Any],
+    *,
+    current_user_id: str,
+    current_email: str,
+) -> List[Dict[str, Any]]:
+    if str(vault_item.get("user_id", "")).strip() == current_user_id:
+        return _list_vault_files(vault_item)
+
+    normalized_email = current_email.strip().lower()
+    if not normalized_email or not _is_vault_recipient(vault_item, normalized_email):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
+    if not _recipient_has_delivery_package(vault_item, normalized_email):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The delivery files are not available for this recipient yet.",
+        )
+
+    return [
+        file_item
+        for file_item in _list_vault_files(vault_item)
+        if normalized_email in (
+            [
+                str(candidate).strip().lower()
+                for candidate in file_item.get("recipient_emails", [])
+            ]
+            if isinstance(file_item.get("recipient_emails"), list)
+            else []
+        )
+    ]
+
+
+def _get_delivery_file_for_actor(
+    vault_item: Dict[str, Any],
+    *,
+    file_id: str,
+    current_user_id: str,
+    current_email: str,
+) -> Dict[str, Any]:
+    allowed_files = _list_delivery_files_for_actor(
+        vault_item,
+        current_user_id=current_user_id,
+        current_email=current_email,
+    )
+    selected_file = next(
+        (
+            file_item
+            for file_item in allowed_files
+            if str(file_item.get("id", "")).strip() == file_id
+        ),
+        None,
+    )
+    if selected_file is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found for vault.")
+    return selected_file
+
+
 def ensure_vault_key_metadata(
     cosmos_service: CosmosService,
     vault_key_service,
     vault_item: Dict[str, Any],
 ) -> Dict[str, Any]:
+    if bool(vault_item.get("zero_knowledge_enabled", False)):
+        return vault_item
+
     existing_key_kid = str(vault_item.get("key_kid", "")).strip()
     public_jwk = vault_item.get("public_jwk")
     existing_key_size = vault_item.get("key_size_bits")
@@ -806,6 +954,8 @@ def _download_vault_file_bytes(
         raise ValueError("File metadata is missing blob location details.")
 
     blob_bytes = blob_service.download_blob_bytes(container_name=container_name, blob_name=blob_name)
+    if bool(file_metadata.get("zero_knowledge", False)):
+        return blob_bytes
     if not bool(file_metadata.get("encrypted", False)):
         return blob_bytes
 
@@ -1613,6 +1763,12 @@ def create_vault(
 
     try:
         vault_payload.update(resolve_grace_period_fields(vault_payload))
+        vault_payload["zero_knowledge_enabled"] = bool(vault_payload.get("zero_knowledge_enabled", False))
+        vault_payload["recovery_key_verifier"] = normalize_recovery_key_verifier(
+            vault_payload.get("recovery_key_verifier")
+        )
+        if vault_payload["zero_knowledge_enabled"] and not vault_payload["recovery_key_verifier"]:
+            raise ValueError("Zero-knowledge vaults require a recovery key verifier.")
         recipients = vault_payload.get("recipients", [])
         if recipients is not None:
             vault_payload["recipients"] = normalize_recipients(recipients)
@@ -1621,7 +1777,8 @@ def create_vault(
             vault_payload.get("recipients", []),
         )
         vault_payload.setdefault("delivery_packages", [])
-        vault_payload.update(vault_key_service.ensure_vault_key(vault_id))
+        if not vault_payload["zero_knowledge_enabled"]:
+            vault_payload.update(vault_key_service.ensure_vault_key(vault_id))
         created_item = cosmos_service.create_vault(vault_payload)
         write_audit_event(
             cosmos_service,
@@ -1713,6 +1870,7 @@ def _build_recipient_vault_summary(
         grace_period_expires_at=vault_item.get("grace_period_expires_at"),
         delivered_at=vault_item.get("delivered_at"),
         delivery_available=recipient_delivery_available or bool(vault_item.get("delivery_blob_name")),
+        recovery_key_verifier=normalize_recovery_key_verifier(vault_item.get("recovery_key_verifier")),
     )
 
 
@@ -1799,11 +1957,26 @@ def update_vault(
             update_data["recipients"] = normalize_recipients(update_data["recipients"])
         if "owner_message" in update_data:
             update_data["owner_message"] = str(update_data.get("owner_message", "")).strip() or None
+        if "recovery_key_verifier" in update_data:
+            update_data["recovery_key_verifier"] = normalize_recovery_key_verifier(
+                update_data.get("recovery_key_verifier")
+            )
+        if "zero_knowledge_enabled" in update_data and update_data["zero_knowledge_enabled"] is not None:
+            update_data["zero_knowledge_enabled"] = bool(update_data["zero_knowledge_enabled"])
         if any(
             field in update_data
             for field in ("grace_period_days", "grace_period_value", "grace_period_unit", "grace_period_hours")
         ):
             update_data.update(resolve_grace_period_fields({**existing_vault, **update_data}))
+        final_zero_knowledge_enabled = bool(
+            update_data.get("zero_knowledge_enabled", existing_vault.get("zero_knowledge_enabled", False))
+        )
+        final_recovery_key_verifier = normalize_recovery_key_verifier(
+            update_data.get("recovery_key_verifier", existing_vault.get("recovery_key_verifier"))
+        )
+        if final_zero_knowledge_enabled and not final_recovery_key_verifier:
+            raise ValueError("Zero-knowledge vaults require a recovery key verifier.")
+        update_data["recovery_key_verifier"] = final_recovery_key_verifier
         recipients_for_validation = update_data.get("recipients", existing_vault.get("recipients", []))
         if "activation_threshold" in update_data and update_data["activation_threshold"] is not None:
             update_data["activation_threshold"] = validate_activation_threshold_for_recipients(
@@ -2528,6 +2701,39 @@ def list_vault_files(
     }
 
 
+@app.get("/vaults/{vault_id}/delivery-files", response_model=DeliveryFileAccessResponse)
+def list_delivery_files(
+    vault_id: str,
+    request: Request,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+) -> DeliveryFileAccessResponse:
+    cosmos_service = get_cosmos_service(request)
+
+    try:
+        vault_item = resolve_vault_by_public_id(cosmos_service, vault_id)
+    except Exception:
+        logger.exception("Unhandled error while retrieving delivery files for vault id=%s", vault_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve delivery files.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
+
+    allowed_files = _list_delivery_files_for_actor(
+        vault_item,
+        current_user_id=str(current_user.get("id", "")).strip(),
+        current_email=str(current_user.get("email", "")).strip().lower(),
+    )
+    return DeliveryFileAccessResponse(
+        vault_id=str(vault_item.get("short_id", "")).strip() or vault_id,
+        zero_knowledge_enabled=bool(vault_item.get("zero_knowledge_enabled", False)),
+        recovery_key_verifier=normalize_recovery_key_verifier(vault_item.get("recovery_key_verifier")),
+        files=allowed_files,
+    )
+
+
 @app.get("/vaults/{vault_id}/audit", response_model=List[AuditLogEntry])
 def list_vault_audit_logs(
     vault_id: str,
@@ -2567,18 +2773,24 @@ def download_vault_file(
     cosmos_service = get_cosmos_service(request)
     blob_service = get_blob_service(request)
     vault_key_service = get_vault_key_service(request)
-    vault_item = get_owned_vault_or_404(
-        cosmos_service=cosmos_service,
-        public_vault_id=vault_id,
-        user_id=str(current_user.get("id", "")),
-    )
-
-    file_metadata = get_vault_file_metadata(vault_item, file_id)
-    if file_metadata is None:
+    try:
+        vault_item = resolve_vault_by_public_id(cosmos_service, vault_id)
+    except Exception:
+        logger.exception("Unhandled error while retrieving file download for vault id=%s", vault_id)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="File not found for vault.",
-        )
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve vault.",
+        ) from None
+
+    if vault_item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
+
+    file_metadata = _get_delivery_file_for_actor(
+        vault_item,
+        file_id=file_id,
+        current_user_id=str(current_user.get("id", "")).strip(),
+        current_email=str(current_user.get("email", "")).strip().lower(),
+    )
 
     container_name = file_metadata.get("container_name")
     blob_name = file_metadata.get("blob_name")
@@ -2790,6 +3002,7 @@ async def upload_vault_file(
     vault_id: str,
     request: Request,
     recipient_emails_json: Optional[str] = Form(default=None),
+    zero_knowledge_metadata_json: Optional[str] = Form(default=None),
     file: UploadFile = File(...),
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -2815,39 +3028,70 @@ async def upload_vault_file(
 
     uploaded_file_metadata = None
     try:
-        vault_item = ensure_vault_key_metadata(
-            cosmos_service=cosmos_service,
-            vault_key_service=vault_key_service,
-            vault_item=vault_item,
-        )
+        zero_knowledge_metadata = parse_zero_knowledge_metadata_json(zero_knowledge_metadata_json)
+        if bool(vault_item.get("zero_knowledge_enabled", False)):
+            if zero_knowledge_metadata is None:
+                raise ValueError("This vault requires client-side encrypted uploads.")
+        elif zero_knowledge_metadata is not None:
+            raise ValueError("Enable zero-knowledge mode on the vault before uploading encrypted files.")
+        else:
+            vault_item = ensure_vault_key_metadata(
+                cosmos_service=cosmos_service,
+                vault_key_service=vault_key_service,
+                vault_item=vault_item,
+            )
 
-        plaintext_bytes = await file.read()
-        validated_content_type = validate_upload(file, plaintext_bytes, sanitized_file_name)
+        upload_bytes = await file.read()
+        validated_content_type = validate_upload(file, upload_bytes, sanitized_file_name)
         assigned_recipient_emails = normalize_file_recipient_emails(
             parse_recipient_emails_json(recipient_emails_json),
             vault_item.get("recipients", []),
         )
-        encryption_payload = encrypt_file_bytes(
-            plaintext_bytes,
-            vault_item.get("public_jwk", {}),
-        )
 
-        uploaded_blob_metadata = blob_service.upload_bytes(
-            vault_id=internal_vault_id,
-            payload=encryption_payload["ciphertext"],
-            file_name=sanitized_file_name,
-            content_type=validated_content_type,
-            blob_content_type="application/octet-stream",
-        )
-        uploaded_file_metadata = dict(uploaded_blob_metadata)
-        uploaded_file_metadata.update(encryption_payload["metadata"])
-        uploaded_file_metadata["content_type"] = validated_content_type
-        uploaded_file_metadata["blob_content_type"] = "application/octet-stream"
-        uploaded_file_metadata["size_bytes"] = len(plaintext_bytes)
-        uploaded_file_metadata["ciphertext_size_bytes"] = len(encryption_payload["ciphertext"])
-        uploaded_file_metadata["recipient_emails"] = assigned_recipient_emails
-        uploaded_file_metadata["key_kid"] = str(vault_item.get("key_kid", "")).strip()
-        uploaded_file_metadata["key_version"] = str(vault_item.get("key_version", "")).strip()
+        if zero_knowledge_metadata is not None:
+            ciphertext_bytes = upload_bytes
+            uploaded_blob_metadata = blob_service.upload_bytes(
+                vault_id=internal_vault_id,
+                payload=ciphertext_bytes,
+                file_name=sanitized_file_name,
+                content_type=validated_content_type,
+                blob_content_type="application/octet-stream",
+            )
+            uploaded_file_metadata = dict(uploaded_blob_metadata)
+            uploaded_file_metadata.update(zero_knowledge_metadata)
+            uploaded_file_metadata["content_type"] = validated_content_type
+            uploaded_file_metadata["blob_content_type"] = "application/octet-stream"
+            uploaded_file_metadata["size_bytes"] = int(zero_knowledge_metadata["plaintext_size_bytes"])
+            uploaded_file_metadata["ciphertext_size_bytes"] = len(ciphertext_bytes)
+            uploaded_file_metadata["recipient_emails"] = assigned_recipient_emails
+            uploaded_file_metadata["wrapped_key"] = None
+            uploaded_file_metadata["key_kid"] = None
+            uploaded_file_metadata["key_version"] = None
+            uploaded_file_metadata["key_type"] = None
+            uploaded_file_metadata["key_size_bits"] = None
+            uploaded_file_metadata["key_wrap_algorithm"] = None
+        else:
+            encryption_payload = encrypt_file_bytes(
+                upload_bytes,
+                vault_item.get("public_jwk", {}),
+            )
+
+            uploaded_blob_metadata = blob_service.upload_bytes(
+                vault_id=internal_vault_id,
+                payload=encryption_payload["ciphertext"],
+                file_name=sanitized_file_name,
+                content_type=validated_content_type,
+                blob_content_type="application/octet-stream",
+            )
+            uploaded_file_metadata = dict(uploaded_blob_metadata)
+            uploaded_file_metadata.update(encryption_payload["metadata"])
+            uploaded_file_metadata["content_type"] = validated_content_type
+            uploaded_file_metadata["blob_content_type"] = "application/octet-stream"
+            uploaded_file_metadata["size_bytes"] = len(upload_bytes)
+            uploaded_file_metadata["ciphertext_size_bytes"] = len(encryption_payload["ciphertext"])
+            uploaded_file_metadata["recipient_emails"] = assigned_recipient_emails
+            uploaded_file_metadata["key_kid"] = str(vault_item.get("key_kid", "")).strip()
+            uploaded_file_metadata["key_version"] = str(vault_item.get("key_version", "")).strip()
 
         existing_files = vault_item.get("files", [])
         if not isinstance(existing_files, list):

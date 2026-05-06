@@ -35,6 +35,9 @@ class DeliveryPackageMetadata(BaseModel):
     size_bytes: Optional[int] = Field(default=None, ge=0)
     checksum_sha256: Optional[str] = Field(default=None, min_length=32, max_length=128)
     delivered_at: str = Field(..., min_length=1)
+    zero_knowledge: bool = False
+    manifest_file_name: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    package_format: Optional[str] = Field(default=None, max_length=64)
 
 
 class VaultFileMetadata(BaseModel):
@@ -62,6 +65,11 @@ class VaultFileMetadata(BaseModel):
     key_version: Optional[str] = None
     plaintext_sha256: Optional[str] = Field(default=None, min_length=32, max_length=128)
     ciphertext_sha256: Optional[str] = Field(default=None, min_length=32, max_length=128)
+    zero_knowledge: bool = False
+    kdf_algorithm: Optional[str] = Field(default=None, max_length=128)
+    kdf_salt: Optional[str] = None
+    encryption_context: Optional[str] = Field(default=None, max_length=256)
+    authentication_tag_appended: bool = False
 
 
 class VaultBase(BaseModel):
@@ -74,6 +82,8 @@ class VaultBase(BaseModel):
     status: VaultStatus = VaultStatus.ACTIVE
     recipients: List[VaultRecipient] = Field(default_factory=list)
     activation_threshold: int = Field(default=1, ge=1, le=100)
+    zero_knowledge_enabled: bool = False
+    recovery_key_verifier: Optional[str] = Field(default=None, min_length=16, max_length=256)
 
 
 class VaultCreate(VaultBase):
@@ -90,6 +100,8 @@ class VaultUpdate(BaseModel):
     status: Optional[VaultStatus] = None
     recipients: Optional[List[VaultRecipient]] = None
     activation_threshold: Optional[int] = Field(default=None, ge=1, le=100)
+    zero_knowledge_enabled: Optional[bool] = None
+    recovery_key_verifier: Optional[str] = Field(default=None, min_length=16, max_length=256)
 
 
 class Vault(VaultBase):
@@ -147,6 +159,14 @@ class RecipientVaultSummary(BaseModel):
     grace_period_expires_at: Optional[str] = None
     delivered_at: Optional[str] = None
     delivery_available: bool = False
+    recovery_key_verifier: Optional[str] = Field(default=None, min_length=16, max_length=256)
+
+
+class DeliveryFileAccessResponse(BaseModel):
+    vault_id: str
+    zero_knowledge_enabled: bool = False
+    recovery_key_verifier: Optional[str] = Field(default=None, min_length=16, max_length=256)
+    files: List[VaultFileMetadata] = Field(default_factory=list)
 
 
 class AuditLogEntry(BaseModel):

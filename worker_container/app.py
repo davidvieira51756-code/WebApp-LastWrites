@@ -869,6 +869,23 @@ def _decrypt_vault_file(file_metadata: Dict[str, Any]) -> bytes:
     return plaintext
 
 
+def _is_zero_knowledge_file(file_metadata: Dict[str, Any]) -> bool:
+    return bool(file_metadata.get("zero_knowledge", False))
+
+
+def _load_vault_file_payload(file_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"metadata": file_metadata}
+    if _is_zero_knowledge_file(file_metadata):
+        payload["ciphertext"] = _download_blob_bytes(
+            container_name=str(file_metadata.get("container_name", "")).strip(),
+            blob_name=str(file_metadata.get("blob_name", "")).strip(),
+        )
+        return payload
+
+    payload["plaintext"] = _decrypt_vault_file(file_metadata)
+    return payload
+
+
 def _generate_cover_pdf(
     vault_document: Dict[str, Any],
     file_items: List[Dict[str, Any]],
@@ -933,6 +950,88 @@ def _build_zip_archive(cover_pdf_path: Path, extracted_files: List[Path], output
             zip_file.write(file_path, arcname=file_path.name)
 
 
+def _build_zero_knowledge_delivery_bundle(
+    vault_document: Dict[str, Any],
+    *,
+    recipient_email: str,
+    file_payloads: List[Dict[str, Any]],
+    output_zip: Path,
+    delivered_at: str,
+    owner_display_name: Optional[str],
+) -> None:
+    owner_message = str(vault_document.get("owner_message", "")).strip()
+    manifest = {
+        "format": "lastwrites-zero-knowledge-delivery-bundle-v1",
+        "vault_id": str(vault_document.get("id", "")).strip(),
+        "vault_short_id": str(vault_document.get("short_id", "")).strip() or None,
+        "vault_name": str(vault_document.get("name", "Unnamed Vault")).strip() or "Unnamed Vault",
+        "recipient_email": recipient_email,
+        "delivered_at": delivered_at,
+        "owner_display_name": owner_display_name,
+        "owner_message": owner_message or None,
+        "files": [],
+    }
+
+    instructions = [
+        "Last Writes secure delivery bundle",
+        "",
+        "This package contains encrypted files and metadata.",
+        "Use the vault recovery key shared by the owner to decrypt zero-knowledge files in the app.",
+        "Legacy files, when present, are included as regular plaintext downloads for compatibility.",
+    ]
+
+    with ZipFile(output_zip, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zip_file:
+        zip_file.writestr("README.txt", "\n".join(instructions))
+
+        for index, payload in enumerate(file_payloads, start=1):
+            file_metadata = payload["metadata"]
+            file_name = str(file_metadata.get("file_name", "")).strip() or f"file-{index}.bin"
+            archive_stem = _safe_file_name(file_name)
+            if _is_zero_knowledge_file(file_metadata):
+                archive_name = f"encrypted/{index:02d}-{archive_stem}.lwenc"
+                zip_file.writestr(archive_name, payload["ciphertext"])
+                manifest["files"].append(
+                    {
+                        "id": str(file_metadata.get("id", "")).strip(),
+                        "file_name": file_name,
+                        "archive_name": archive_name,
+                        "content_type": file_metadata.get("content_type"),
+                        "size_bytes": file_metadata.get("size_bytes"),
+                        "ciphertext_size_bytes": file_metadata.get("ciphertext_size_bytes"),
+                        "zero_knowledge": True,
+                        "algorithm": file_metadata.get("algorithm"),
+                        "schema_version": file_metadata.get("schema_version"),
+                        "kdf_algorithm": file_metadata.get("kdf_algorithm"),
+                        "kdf_salt": file_metadata.get("kdf_salt"),
+                        "iv": file_metadata.get("iv"),
+                        "authentication_tag_appended": bool(
+                            file_metadata.get("authentication_tag_appended", False)
+                        ),
+                        "plaintext_sha256": file_metadata.get("plaintext_sha256"),
+                        "ciphertext_sha256": file_metadata.get("ciphertext_sha256"),
+                        "encryption_context": file_metadata.get("encryption_context"),
+                    }
+                )
+            else:
+                archive_name = f"files/{index:02d}-{archive_stem}"
+                zip_file.writestr(archive_name, payload["plaintext"])
+                manifest["files"].append(
+                    {
+                        "id": str(file_metadata.get("id", "")).strip(),
+                        "file_name": file_name,
+                        "archive_name": archive_name,
+                        "content_type": file_metadata.get("content_type"),
+                        "size_bytes": file_metadata.get("size_bytes"),
+                        "zero_knowledge": False,
+                    }
+                )
+
+        zip_file.writestr(
+            "manifest.json",
+            json.dumps(manifest, indent=2, ensure_ascii=True),
+        )
+
+
 def run() -> int:
     _configure_monitoring()
     logger.info("Worker startup initiated.")
@@ -982,16 +1081,11 @@ def run() -> int:
         with tempfile.TemporaryDirectory(prefix=f"last-writes-{vault_id[:12]}-") as temp_dir:
             temp_root = Path(temp_dir)
             delivered_at = _now_iso()
-            decrypted_payloads: List[Dict[str, Any]] = []
+            file_payloads: List[Dict[str, Any]] = []
             for file_item in files:
                 if not isinstance(file_item, dict):
                     continue
-                decrypted_payloads.append(
-                    {
-                        "metadata": file_item,
-                        "plaintext": _decrypt_vault_file(file_item),
-                    }
-                )
+                file_payloads.append(_load_vault_file_payload(file_item))
 
             delivery_packages: List[Dict[str, Any]] = []
             for recipient in recipients:
@@ -1004,7 +1098,7 @@ def run() -> int:
 
                 recipient_files = [
                     payload
-                    for payload in decrypted_payloads
+                    for payload in file_payloads
                     if recipient_email in (
                         [
                             str(candidate).strip().lower()
@@ -1015,27 +1109,42 @@ def run() -> int:
                     )
                 ]
 
-                extracted_files: List[Path] = []
-                for payload in recipient_files:
-                    target_path = _resolve_unique_path(
-                        extracted_dir,
-                        str(payload["metadata"].get("file_name", "")),
-                    )
-                    target_path.write_bytes(payload["plaintext"])
-                    extracted_files.append(target_path)
+                all_recipient_files_are_legacy = all(
+                    not _is_zero_knowledge_file(payload["metadata"])
+                    for payload in recipient_files
+                )
 
-                _generate_cover_pdf(
-                    vault_document=vault_document,
-                    file_items=[payload["metadata"] for payload in recipient_files],
-                    output_path=cover_pdf_path,
-                    delivered_at=delivered_at,
-                    owner_display_name=owner_display_name,
-                )
-                _build_zip_archive(
-                    cover_pdf_path=cover_pdf_path,
-                    extracted_files=extracted_files,
-                    output_zip=output_zip,
-                )
+                if all_recipient_files_are_legacy:
+                    extracted_files: List[Path] = []
+                    for payload in recipient_files:
+                        target_path = _resolve_unique_path(
+                            extracted_dir,
+                            str(payload["metadata"].get("file_name", "")),
+                        )
+                        target_path.write_bytes(payload["plaintext"])
+                        extracted_files.append(target_path)
+
+                    _generate_cover_pdf(
+                        vault_document=vault_document,
+                        file_items=[payload["metadata"] for payload in recipient_files],
+                        output_path=cover_pdf_path,
+                        delivered_at=delivered_at,
+                        owner_display_name=owner_display_name,
+                    )
+                    _build_zip_archive(
+                        cover_pdf_path=cover_pdf_path,
+                        extracted_files=extracted_files,
+                        output_zip=output_zip,
+                    )
+                else:
+                    _build_zero_knowledge_delivery_bundle(
+                        vault_document=vault_document,
+                        recipient_email=recipient_email,
+                        file_payloads=recipient_files,
+                        output_zip=output_zip,
+                        delivered_at=delivered_at,
+                        owner_display_name=owner_display_name,
+                    )
 
                 upload_result = _upload_delivery_zip(
                     vault_document=vault_document,
@@ -1043,6 +1152,11 @@ def run() -> int:
                     zip_path=output_zip,
                 )
                 upload_result["delivered_at"] = delivered_at
+                upload_result["zero_knowledge"] = not all_recipient_files_are_legacy
+                upload_result["package_format"] = (
+                    "legacy_bundle" if all_recipient_files_are_legacy else "encrypted_bundle"
+                )
+                upload_result["manifest_file_name"] = None if all_recipient_files_are_legacy else "manifest.json"
                 delivery_packages.append(upload_result)
 
             primary_package = delivery_packages[0] if delivery_packages else {}
