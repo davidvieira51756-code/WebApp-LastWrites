@@ -5,6 +5,8 @@ export const AUTH_USER_ID_STORAGE_KEY = "lw.auth.user_id";
 
 export const AUTH_TOKEN_COOKIE = "lw_auth_token";
 export const AUTH_EXP_COOKIE = "lw_auth_exp";
+const ZERO_KNOWLEDGE_RECOVERY_PREFIX = "lw.zk.recovery.";
+const ZERO_KNOWLEDGE_BACKUP_PREFIX = "lw.zk.recovery.backed-up.";
 
 export type StoredAuthSession = {
   accessToken: string;
@@ -43,6 +45,21 @@ export function clearAuthSession(): void {
     window.localStorage.removeItem(AUTH_EXPIRES_AT_STORAGE_KEY);
     window.localStorage.removeItem(AUTH_EMAIL_STORAGE_KEY);
     window.localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY);
+
+    const keysToRemove: string[] = [];
+    for (let index = 0; index < window.sessionStorage.length; index += 1) {
+      const key = window.sessionStorage.key(index);
+      if (
+        key?.startsWith(ZERO_KNOWLEDGE_RECOVERY_PREFIX) ||
+        key?.startsWith(ZERO_KNOWLEDGE_BACKUP_PREFIX)
+      ) {
+        keysToRemove.push(key);
+      }
+    }
+
+    for (const key of keysToRemove) {
+      window.sessionStorage.removeItem(key);
+    }
   }
 
   clearCookie(AUTH_TOKEN_COOKIE);

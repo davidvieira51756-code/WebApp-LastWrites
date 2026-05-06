@@ -15,16 +15,17 @@ import {
   useCatTheme,
 } from "@/components/catmagui";
 import BrandLogo from "@/components/BrandLogo";
+import RecoveryKeyBackupPanel from "@/components/RecoveryKeyBackupPanel";
 import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import {
-  buildRecoveryKeyVerifier,
   clearStoredRecoveryKeyForVault,
   decryptVaultFile,
   encryptVaultFile,
-  generateRecoveryKey,
   getStoredRecoveryKeyForVault,
+  hasConfirmedRecoveryKeyBackupForVault,
+  setRecoveryKeyBackupConfirmedForVault,
   storeRecoveryKeyForVault,
   verifyRecoveryKey,
 } from "@/lib/zeroKnowledge";
@@ -97,6 +98,11 @@ type VaultFile = {
 type VaultFilesResponse = {
   vault_id: string;
   files: VaultFile[];
+};
+
+type PendingRecoveryKeyBackup = {
+  recoveryKey: string;
+  vaultName: string;
 };
 
 const EMAIL_REGEX =
@@ -245,7 +251,8 @@ export default function VaultDetailsPage() {
   const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
   const [recoveryKeyMessage, setRecoveryKeyMessage] = useState<string | null>(null);
   const [recoveryKeyError, setRecoveryKeyError] = useState<string | null>(null);
-  const [isEnablingZeroKnowledge, setIsEnablingZeroKnowledge] = useState(false);
+  const [pendingRecoveryKeyBackup, setPendingRecoveryKeyBackup] =
+    useState<PendingRecoveryKeyBackup | null>(null);
 
   const [isDeletingRecipient, setIsDeletingRecipient] = useState<string | null>(null);
   const [isDeletingFileId, setIsDeletingFileId] = useState<string | null>(null);
@@ -376,6 +383,7 @@ export default function VaultDetailsPage() {
     if (!vaultId || !vault?.zero_knowledge_enabled || !vault.recovery_key_verifier) {
       setRecoveryKey(null);
       setRecoveryKeyInput("");
+      setPendingRecoveryKeyBackup(null);
       return;
     }
 
@@ -383,6 +391,7 @@ export default function VaultDetailsPage() {
     const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
     if (!storedRecoveryKey) {
       setRecoveryKey(null);
+      setPendingRecoveryKeyBackup(null);
       return;
     }
 
@@ -398,16 +407,25 @@ export default function VaultDetailsPage() {
       if (isValid) {
         setRecoveryKey(storedRecoveryKey);
         setRecoveryKeyInput("");
+        if (!hasConfirmedRecoveryKeyBackupForVault(vaultId)) {
+          setPendingRecoveryKeyBackup({
+            recoveryKey: storedRecoveryKey,
+            vaultName: vault?.name || "Vault",
+          });
+        } else {
+          setPendingRecoveryKeyBackup(null);
+        }
       } else {
         clearStoredRecoveryKeyForVault(vaultId);
         setRecoveryKey(null);
+        setPendingRecoveryKeyBackup(null);
       }
     })();
 
     return () => {
       isCancelled = true;
     };
-  }, [vault?.recovery_key_verifier, vault?.zero_knowledge_enabled, vaultId]);
+  }, [vault?.name, vault?.recovery_key_verifier, vault?.zero_knowledge_enabled, vaultId]);
 
   const handleUnlockRecoveryKey = async () => {
     setRecoveryKeyMessage(null);
@@ -429,67 +447,18 @@ export default function VaultDetailsPage() {
     }
 
     storeRecoveryKeyForVault(vaultId, recoveryKeyInput);
-    setRecoveryKey(getStoredRecoveryKeyForVault(vaultId));
+    const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
+    setRecoveryKey(storedRecoveryKey);
     setRecoveryKeyInput("");
-    setRecoveryKeyMessage("Vault unlocked on this device for the current session.");
-  };
-
-  const handleForgetRecoveryKey = () => {
-    if (!vaultId) {
-      return;
-    }
-    clearStoredRecoveryKeyForVault(vaultId);
-    setRecoveryKey(null);
-    setRecoveryKeyInput("");
-    setRecoveryKeyMessage("Recovery key removed from this device session.");
-    setRecoveryKeyError(null);
-  };
-
-  const handleEnableZeroKnowledge = async () => {
-    setRecoveryKeyMessage(null);
-    setRecoveryKeyError(null);
-    setUpdateMessage(null);
-    setUpdateError(null);
-
-    if (!apiUrl || !vaultId || !authToken) {
-      setRecoveryKeyError("API URL or vault identifier is missing.");
-      return;
-    }
-
-    setIsEnablingZeroKnowledge(true);
-    try {
-      const generatedRecoveryKey = generateRecoveryKey();
-      const recoveryKeyVerifier = await buildRecoveryKeyVerifier(generatedRecoveryKey);
-      const response = await fetch(`${apiUrl}/vaults/${encodeURIComponent(vaultId)}`, {
-        method: "PATCH",
-        headers: buildAuthHeaders(authToken, true),
-        body: JSON.stringify({
-          zero_knowledge_enabled: true,
-          recovery_key_verifier: recoveryKeyVerifier,
-        }),
+    if (!hasConfirmedRecoveryKeyBackupForVault(vaultId) && storedRecoveryKey) {
+      setPendingRecoveryKeyBackup({
+        recoveryKey: storedRecoveryKey,
+        vaultName: vault?.name || "Vault",
       });
-
-      if (isUnauthorizedStatus(response.status)) {
-        handleUnauthorized();
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(await getErrorDetail(response, "Failed to enable zero-knowledge mode."));
-      }
-
-      storeRecoveryKeyForVault(vaultId, generatedRecoveryKey);
-      setRecoveryKey(generatedRecoveryKey);
-      setRecoveryKeyMessage(
-        `Zero-knowledge mode enabled. Save this recovery key now: ${generatedRecoveryKey}`,
-      );
-      await fetchVaultData(false);
-    } catch (error) {
-      setRecoveryKeyError(
-        error instanceof Error ? error.message : "Unexpected zero-knowledge enablement error.",
-      );
-    } finally {
-      setIsEnablingZeroKnowledge(false);
+    } else {
+      setPendingRecoveryKeyBackup(null);
     }
+    setRecoveryKeyMessage("Vault unlocked on this device for the current session.");
   };
 
   const handleSignOut = useCallback(() => {
@@ -646,6 +615,10 @@ export default function VaultDetailsPage() {
       setUploadError("Unlock this vault with the recovery key before uploading files.");
       return;
     }
+    if (vault?.zero_knowledge_enabled && pendingRecoveryKeyBackup) {
+      setUploadError("Save and confirm the recovery key before uploading zero-knowledge files.");
+      return;
+    }
 
     setIsUploadingFile(true);
     try {
@@ -778,6 +751,9 @@ export default function VaultDetailsPage() {
 
       const matchingFile = files.find((fileItem) => fileItem.id === fileId);
       if (matchingFile?.zero_knowledge) {
+        if (pendingRecoveryKeyBackup) {
+          throw new Error("Save and confirm the recovery key before downloading zero-knowledge files.");
+        }
         if (!recoveryKey || !matchingFile.kdf_salt || !matchingFile.iv) {
           throw new Error("Unlock this vault with the recovery key before downloading files.");
         }
@@ -1278,14 +1254,31 @@ export default function VaultDetailsPage() {
                       leaves your browser and is required to encrypt uploads and decrypt downloads.
                     </Text>
 
-                    {recoveryKey ? (
+                    {pendingRecoveryKeyBackup ? (
+                      <RecoveryKeyBackupPanel
+                        recoveryKey={pendingRecoveryKeyBackup.recoveryKey}
+                        vaultId={vault?.id || vaultId}
+                        vaultName={pendingRecoveryKeyBackup.vaultName}
+                        title="Save This Recovery Key Before Continuing"
+                        description="This vault is now protected with zero-knowledge encryption. Save the recovery key now before you continue using encrypted files on this device."
+                        warningMessage="If you lose this recovery key, the server cannot recover zero-knowledge files for this vault."
+                        confirmLabel="I have saved this recovery key somewhere safe and understand that losing it can permanently lock my encrypted files."
+                        confirmButtonLabel="I Saved The Recovery Key"
+                        onConfirmed={() => {
+                          if (!vaultId) {
+                            return;
+                          }
+                          setRecoveryKeyBackupConfirmedForVault(vaultId);
+                          setPendingRecoveryKeyBackup(null);
+                          setRecoveryKeyMessage("Recovery key backup confirmed for this device session.");
+                        }}
+                      />
+                    ) : recoveryKey ? (
                       <>
                         <Alert variant="success" message="Vault unlocked on this device for the current session." />
-                        <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
-                          <Button type="button" variant="Primary" onClick={handleForgetRecoveryKey}>
-                            Forget Recovery Key
-                          </Button>
-                        </div>
+                        <Text variant="bodySmall" color="secondary">
+                          This recovery key stays only in the current browser session and is cleared when you sign out.
+                        </Text>
                       </>
                     ) : (
                       <>
@@ -1304,20 +1297,10 @@ export default function VaultDetailsPage() {
                     )}
                   </>
                 ) : (
-                  <>
-                    <Text variant="bodySmall" color="secondary">
-                      This vault still uses the legacy server-side decryption flow. Enable
-                      zero-knowledge mode to make future file uploads unreadable to the server.
-                    </Text>
-                    <Button
-                      type="button"
-                      variant="SolidPrimary"
-                      disabled={isArchivedFinal || isEnablingZeroKnowledge}
-                      onClick={() => void handleEnableZeroKnowledge()}
-                    >
-                      {isEnablingZeroKnowledge ? "Enabling..." : "Enable Zero-Knowledge Mode"}
-                    </Button>
-                  </>
+                  <Alert
+                    variant="error"
+                    message="This vault is missing its zero-knowledge recovery configuration."
+                  />
                 )}
 
                 {recoveryKeyError ? <Alert variant="error" message={recoveryKeyError} /> : null}
@@ -1729,7 +1712,7 @@ export default function VaultDetailsPage() {
                     isUploadingFile ||
                     isArchivedFinal ||
                     !selectedFile ||
-                    (vault?.zero_knowledge_enabled && !recoveryKey)
+                    (vault?.zero_knowledge_enabled && (!recoveryKey || Boolean(pendingRecoveryKeyBackup)))
                   }
                 >
                   {isUploadingFile ? "Uploading..." : vault?.zero_knowledge_enabled ? "Encrypt And Add File" : "Add File"}
@@ -1754,7 +1737,7 @@ export default function VaultDetailsPage() {
                         <div style={{ display: "flex", flexDirection: "column", gap: t.space.xxs }}>
                           <Text variant="label">{fileItem.file_name}</Text>
                           <Text variant="caption" color="muted">
-                            {fileItem.zero_knowledge ? "Zero-knowledge encrypted in browser" : "Legacy server-side delivery flow"}
+                            {fileItem.zero_knowledge ? "Zero-knowledge encrypted in browser" : "Encrypted vault file"}
                           </Text>
                         </div>
                         <Button

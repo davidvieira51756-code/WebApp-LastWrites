@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Last Writes",
-  description: "Digital legacy vault dashboard",
+  description: "Secure document vault dashboard",
 };
 
 export default function RootLayout({

@@ -5,7 +5,15 @@ import { useState } from "react";
 
 import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
 import { buildAuthHeaders, isUnauthorizedStatus } from "@/lib/api";
-import { buildRecoveryKeyVerifier, generateRecoveryKey, storeRecoveryKeyForVault } from "@/lib/zeroKnowledge";
+import {
+  buildRecoveryKeyVerifier,
+  clearRecoveryKeyBackupConfirmationForVault,
+  setRecoveryKeyBackupConfirmedForVault,
+  generateRecoveryKey,
+  storeRecoveryKeyForVault,
+} from "@/lib/zeroKnowledge";
+
+import RecoveryKeyBackupPanel from "./RecoveryKeyBackupPanel";
 
 export type ActivationRequestItem = {
     recipient_email: string;
@@ -44,6 +52,12 @@ export type Vault = {
     recovery_key_verifier?: string | null;
 };
 
+type PendingRecoveryKeyBackup = {
+    vaultId: string;
+    vaultName: string;
+    recoveryKey: string;
+};
+
 type CreateVaultFormProps = {
     apiUrl: string;
     authToken: string;
@@ -66,7 +80,8 @@ export default function CreateVaultForm({
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [successMessage, setSuccessMessage] = useState<string | null>(null);
-    const [createdRecoveryKey, setCreatedRecoveryKey] = useState<string | null>(null);
+    const [pendingRecoveryKeyBackup, setPendingRecoveryKeyBackup] =
+        useState<PendingRecoveryKeyBackup | null>(null);
 
     const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -132,15 +147,21 @@ export default function CreateVaultForm({
             if (createdVault.recovery_key_verifier !== recoveryKeyVerifier) {
                 throw new Error("Vault recovery key verification failed. Please try again.");
             }
+
             onCreated(createdVault);
             storeRecoveryKeyForVault(createdVault.id, recoveryKey);
-            setCreatedRecoveryKey(recoveryKey);
+            clearRecoveryKeyBackupConfirmationForVault(createdVault.id);
+            setPendingRecoveryKeyBackup({
+                vaultId: createdVault.id,
+                vaultName: createdVault.name,
+                recoveryKey,
+            });
             setName("");
             setOwnerMessage("");
             setGracePeriodValue(30);
             setGracePeriodUnit("days");
             setActivationThreshold(1);
-            setSuccessMessage("Vault created successfully.");
+            setSuccessMessage("Vault created. Save the recovery key to finish setup.");
         } catch (error) {
             const message =
                 error instanceof Error ? error.message : "Unexpected error while creating vault.";
@@ -164,94 +185,112 @@ export default function CreateVaultForm({
                 zero-knowledge file encryption with a recovery key you must save.
             </Text>
 
-            <form
-                onSubmit={handleSubmit}
-                style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: t.space.s,
-                    marginTop: t.space.s,
-                }}
-            >
-                <Input
-                    id="vault-name"
-                    label="Vault Name"
-                    type="text"
-                    value={name}
-                    onChange={(event) => setName(event.target.value)}
-                    placeholder="Family Legacy Vault"
-                    required
+            {pendingRecoveryKeyBackup ? (
+                <RecoveryKeyBackupPanel
+                    recoveryKey={pendingRecoveryKeyBackup.recoveryKey}
+                    vaultId={pendingRecoveryKeyBackup.vaultId}
+                    vaultName={pendingRecoveryKeyBackup.vaultName}
+                    title="Save This Recovery Key Before Continuing"
+                    description="This is the only time the full recovery key is shown after vault creation. You must store it safely before you continue using the app."
+                    warningMessage="If you lose this recovery key, zero-knowledge files in this vault can become permanently unreadable."
+                    confirmLabel="I have saved this recovery key somewhere safe and understand it cannot be recovered by the server."
+                    confirmButtonLabel="I Saved The Recovery Key"
+                    onConfirmed={() => {
+                        setRecoveryKeyBackupConfirmedForVault(pendingRecoveryKeyBackup.vaultId);
+                        setPendingRecoveryKeyBackup(null);
+                        setSuccessMessage("Vault created successfully and recovery key backup confirmed.");
+                    }}
                 />
-
-                <label
-                    htmlFor="grace-period-unit"
+            ) : (
+                <form
+                    onSubmit={handleSubmit}
                     style={{
                         display: "flex",
                         flexDirection: "column",
-                        gap: t.space.xs,
+                        gap: t.space.s,
+                        marginTop: t.space.s,
                     }}
                 >
-                    <Text variant="label" color="secondary">Grace Period Unit</Text>
-                    <select
-                        id="grace-period-unit"
-                        value={gracePeriodUnit}
-                        onChange={(event) => setGracePeriodUnit(event.target.value as "days" | "hours")}
+                    <Input
+                        id="vault-name"
+                        label="Vault Name"
+                        type="text"
+                        value={name}
+                        onChange={(event) => setName(event.target.value)}
+                        placeholder="Family Archive Vault"
+                        required
+                    />
+
+                    <label
+                        htmlFor="grace-period-unit"
                         style={{
-                            width: "100%",
-                            border: `1px solid ${t.colors.components.input.border}`,
-                            backgroundColor: t.colors.components.input.bg,
-                            color: t.colors.text.primary,
-                            borderRadius: t.radius.full,
-                            padding: `${t.space.s}px ${t.space.m}px`,
-                            fontFamily: "var(--font-geist-sans), sans-serif",
-                            fontSize: t.typography.body.fontSize,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: t.space.xs,
                         }}
                     >
-                        <option value="days">Days</option>
-                        <option value="hours">Hours</option>
-                    </select>
-                </label>
+                        <Text variant="label" color="secondary">Grace Period Unit</Text>
+                        <select
+                            id="grace-period-unit"
+                            value={gracePeriodUnit}
+                            onChange={(event) => setGracePeriodUnit(event.target.value as "days" | "hours")}
+                            style={{
+                                width: "100%",
+                                border: `1px solid ${t.colors.components.input.border}`,
+                                backgroundColor: t.colors.components.input.bg,
+                                color: t.colors.text.primary,
+                                borderRadius: t.radius.full,
+                                padding: `${t.space.s}px ${t.space.m}px`,
+                                fontFamily: "var(--font-geist-sans), sans-serif",
+                                fontSize: t.typography.body.fontSize,
+                            }}
+                        >
+                            <option value="days">Days</option>
+                            <option value="hours">Hours</option>
+                        </select>
+                    </label>
 
-                <Input
-                    id="grace-period"
-                    label={`Grace Period (${gracePeriodUnit})`}
-                    type="number"
-                    min={1}
-                    max={gracePeriodUnit === "days" ? 3650 : 87600}
-                    value={gracePeriodValue}
-                    onChange={(event) => setGracePeriodValue(Number(event.target.value))}
-                    required
-                />
+                    <Input
+                        id="grace-period"
+                        label={`Grace Period (${gracePeriodUnit})`}
+                        type="number"
+                        min={1}
+                        max={gracePeriodUnit === "days" ? 3650 : 87600}
+                        value={gracePeriodValue}
+                        onChange={(event) => setGracePeriodValue(Number(event.target.value))}
+                        required
+                    />
 
-                <Input
-                    id="owner-message"
-                    label="Message For Recipients"
-                    value={ownerMessage}
-                    onChange={(event) => setOwnerMessage(event.target.value)}
-                    placeholder="Write the message that should appear on the delivery cover page."
-                    multiline
-                />
+                    <Input
+                        id="owner-message"
+                        label="Message For Recipients"
+                        value={ownerMessage}
+                        onChange={(event) => setOwnerMessage(event.target.value)}
+                        placeholder="Write the message that should appear on the delivery cover page."
+                        multiline
+                    />
 
-                <Input
-                    id="activation-threshold"
-                    label="Activation Threshold (recipient votes)"
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={activationThreshold}
-                    onChange={(event) => setActivationThreshold(Number(event.target.value))}
-                    required
-                />
+                    <Input
+                        id="activation-threshold"
+                        label="Activation Threshold (recipient votes)"
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={activationThreshold}
+                        onChange={(event) => setActivationThreshold(Number(event.target.value))}
+                        required
+                    />
 
-                <Button
-                    type="submit"
-                    size="full"
-                    variant="SolidPrimary"
-                    disabled={isSubmitting}
-                >
-                    {isSubmitting ? "Creating Vault..." : "Create Vault"}
-                </Button>
-            </form>
+                    <Button
+                        type="submit"
+                        size="full"
+                        variant="SolidPrimary"
+                        disabled={isSubmitting}
+                    >
+                        {isSubmitting ? "Creating Vault..." : "Create Vault"}
+                    </Button>
+                </form>
+            )}
 
             {errorMessage ? (
                 <Alert message={errorMessage} variant="error" />
@@ -259,22 +298,6 @@ export default function CreateVaultForm({
 
             {successMessage ? (
                 <Alert message={successMessage} variant="success" />
-            ) : null}
-
-            {createdRecoveryKey ? (
-                <Card variant="outline" style={{ gap: t.space.xs }}>
-                    <Text variant="label" weight="semibold">Vault Recovery Key</Text>
-                    <Text variant="bodySmall" color="secondary">
-                        Save this key now. It is required to decrypt uploaded files and the server
-                        does not keep a readable copy of it.
-                    </Text>
-                    <Input
-                        id="created-vault-recovery-key"
-                        label="Recovery Key"
-                        value={createdRecoveryKey}
-                        readOnly
-                    />
-                </Card>
             ) : null}
         </Card>
     );

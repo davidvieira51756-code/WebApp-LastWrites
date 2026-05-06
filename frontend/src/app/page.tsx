@@ -253,7 +253,7 @@ export default function DashboardPage() {
                     <div style={{ display: "flex", flexDirection: "column", gap: t.space.xs }}>
                         <Text variant="h1">Vault Dashboard</Text>
                         <Text variant="bodySmall" color="secondary" style={{ maxWidth: 700 }}>
-                            Manage digital legacy vaults, monitor grace periods, and keep recipient delivery
+                            Manage secure document vaults, monitor grace periods, and keep recipient delivery
                             rules up to date.
                         </Text>
                         {signedInEmail ? (

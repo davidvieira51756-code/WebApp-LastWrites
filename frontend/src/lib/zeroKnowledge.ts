@@ -1,6 +1,7 @@
 "use client";
 
 const RECOVERY_KEY_SESSION_PREFIX = "lw.zk.recovery.";
+const RECOVERY_KEY_BACKUP_CONFIRMED_PREFIX = "lw.zk.recovery.backed-up.";
 const ZERO_KNOWLEDGE_SCHEMA_VERSION = 3;
 const ZERO_KNOWLEDGE_KDF_ALGORITHM = "HKDF-SHA256";
 
@@ -52,6 +53,27 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
     offset += part.length;
   }
   return merged;
+}
+
+function buildRecoveryKeyBackupFileName(vaultName: string, vaultId: string): string {
+  const normalizedName = vaultName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const safeName = normalizedName || "vault";
+  return `${safeName}-${vaultId}-recovery-key.txt`;
+}
+
+function triggerBrowserDownload(blob: Blob, fileName: string): void {
+  const objectUrl = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(objectUrl);
 }
 
 export function normalizeRecoveryKey(value: string): string {
@@ -247,4 +269,77 @@ export function clearStoredRecoveryKeyForVault(vaultId: string): void {
     return;
   }
   window.sessionStorage.removeItem(`${RECOVERY_KEY_SESSION_PREFIX}${vaultId}`);
+}
+
+export function setRecoveryKeyBackupConfirmedForVault(vaultId: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.sessionStorage.setItem(`${RECOVERY_KEY_BACKUP_CONFIRMED_PREFIX}${vaultId}`, "1");
+}
+
+export function hasConfirmedRecoveryKeyBackupForVault(vaultId: string): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return window.sessionStorage.getItem(`${RECOVERY_KEY_BACKUP_CONFIRMED_PREFIX}${vaultId}`) === "1";
+}
+
+export function clearRecoveryKeyBackupConfirmationForVault(vaultId: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.sessionStorage.removeItem(`${RECOVERY_KEY_BACKUP_CONFIRMED_PREFIX}${vaultId}`);
+}
+
+export function clearZeroKnowledgeSessionState(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const keysToRemove: string[] = [];
+  for (let index = 0; index < window.sessionStorage.length; index += 1) {
+    const key = window.sessionStorage.key(index);
+    if (
+      key?.startsWith(RECOVERY_KEY_SESSION_PREFIX) ||
+      key?.startsWith(RECOVERY_KEY_BACKUP_CONFIRMED_PREFIX)
+    ) {
+      keysToRemove.push(key);
+    }
+  }
+
+  for (const key of keysToRemove) {
+    window.sessionStorage.removeItem(key);
+  }
+}
+
+export function downloadRecoveryKeyBackup({
+  recoveryKey,
+  vaultId,
+  vaultName,
+}: {
+  recoveryKey: string;
+  vaultId: string;
+  vaultName: string;
+}): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  const fileContents = [
+    "LastWrites Recovery Key Backup",
+    "",
+    `Vault Name: ${vaultName}`,
+    `Vault ID: ${vaultId}`,
+    `Saved At: ${new Date().toISOString()}`,
+    "",
+    "Recovery Key:",
+    normalizeRecoveryKey(recoveryKey),
+    "",
+    "Warning:",
+    "If you lose this recovery key, the server cannot recover zero-knowledge files for this vault.",
+  ].join("\n");
+
+  const blob = new Blob([fileContents], { type: "text/plain;charset=utf-8" });
+  triggerBrowserDownload(blob, buildRecoveryKeyBackupFileName(vaultName, vaultId));
 }

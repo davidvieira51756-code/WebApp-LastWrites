@@ -767,7 +767,7 @@ export default function RecipientActivationPage() {
                         <Text variant="caption" color="muted">
                           {fileItem.zero_knowledge
                             ? "Zero-knowledge file"
-                            : "Legacy compatibility file"}
+                            : "Encrypted file"}
                         </Text>
                         <Button
                           type="button"
