@@ -526,6 +526,20 @@ def build_user_display_name(user_item: Optional[Dict[str, Any]]) -> Optional[str
     return None
 
 
+def build_user_real_name(user_item: Optional[Dict[str, Any]]) -> Optional[str]:
+    if not user_item:
+        return None
+
+    full_name = str(user_item.get("full_name", "")).strip()
+    if full_name:
+        return full_name
+
+    username = str(user_item.get("username", "")).strip()
+    if username:
+        return username
+    return None
+
+
 def resolve_grace_period_fields(vault_item: Dict[str, Any]) -> Dict[str, object]:
     raw_unit = str(vault_item.get("grace_period_unit", "")).strip().lower()
     raw_value = vault_item.get("grace_period_value")
@@ -2091,7 +2105,7 @@ def _build_recipient_vault_summary(
         for package in delivery_packages
     )
 
-    owner_display_name = build_user_display_name(vault_item.get("owner_profile"))
+    owner_display_name = build_user_real_name(vault_item.get("owner_profile"))
     recipient_user = vault_item.get("recipient_user")
     return RecipientVaultSummary(
         id=str(vault_item.get("short_id", "")).strip() or str(vault_item.get("id", "")),

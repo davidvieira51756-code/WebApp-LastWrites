@@ -972,16 +972,6 @@ def _build_zero_knowledge_delivery_bundle(
         "files": [],
     }
 
-    instructions = [
-        "Last Writes secure delivery bundle",
-        "",
-        "This package contains encrypted files and metadata.",
-        "Recipients decrypt zero-knowledge files with their own account access in the app.",
-        "Do not share this bundle outside its intended recipient account.",
-    ]
-    if owner_message:
-        instructions.extend(["", "Owner Message:", owner_message])
-
     with ZipFile(output_zip, mode="w", compression=ZIP_DEFLATED, compresslevel=6) as zip_file:
         cover_pdf_path = output_zip.parent / "cover.pdf"
         _generate_cover_pdf(
@@ -992,7 +982,6 @@ def _build_zero_knowledge_delivery_bundle(
             owner_display_name=owner_display_name,
         )
         zip_file.write(cover_pdf_path, arcname="Delivery.pdf")
-        zip_file.writestr("README.txt", "\n".join(instructions))
 
         for index, payload in enumerate(file_payloads, start=1):
             file_metadata = payload["metadata"]

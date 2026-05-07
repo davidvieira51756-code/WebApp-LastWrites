@@ -1901,7 +1901,10 @@ export default function VaultDetailsPage() {
                               {vault.recipients.map((recipient) => {
                                 const currentRecipientEmails = fileItem.recipient_emails ?? [];
                                 const isChecked = currentRecipientEmails.includes(recipient.email);
-                                const canAssign = Boolean(recipient.document_encryption_public_jwk);
+                                const cryptoRecipient = recipientCryptoDirectory.find(
+                                  (candidate) => candidate.email === recipient.email,
+                                );
+                                const canAssign = Boolean(cryptoRecipient?.document_encryption_public_jwk);
                                 return (
                                   <label
                                     key={`${fileItem.id}-${recipient.email}`}

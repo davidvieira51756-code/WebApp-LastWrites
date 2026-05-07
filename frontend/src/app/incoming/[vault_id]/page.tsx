@@ -439,17 +439,6 @@ export default function RecipientActivationPage() {
 
       const zipEntries: Array<{ fileName: string; data: Uint8Array }> = [];
       const ownerMessage = deliveryFilesPayload.owner_message?.trim() || "";
-      const readmeLines = [
-        "Last Writes delivery package",
-        "",
-        `Vault: ${summary?.name || vaultId}`,
-        summary?.owner_display_name ? `Owner: ${summary.owner_display_name}` : "",
-        summary?.delivered_at ? `Delivered At: ${formatIsoDate(summary.delivered_at)}` : "",
-      ].filter(Boolean);
-      if (ownerMessage) {
-        readmeLines.push("", "Owner Message:", ownerMessage);
-      }
-      readmeLines.push("", "This ZIP was decrypted locally in your browser for your account.");
       zipEntries.push({
         fileName: "Delivery.pdf",
         data: buildDeliveryCoverPdf({
@@ -459,10 +448,6 @@ export default function RecipientActivationPage() {
           ownerMessage,
           fileNames: (deliveryFilesPayload.files || []).map((fileItem) => fileItem.file_name),
         }),
-      });
-      zipEntries.push({
-        fileName: "README.txt",
-        data: new TextEncoder().encode(readmeLines.join("\n")),
       });
 
       for (const fileItem of deliveryFilesPayload.files || []) {

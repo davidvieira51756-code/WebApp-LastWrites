@@ -913,12 +913,9 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         archive = ZipFile(io.BytesIO(delivery_package_response.content))
         archive_names = set(archive.namelist())
         self.assertIn("Delivery.pdf", archive_names)
-        self.assertIn("README.txt", archive_names)
         self.assertIn("manifest.json", archive_names)
         encrypted_entries = [name for name in archive_names if name.endswith(".lwenc")]
         self.assertEqual(len(encrypted_entries), 1)
-        self.assertIn(b"Owner Message:", archive.read("README.txt"))
-        self.assertIn(b"Use the recovery key shared by the owner.", archive.read("README.txt"))
 
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
         self.assertEqual(manifest["format"], "lastwrites-zero-knowledge-delivery-bundle-v1")
