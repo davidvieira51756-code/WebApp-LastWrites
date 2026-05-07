@@ -1127,6 +1127,13 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(delete_file_response.status_code, 409, delete_file_response.text)
         self.assertEqual(delete_file_response.json()["detail"], expected_error)
 
+        delete_vault_response = self.client.delete(
+            f"/vaults/{vault_id}",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(delete_vault_response.status_code, 409, delete_vault_response.text)
+        self.assertEqual(delete_vault_response.json()["detail"], expected_error)
+
     def test_owner_receives_email_when_vault_enters_grace_period(self) -> None:
         owner_email = f"grace-owner-{uuid4().hex[:8]}@example.com"
         owner_token = self._register_and_login(owner_email)

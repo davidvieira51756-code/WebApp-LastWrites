@@ -1471,7 +1471,7 @@ export default function VaultDetailsPage() {
                   type="button"
                   variant="Destructive"
                   onClick={() => void handleDeleteVault()}
-                  disabled={isDeletingVault}
+                  disabled={isDeletingVault || isArchivedFinal}
                 >
                   {isDeletingVault ? "Deleting Vault..." : "Delete Vault"}
                 </Button>

@@ -2274,6 +2274,7 @@ def delete_vault(
         public_vault_id=vault_id,
         user_id=str(current_user.get("id", "")),
     )
+    ensure_vault_is_mutable(vault_item)
     internal_vault_id = str(vault_item.get("id", "")).strip()
 
     try:
