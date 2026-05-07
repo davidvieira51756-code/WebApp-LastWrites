@@ -18,9 +18,15 @@ import BrandLogo from "@/components/BrandLogo";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import {
+  buildRecipientWrappedKeyFromPendingGrant,
   decryptVaultFileForRecipient,
+  decryptVaultFileWithPendingGrant,
+  type PendingRecipientGrant,
 } from "@/lib/zeroKnowledge";
-import { getCachedDocumentPrivateKey } from "@/lib/documentAccess";
+import {
+  getCachedDocumentPrivateKey,
+  getCurrentDocumentEncryptionPublicJwk,
+} from "@/lib/documentAccess";
 import { buildDeliveryCoverPdf } from "@/lib/pdf";
 import { buildZipArchive } from "@/lib/zip";
 
@@ -51,6 +57,7 @@ type DeliveryFile = {
     wrapped_file_key: string;
     algorithm?: string | null;
   }>;
+  pending_recipient_grants?: PendingRecipientGrant[];
 };
 
 type DeliveryFilesResponse = {
@@ -157,6 +164,7 @@ export default function RecipientActivationPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [deliveryFiles, setDeliveryFiles] = useState<DeliveryFile[]>([]);
   const [isLoadingDeliveryFiles, setIsLoadingDeliveryFiles] = useState(false);
+  const [deliveryAccessCodes, setDeliveryAccessCodes] = useState<Record<string, string>>({});
 
   const authRedirectPath = useMemo(() => {
     if (!vaultId) {
@@ -276,6 +284,16 @@ export default function RecipientActivationPage() {
       setDeliveryFiles([]);
     }
   }, [fetchDeliveryFiles, summary?.delivery_available]);
+
+  const pendingDeliveryGrants = useMemo(
+    () =>
+      deliveryFiles.flatMap((fileItem) =>
+        (fileItem.pending_recipient_grants ?? [])
+          .filter((grant) => grant.status === "pending")
+          .map((grant) => ({ fileItem, grant })),
+      ),
+    [deliveryFiles],
+  );
 
   const handleSignOut = useCallback(() => {
     clearAuthSession();
@@ -436,6 +454,14 @@ export default function RecipientActivationPage() {
       if (!recipientPrivateKey) {
         throw new Error("Your document access key is not unlocked on this device. Sign in again and retry.");
       }
+      const hasPendingGrants = zeroKnowledgeFiles.some(
+        (fileItem) =>
+          !fileItem.recipient_wrapped_keys?.[0]?.wrapped_file_key &&
+          fileItem.pending_recipient_grants?.some((grant) => grant.status === "pending"),
+      );
+      const recipientPublicJwk = hasPendingGrants
+        ? await getCurrentDocumentEncryptionPublicJwk(apiUrl, authToken)
+        : null;
 
       const zipEntries: Array<{ fileName: string; data: Uint8Array }> = [];
       const ownerMessage = deliveryFilesPayload.owner_message?.trim() || "";
@@ -467,15 +493,68 @@ export default function RecipientActivationPage() {
 
         if (fileItem.zero_knowledge) {
           const wrappedFileKey = fileItem.recipient_wrapped_keys?.[0]?.wrapped_file_key;
-          if (!wrappedFileKey || !fileItem.iv) {
+          const pendingGrant = fileItem.pending_recipient_grants?.find(
+            (grant) => grant.status === "pending",
+          );
+          if (!wrappedFileKey && !pendingGrant) {
             throw new Error(`Encrypted delivery metadata is incomplete for ${fileItem.file_name}.`);
           }
           const ciphertext = await fileResponse.arrayBuffer();
-          const plaintext = await decryptVaultFileForRecipient(ciphertext, {
-            recipientPrivateKey,
-            wrappedFileKey,
-            iv: fileItem.iv,
-          });
+          if (!fileItem.iv) {
+            throw new Error(`Encrypted delivery metadata is incomplete for ${fileItem.file_name}.`);
+          }
+          let plaintext: Uint8Array;
+          if (wrappedFileKey) {
+            plaintext = await decryptVaultFileForRecipient(ciphertext, {
+              recipientPrivateKey,
+              wrappedFileKey,
+              iv: fileItem.iv,
+            });
+          } else {
+            if (!pendingGrant || !recipientPublicJwk) {
+              throw new Error(`Delivery access is not ready for ${fileItem.file_name}.`);
+            }
+            const accessCode = (deliveryAccessCodes[pendingGrant.grant_id] || "").trim();
+            if (!accessCode) {
+              throw new Error(`Enter the delivery access code for ${fileItem.file_name}.`);
+            }
+            const recipientWrappedKey = await buildRecipientWrappedKeyFromPendingGrant({
+              accessCode,
+              pendingGrant,
+              recipientPublicJwk,
+            });
+            const resolveResponse = await fetch(
+              `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/pending-grants/resolve`,
+              {
+                method: "POST",
+                headers: buildAuthHeaders(authToken, true),
+                body: JSON.stringify({
+                  resolutions: [
+                    {
+                      file_id: fileItem.id,
+                      grant_id: pendingGrant.grant_id,
+                      recipient_wrapped_key: recipientWrappedKey.wrapped_file_key,
+                      algorithm: recipientWrappedKey.algorithm,
+                    },
+                  ],
+                }),
+              },
+            );
+            if (isUnauthorizedStatus(resolveResponse.status)) {
+              handleUnauthorized();
+              return;
+            }
+            if (!resolveResponse.ok) {
+              throw new Error(
+                await getErrorDetail(resolveResponse, `Failed to unlock ${fileItem.file_name}.`),
+              );
+            }
+            plaintext = await decryptVaultFileWithPendingGrant(ciphertext, {
+              accessCode,
+              pendingGrant,
+              iv: fileItem.iv,
+            });
+          }
           zipEntries.push({
             fileName: fileItem.file_name,
             data: plaintext,
@@ -676,6 +755,29 @@ export default function RecipientActivationPage() {
                   <Text variant="bodySmall" color="secondary">
                     {deliveryFiles.length} file{deliveryFiles.length === 1 ? "" : "s"} ready in this delivery.
                   </Text>
+                ) : null}
+                {pendingDeliveryGrants.length ? (
+                  <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
+                    <Alert
+                      variant="info"
+                      message="Some files need a delivery access code for first download. After this unlock, access is bound to your account key for future downloads."
+                    />
+                    {pendingDeliveryGrants.map(({ fileItem, grant }) => (
+                      <Input
+                        key={grant.grant_id}
+                        id={`delivery-access-code-${grant.grant_id}`}
+                        label={`Access code for ${fileItem.file_name}`}
+                        value={deliveryAccessCodes[grant.grant_id] ?? ""}
+                        onChange={(event) =>
+                          setDeliveryAccessCodes((currentValue) => ({
+                            ...currentValue,
+                            [grant.grant_id]: event.target.value,
+                          }))
+                        }
+                        placeholder="Paste the delivery access code"
+                      />
+                    ))}
+                  </Card>
                 ) : null}
                 {isLoadingDeliveryFiles ? (
                   <Alert variant="info" message="Loading delivery files..." />

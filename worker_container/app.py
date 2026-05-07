@@ -1000,6 +1000,19 @@ def _build_zero_knowledge_delivery_bundle(
                     ),
                     None,
                 )
+                pending_grants = file_metadata.get("pending_recipient_grants", [])
+                if not isinstance(pending_grants, list):
+                    pending_grants = []
+                pending_recipient_grant = next(
+                    (
+                        item
+                        for item in pending_grants
+                        if isinstance(item, dict)
+                        and str(item.get("recipient_email", "")).strip().lower() == recipient_email
+                        and str(item.get("status", "pending")).strip().lower() == "pending"
+                    ),
+                    None,
+                )
                 archive_name = f"encrypted/{index:02d}-{archive_stem}.lwenc"
                 zip_file.writestr(archive_name, payload["ciphertext"])
                 manifest["files"].append(
@@ -1022,6 +1035,7 @@ def _build_zero_knowledge_delivery_bundle(
                         "encryption_context": file_metadata.get("encryption_context"),
                         "recipient_wrapped_key": None if recipient_wrapped_key is None else recipient_wrapped_key.get("wrapped_file_key"),
                         "recipient_wrap_algorithm": None if recipient_wrapped_key is None else recipient_wrapped_key.get("algorithm"),
+                        "pending_recipient_grant": pending_recipient_grant,
                     }
                 )
             else:

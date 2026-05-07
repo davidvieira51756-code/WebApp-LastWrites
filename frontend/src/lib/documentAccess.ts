@@ -295,3 +295,23 @@ export async function ensureUserDocumentEncryptionProfile(
   const privateJwk = await decryptPrivateKeyBundle(encryptedPrivateKeyBundle, { email, password });
   cachePrivateKeyJwk(email, privateJwk);
 }
+
+export async function getCurrentDocumentEncryptionPublicJwk(
+  apiUrl: string,
+  authToken: string,
+): Promise<JsonWebKey> {
+  const profileResponse = await fetch(`${apiUrl}/auth/crypto-profile`, {
+    headers: {
+      Authorization: `Bearer ${authToken}`,
+    },
+  });
+  if (!profileResponse.ok) {
+    throw new Error("Failed to load your document encryption profile.");
+  }
+
+  const profile = (await profileResponse.json()) as CryptoProfileResponse;
+  if (!profile.initialized || !profile.encryption_public_jwk) {
+    throw new Error("Your document encryption profile is not ready. Sign out and sign in again.");
+  }
+  return profile.encryption_public_jwk;
+}
