@@ -79,6 +79,23 @@ function buildRecoveryKeyBackupFileName(vaultName: string, vaultId: string): str
   return `${safeName}-${vaultId}-recovery-key.txt`;
 }
 
+function formatRecoveryKeyBackupTimestamp(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteOffsetMinutes = Math.abs(offsetMinutes);
+  const offsetHours = String(Math.floor(absoluteOffsetMinutes / 60)).padStart(2, "0");
+  const remainingOffsetMinutes = String(absoluteOffsetMinutes % 60).padStart(2, "0");
+
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} GMT${sign}${offsetHours}:${remainingOffsetMinutes}`;
+}
+
 function triggerBrowserDownload(blob: Blob, fileName: string): void {
   const objectUrl = window.URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -531,7 +548,7 @@ export function downloadRecoveryKeyBackup({
     "",
     `Vault Name: ${vaultName}`,
     `Vault ID: ${vaultId}`,
-    `Saved At: ${new Date().toISOString()}`,
+    `Saved At: ${formatRecoveryKeyBackupTimestamp(new Date())}`,
     "",
     "Recovery Key:",
     normalizeRecoveryKey(recoveryKey),
