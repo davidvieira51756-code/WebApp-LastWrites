@@ -1338,7 +1338,9 @@ export default function VaultDetailsPage() {
 
                     {recoveryKey ? (
                       <>
-                        <Alert variant="success" message="Vault unlocked on this device for the current session." />
+                        {!recoveryKeyMessage ? (
+                          <Alert variant="success" message="Vault unlocked on this device for the current session." />
+                        ) : null}
                         <Text variant="bodySmall" color="secondary">
                           This recovery key stays only in the current browser session and is cleared when you sign out.
                         </Text>
@@ -1614,6 +1616,10 @@ export default function VaultDetailsPage() {
                 <Text variant="bodySmall" color="secondary">
                   Add recipients who can receive the vault when delivery is initiated.
                 </Text>
+                <Alert
+                  variant="info"
+                  message="Recipients can be added to the vault immediately, but they must verify their account before they can be assigned to encrypted files."
+                />
 
                 <form
                   onSubmit={handleAddRecipient}
@@ -1800,7 +1806,7 @@ export default function VaultDetailsPage() {
                             <span>
                               {recipient.email}
                               {!recipient.has_document_encryption_key
-                                ? " - no document key yet"
+                                ? " - must verify their account before they can receive encrypted files"
                                 : ""}
                             </span>
                           </label>
@@ -1815,7 +1821,7 @@ export default function VaultDetailsPage() {
                     {recipientCryptoDirectory.some((recipient) => !recipient.has_document_encryption_key) ? (
                       <Alert
                         variant="info"
-                        message="Recipients without a document encryption key cannot be included in new zero-knowledge files yet."
+                        message="Recipients must verify their account before they can be added to encrypted files."
                       />
                     ) : null}
                   </Card>
@@ -1931,7 +1937,9 @@ export default function VaultDetailsPage() {
                                     />
                                     <span>
                                       {recipient.email}
-                                      {!canAssign && !isChecked ? " - no document key yet" : ""}
+                                      {!canAssign && !isChecked
+                                        ? " - must verify their account before they can receive encrypted files"
+                                        : ""}
                                     </span>
                                   </label>
                                 );

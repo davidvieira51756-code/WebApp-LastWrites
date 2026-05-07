@@ -23,6 +23,11 @@ type EncryptedPrivateKeyBundle = {
   ciphertext: string;
 };
 
+export type DocumentEncryptionProfilePayload = {
+  encryption_public_jwk: JsonWebKey;
+  encrypted_private_key_bundle: EncryptedPrivateKeyBundle;
+};
+
 function assertCrypto(): Crypto {
   if (typeof window === "undefined" || !window.crypto?.subtle) {
     throw new Error("Web Crypto is not available in this browser.");
@@ -132,6 +137,51 @@ async function decryptPrivateKeyBundle(
   return JSON.parse(new TextDecoder().decode(plaintext)) as JsonWebKey;
 }
 
+export async function createDocumentEncryptionProfilePayload(
+  {
+    email,
+    password,
+  }: {
+    email: string;
+    password: string;
+  },
+): Promise<DocumentEncryptionProfilePayload> {
+  const crypto = assertCrypto();
+  const keyPair = await crypto.subtle.generateKey(
+    {
+      name: "RSA-OAEP",
+      modulusLength: 3072,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["encrypt", "decrypt"],
+  );
+
+  const publicJwk = (await crypto.subtle.exportKey("jwk", keyPair.publicKey)) as JsonWebKey;
+  const privateJwk = (await crypto.subtle.exportKey("jwk", keyPair.privateKey)) as JsonWebKey;
+  const normalizedPublicJwk: JsonWebKey = {
+    ...publicJwk,
+    alg: "RSA-OAEP-256",
+    key_ops: ["encrypt"],
+    ext: true,
+  };
+  const normalizedPrivateJwk: JsonWebKey = {
+    ...privateJwk,
+    alg: "RSA-OAEP-256",
+    key_ops: ["decrypt"],
+    ext: true,
+  };
+
+  return {
+    encryption_public_jwk: normalizedPublicJwk,
+    encrypted_private_key_bundle: await encryptPrivateKeyBundle(normalizedPrivateJwk, {
+      email,
+      password,
+    }),
+  };
+}
+
 function cachePrivateKeyJwk(email: string, privateJwk: JsonWebKey): void {
   if (typeof window === "undefined") {
     return;
@@ -208,8 +258,6 @@ export async function ensureUserDocumentEncryptionProfile(
   }
 
   const existingProfile = (await profileResponse.json()) as CryptoProfileResponse;
-  const crypto = assertCrypto();
-
   if (existingProfile.initialized && existingProfile.encrypted_private_key_bundle) {
     const privateJwk = await decryptPrivateKeyBundle(
       existingProfile.encrypted_private_key_bundle as EncryptedPrivateKeyBundle,
@@ -222,35 +270,12 @@ export async function ensureUserDocumentEncryptionProfile(
     return;
   }
 
-  const keyPair = await crypto.subtle.generateKey(
-    {
-      name: "RSA-OAEP",
-      modulusLength: 3072,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: "SHA-256",
-    },
-    true,
-    ["encrypt", "decrypt"],
-  );
-
-  const publicJwk = (await crypto.subtle.exportKey("jwk", keyPair.publicKey)) as JsonWebKey;
-  const privateJwk = (await crypto.subtle.exportKey("jwk", keyPair.privateKey)) as JsonWebKey;
-  const normalizedPublicJwk: JsonWebKey = {
-    ...publicJwk,
-    alg: "RSA-OAEP-256",
-    key_ops: ["encrypt"],
-    ext: true,
-  };
-  const normalizedPrivateJwk: JsonWebKey = {
-    ...privateJwk,
-    alg: "RSA-OAEP-256",
-    key_ops: ["decrypt"],
-    ext: true,
-  };
-  const encryptedPrivateKeyBundle = await encryptPrivateKeyBundle(normalizedPrivateJwk, {
+  const createdProfile = await createDocumentEncryptionProfilePayload({
     email,
     password,
   });
+  const normalizedPublicJwk = createdProfile.encryption_public_jwk;
+  const encryptedPrivateKeyBundle = createdProfile.encrypted_private_key_bundle;
 
   const updateResponse = await fetch(`${apiUrl}/auth/crypto-profile`, {
     method: "PUT",
@@ -267,5 +292,6 @@ export async function ensureUserDocumentEncryptionProfile(
     throw new Error("Failed to initialize the document encryption profile.");
   }
 
-  cachePrivateKeyJwk(email, normalizedPrivateJwk);
+  const privateJwk = await decryptPrivateKeyBundle(encryptedPrivateKeyBundle, { email, password });
+  cachePrivateKeyJwk(email, privateJwk);
 }

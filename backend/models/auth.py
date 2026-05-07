@@ -11,6 +11,8 @@ class AuthRegisterRequest(BaseModel):
     full_name: str = Field(..., min_length=1, max_length=120)
     birth_date: str = Field(..., min_length=10, max_length=10)
     password: str = Field(..., min_length=8, max_length=256)
+    encryption_public_jwk: dict[str, Any] | None = None
+    encrypted_private_key_bundle: dict[str, str] | None = None
 
 
 class AuthLoginRequest(BaseModel):

@@ -1305,6 +1305,17 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    public_jwk = None
+    private_key_bundle = None
+    if payload.encryption_public_jwk is not None or payload.encrypted_private_key_bundle is not None:
+        public_jwk = normalize_encryption_public_jwk(payload.encryption_public_jwk)
+        private_key_bundle = normalize_encrypted_private_key_bundle(payload.encrypted_private_key_bundle)
+        if public_jwk is None or private_key_bundle is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A valid document encryption key profile is required.",
+            )
+
     try:
         existing_username_owner = cosmos_service.get_user_by_username(normalized_username)
     except Exception:
@@ -1336,6 +1347,8 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
         "is_email_verified": False,
         "verification_token_hash": verification_payload["token_hash"],
         "verification_token_expires_at": verification_payload["expires_at"],
+        "document_encryption_public_jwk": public_jwk,
+        "document_encrypted_private_key_bundle": private_key_bundle,
     }
 
     try:

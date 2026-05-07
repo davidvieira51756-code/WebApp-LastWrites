@@ -8,7 +8,10 @@ import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catm
 import BrandLogo from "@/components/BrandLogo";
 import { getApiUrl, getErrorDetail } from "@/lib/api";
 import { getAuthToken, setAuthSession, setPostLoginWarning } from "@/lib/auth";
-import { ensureUserDocumentEncryptionProfile } from "@/lib/documentAccess";
+import {
+  createDocumentEncryptionProfilePayload,
+  ensureUserDocumentEncryptionProfile,
+} from "@/lib/documentAccess";
 
 type AuthMode = "signin" | "signup";
 
@@ -171,6 +174,18 @@ function AuthPageContent() {
         return;
       }
 
+      let documentEncryptionProfilePayload:
+        | Awaited<ReturnType<typeof createDocumentEncryptionProfilePayload>>
+        | null = null;
+      try {
+        documentEncryptionProfilePayload = await createDocumentEncryptionProfilePayload({
+          email: normalizedEmail,
+          password,
+        });
+      } catch {
+        documentEncryptionProfilePayload = null;
+      }
+
       const response = await fetch(`${apiUrl}/auth/register`, {
         method: "POST",
         headers: {
@@ -182,6 +197,9 @@ function AuthPageContent() {
           full_name: fullName.trim(),
           birth_date: birthDate,
           password,
+          encryption_public_jwk: documentEncryptionProfilePayload?.encryption_public_jwk ?? null,
+          encrypted_private_key_bundle:
+            documentEncryptionProfilePayload?.encrypted_private_key_bundle ?? null,
         }),
       });
 

@@ -228,6 +228,61 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertIsNone(payload["encryption_public_jwk"])
         self.assertIsNone(payload["encrypted_private_key_bundle"])
 
+    def test_verified_recipient_can_expose_document_key_before_first_login(self) -> None:
+        owner_token = self._register_and_login(f"owner-{uuid4().hex[:8]}@example.com")
+        vault = self._create_vault(
+            owner_token,
+            name="Recipient Key Readiness Vault",
+            owner_message="Recipient key readiness.",
+        )
+
+        recipient_private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+        register_response = self.client.post(
+            "/auth/register",
+            json={
+                "email": f"ready-{uuid4().hex[:8]}@example.com",
+                "username": f"user_{uuid4().hex[:8]}",
+                "full_name": "Recipient Ready",
+                "birth_date": "2000-01-01",
+                "password": "Password123!",
+                "encryption_public_jwk": self._public_jwk_from_private_key(recipient_private_key),
+                "encrypted_private_key_bundle": {
+                    "schema_version": "1",
+                    "wrapping_algorithm": "AES-256-GCM",
+                    "kdf_algorithm": "PBKDF2-SHA256",
+                    "salt": b64url_encode(secrets.token_bytes(16)),
+                    "iv": b64url_encode(secrets.token_bytes(12)),
+                    "ciphertext": b64url_encode(secrets.token_bytes(128)),
+                },
+            },
+        )
+        self.assertEqual(register_response.status_code, 201, register_response.text)
+        recipient_email = register_response.json()["email"]
+
+        verify_response = self.client.post(
+            "/auth/verify-email",
+            json={"token": register_response.json()["verification_token"]},
+        )
+        self.assertEqual(verify_response.status_code, 200, verify_response.text)
+
+        add_recipient_response = self.client.post(
+            f"/vaults/{vault['id']}/recipients",
+            headers=self._auth_headers(owner_token),
+            json={"email": recipient_email, "can_activate": True},
+        )
+        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        directory_response = self.client.get(
+            f"/vaults/{vault['id']}/recipient-crypto-directory",
+            headers=self._auth_headers(owner_token),
+        )
+        self.assertEqual(directory_response.status_code, 200, directory_response.text)
+        recipient_entry = next(
+            item for item in directory_response.json()["recipients"] if item["email"] == recipient_email
+        )
+        self.assertTrue(recipient_entry["has_document_encryption_key"])
+        self.assertTrue(recipient_entry["document_encryption_public_jwk"])
+
     @staticmethod
     def _encrypt_zero_knowledge_payload(
         plaintext: bytes,
