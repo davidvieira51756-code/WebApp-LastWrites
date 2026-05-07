@@ -4,8 +4,6 @@ const RECOVERY_KEY_SESSION_PREFIX = "lw.zk.recovery.";
 const RECOVERY_KEY_BACKUP_CONFIRMED_PREFIX = "lw.zk.recovery.backed-up.";
 const ZERO_KNOWLEDGE_SCHEMA_VERSION = 4;
 const ZERO_KNOWLEDGE_KDF_ALGORITHM = "HKDF-SHA256";
-const PENDING_GRANT_WRAP_ALGORITHM = "AES-256-GCM";
-const PENDING_GRANT_KDF_ALGORITHM = "HKDF-SHA256";
 
 type ZeroKnowledgeFileMetadata = {
   encrypted: true;
@@ -28,37 +26,17 @@ type ZeroKnowledgeFileMetadata = {
     wrapped_file_key: string;
     algorithm: "RSA-OAEP-256";
   }>;
-  pending_recipient_grants: PendingRecipientGrant[];
 };
 
 type EncryptVaultFileResult = {
   ciphertext: Uint8Array;
   metadata: ZeroKnowledgeFileMetadata;
-  pendingAccessCodes: PendingGrantAccessCode[];
 };
 
 export type RecipientWrappedKeyAssignment = {
   recipient_email: string;
   wrapped_file_key: string;
   algorithm: "RSA-OAEP-256";
-};
-
-export type PendingRecipientGrant = {
-  grant_id: string;
-  recipient_email: string;
-  status: "pending" | "resolved" | "revoked";
-  wrapped_file_key: string;
-  algorithm: "AES-256-GCM";
-  kdf_algorithm: "HKDF-SHA256";
-  salt: string;
-  iv: string;
-  verifier: string;
-};
-
-export type PendingGrantAccessCode = {
-  recipientEmail: string;
-  grantId: string;
-  accessCode: string;
 };
 
 function assertCrypto(): Crypto {
@@ -152,42 +130,6 @@ async function importRecoveryKeyMaterial(recoveryKey: string): Promise<CryptoKey
   return crypto.subtle.importKey("raw", toArrayBuffer(recoveryKeyBytes), "HKDF", false, ["deriveKey"]);
 }
 
-async function importPendingGrantCodeMaterial(accessCode: string): Promise<CryptoKey> {
-  const crypto = assertCrypto();
-  const codeBytes = b64urlDecode(accessCode);
-  if (codeBytes.length !== 32) {
-    throw new Error("Delivery access code is invalid.");
-  }
-
-  return crypto.subtle.importKey("raw", toArrayBuffer(codeBytes), "HKDF", false, ["deriveKey"]);
-}
-
-async function derivePendingGrantWrapKey(
-  accessCode: string,
-  {
-    grantId,
-    salt,
-  }: {
-    grantId: string;
-    salt: string;
-  },
-): Promise<CryptoKey> {
-  const crypto = assertCrypto();
-  const masterKey = await importPendingGrantCodeMaterial(accessCode);
-  return crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: toArrayBuffer(b64urlDecode(salt)),
-      info: toArrayBuffer(encodeText(`lastwrites:pending-grant:${grantId}`)),
-    },
-    masterKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
-}
-
 async function deriveOwnerWrapKey(
   recoveryKey: string,
   {
@@ -241,108 +183,16 @@ export async function verifyRecoveryKey(
   return computedVerifier === expectedVerifier;
 }
 
-async function buildPendingGrantVerifier(accessCode: string): Promise<string> {
-  const codeBytes = b64urlDecode(accessCode);
-  if (codeBytes.length !== 32) {
-    throw new Error("Delivery access code is invalid.");
-  }
-  return b64urlEncode(
-    await sha256Bytes(concatBytes(encodeText("lastwrites:pending-grant-code:v1:"), codeBytes)),
-  );
-}
-
-async function wrapFileKeyForRecipientPublicKey(
-  fileKeyBytes: Uint8Array,
-  {
-    recipientEmail,
-    publicJwk,
-  }: {
-    recipientEmail: string;
-    publicJwk: JsonWebKey;
-  },
-): Promise<RecipientWrappedKeyAssignment> {
-  const crypto = assertCrypto();
-  const importedPublicKey = await crypto.subtle.importKey(
-    "jwk",
-    publicJwk,
-    {
-      name: "RSA-OAEP",
-      hash: "SHA-256",
-    },
-    true,
-    ["encrypt"],
-  );
-  const wrappedFileKey = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: "RSA-OAEP",
-      },
-      importedPublicKey,
-      toArrayBuffer(fileKeyBytes),
-    ),
-  );
-  return {
-    recipient_email: recipientEmail.trim().toLowerCase(),
-    wrapped_file_key: b64urlEncode(wrappedFileKey),
-    algorithm: "RSA-OAEP-256",
-  };
-}
-
-async function buildPendingRecipientGrant(
-  fileKeyBytes: Uint8Array,
-  recipientEmail: string,
-): Promise<{ grant: PendingRecipientGrant; accessCode: PendingGrantAccessCode }> {
-  const crypto = assertCrypto();
-  const normalizedEmail = recipientEmail.trim().toLowerCase();
-  const grantId = crypto.randomUUID();
-  const accessCode = b64urlEncode(crypto.getRandomValues(new Uint8Array(32)));
-  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-  const ivBytes = crypto.getRandomValues(new Uint8Array(12));
-  const salt = b64urlEncode(saltBytes);
-  const wrapKey = await derivePendingGrantWrapKey(accessCode, { grantId, salt });
-  const wrappedFileKey = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: "AES-GCM",
-        iv: toArrayBuffer(ivBytes),
-      },
-      wrapKey,
-      toArrayBuffer(fileKeyBytes),
-    ),
-  );
-
-  return {
-    grant: {
-      grant_id: grantId,
-      recipient_email: normalizedEmail,
-      status: "pending",
-      wrapped_file_key: b64urlEncode(wrappedFileKey),
-      algorithm: PENDING_GRANT_WRAP_ALGORITHM,
-      kdf_algorithm: PENDING_GRANT_KDF_ALGORITHM,
-      salt,
-      iv: b64urlEncode(ivBytes),
-      verifier: await buildPendingGrantVerifier(accessCode),
-    },
-    accessCode: {
-      recipientEmail: normalizedEmail,
-      grantId,
-      accessCode,
-    },
-  };
-}
-
 export async function encryptVaultFile(
   plaintext: ArrayBuffer | Uint8Array,
   {
     recoveryKey,
     vaultId,
     recipientPublicKeys,
-    pendingRecipientEmails = [],
   }: {
     recoveryKey: string;
     vaultId: string;
     recipientPublicKeys: Array<{ recipientEmail: string; publicJwk: JsonWebKey }>;
-    pendingRecipientEmails?: string[];
   },
 ): Promise<EncryptVaultFileResult> {
   const crypto = assertCrypto();
@@ -383,35 +233,40 @@ export async function encryptVaultFile(
   const plaintextSha = await sha256Bytes(plaintextBytes);
   const ciphertextSha = await sha256Bytes(ciphertext);
   const recipientWrappedKeys: ZeroKnowledgeFileMetadata["recipient_wrapped_keys"] = [];
-  const pendingRecipientGrants: PendingRecipientGrant[] = [];
-  const pendingAccessCodes: PendingGrantAccessCode[] = [];
 
   for (const recipientPublicKey of recipientPublicKeys) {
     const recipientEmail = recipientPublicKey.recipientEmail.trim().toLowerCase();
     if (!recipientEmail) {
       continue;
     }
-    recipientWrappedKeys.push(
-      await wrapFileKeyForRecipientPublicKey(fileKeyBytes, {
-        recipientEmail,
-        publicJwk: recipientPublicKey.publicJwk,
-      }),
+    const importedPublicKey = await crypto.subtle.importKey(
+      "jwk",
+      recipientPublicKey.publicJwk,
+      {
+        name: "RSA-OAEP",
+        hash: "SHA-256",
+      },
+      true,
+      ["encrypt"],
     );
-  }
-
-  for (const pendingRecipientEmail of pendingRecipientEmails) {
-    const normalizedEmail = pendingRecipientEmail.trim().toLowerCase();
-    if (!normalizedEmail) {
-      continue;
-    }
-    const pendingGrant = await buildPendingRecipientGrant(fileKeyBytes, normalizedEmail);
-    pendingRecipientGrants.push(pendingGrant.grant);
-    pendingAccessCodes.push(pendingGrant.accessCode);
+    const wrappedFileKey = new Uint8Array(
+      await crypto.subtle.encrypt(
+        {
+          name: "RSA-OAEP",
+        },
+        importedPublicKey,
+        toArrayBuffer(fileKeyBytes),
+      ),
+    );
+    recipientWrappedKeys.push({
+      recipient_email: recipientEmail,
+      wrapped_file_key: b64urlEncode(wrappedFileKey),
+      algorithm: "RSA-OAEP-256",
+    });
   }
 
   return {
     ciphertext,
-    pendingAccessCodes,
     metadata: {
       encrypted: true,
       zero_knowledge: true,
@@ -429,7 +284,6 @@ export async function encryptVaultFile(
       owner_wrap_salt: ownerWrapSalt,
       owner_wrap_iv: b64urlEncode(ownerWrapIvBytes),
       recipient_wrapped_keys: recipientWrappedKeys,
-      pending_recipient_grants: pendingRecipientGrants,
     },
   };
 }
@@ -542,50 +396,12 @@ export async function buildRecipientWrappedKeysForVaultFile(
     recipientPublicKeys: Array<{ recipientEmail: string; publicJwk: JsonWebKey }>;
   },
 ): Promise<RecipientWrappedKeyAssignment[]> {
-  const fileKeyBytes = await unwrapOwnerFileKey({
-    recoveryKey,
-    vaultId,
-    ownerWrappedFileKey,
-    ownerWrapSalt,
-    ownerWrapIv,
-  });
-
-  const wrappedKeys: RecipientWrappedKeyAssignment[] = [];
-  for (const recipientPublicKey of recipientPublicKeys) {
-    const recipientEmail = recipientPublicKey.recipientEmail.trim().toLowerCase();
-    if (!recipientEmail) {
-      continue;
-    }
-    wrappedKeys.push(
-      await wrapFileKeyForRecipientPublicKey(fileKeyBytes, {
-        recipientEmail,
-        publicJwk: recipientPublicKey.publicJwk,
-      }),
-    );
-  }
-
-  return wrappedKeys;
-}
-
-async function unwrapOwnerFileKey({
-  recoveryKey,
-  vaultId,
-  ownerWrappedFileKey,
-  ownerWrapSalt,
-  ownerWrapIv,
-}: {
-  recoveryKey: string;
-  vaultId: string;
-  ownerWrappedFileKey: string;
-  ownerWrapSalt: string;
-  ownerWrapIv: string;
-}): Promise<Uint8Array> {
   const crypto = assertCrypto();
   const ownerWrapKey = await deriveOwnerWrapKey(normalizeRecoveryKey(recoveryKey), {
     vaultId,
     ownerWrapSalt,
   });
-  return new Uint8Array(
+  const fileKeyBytes = new Uint8Array(
     await crypto.subtle.decrypt(
       {
         name: "AES-GCM",
@@ -595,119 +411,40 @@ async function unwrapOwnerFileKey({
       toArrayBuffer(b64urlDecode(ownerWrappedFileKey)),
     ),
   );
-}
 
-export async function buildPendingGrantsForVaultFile({
-  recoveryKey,
-  vaultId,
-  ownerWrappedFileKey,
-  ownerWrapSalt,
-  ownerWrapIv,
-  pendingRecipientEmails,
-}: {
-  recoveryKey: string;
-  vaultId: string;
-  ownerWrappedFileKey: string;
-  ownerWrapSalt: string;
-  ownerWrapIv: string;
-  pendingRecipientEmails: string[];
-}): Promise<{ grants: PendingRecipientGrant[]; accessCodes: PendingGrantAccessCode[] }> {
-  const fileKeyBytes = await unwrapOwnerFileKey({
-    recoveryKey,
-    vaultId,
-    ownerWrappedFileKey,
-    ownerWrapSalt,
-    ownerWrapIv,
-  });
-  const grants: PendingRecipientGrant[] = [];
-  const accessCodes: PendingGrantAccessCode[] = [];
-  for (const recipientEmail of pendingRecipientEmails) {
-    const normalizedEmail = recipientEmail.trim().toLowerCase();
-    if (!normalizedEmail) {
+  const wrappedKeys: RecipientWrappedKeyAssignment[] = [];
+  for (const recipientPublicKey of recipientPublicKeys) {
+    const recipientEmail = recipientPublicKey.recipientEmail.trim().toLowerCase();
+    if (!recipientEmail) {
       continue;
     }
-    const pendingGrant = await buildPendingRecipientGrant(fileKeyBytes, normalizedEmail);
-    grants.push(pendingGrant.grant);
-    accessCodes.push(pendingGrant.accessCode);
-  }
-
-  return { grants, accessCodes };
-}
-
-async function unwrapPendingGrantFileKey(
-  accessCode: string,
-  pendingGrant: PendingRecipientGrant,
-): Promise<Uint8Array> {
-  if (pendingGrant.status === "revoked") {
-    throw new Error("This delivery access grant was revoked.");
-  }
-  const expectedVerifier = await buildPendingGrantVerifier(accessCode);
-  if (expectedVerifier !== pendingGrant.verifier) {
-    throw new Error("Delivery access code is incorrect.");
-  }
-  const crypto = assertCrypto();
-  const wrapKey = await derivePendingGrantWrapKey(accessCode, {
-    grantId: pendingGrant.grant_id,
-    salt: pendingGrant.salt,
-  });
-  return new Uint8Array(
-    await crypto.subtle.decrypt(
+    const importedPublicKey = await crypto.subtle.importKey(
+      "jwk",
+      recipientPublicKey.publicJwk,
       {
-        name: "AES-GCM",
-        iv: toArrayBuffer(b64urlDecode(pendingGrant.iv)),
+        name: "RSA-OAEP",
+        hash: "SHA-256",
       },
-      wrapKey,
-      toArrayBuffer(b64urlDecode(pendingGrant.wrapped_file_key)),
-    ),
-  );
-}
+      true,
+      ["encrypt"],
+    );
+    const wrappedFileKey = new Uint8Array(
+      await crypto.subtle.encrypt(
+        {
+          name: "RSA-OAEP",
+        },
+        importedPublicKey,
+        toArrayBuffer(fileKeyBytes),
+      ),
+    );
+    wrappedKeys.push({
+      recipient_email: recipientEmail,
+      wrapped_file_key: b64urlEncode(wrappedFileKey),
+      algorithm: "RSA-OAEP-256",
+    });
+  }
 
-export async function buildRecipientWrappedKeyFromPendingGrant({
-  accessCode,
-  pendingGrant,
-  recipientPublicJwk,
-}: {
-  accessCode: string;
-  pendingGrant: PendingRecipientGrant;
-  recipientPublicJwk: JsonWebKey;
-}): Promise<RecipientWrappedKeyAssignment> {
-  const fileKeyBytes = await unwrapPendingGrantFileKey(accessCode, pendingGrant);
-  return wrapFileKeyForRecipientPublicKey(fileKeyBytes, {
-    recipientEmail: pendingGrant.recipient_email,
-    publicJwk: recipientPublicJwk,
-  });
-}
-
-export async function decryptVaultFileWithPendingGrant(
-  ciphertext: ArrayBuffer | Uint8Array,
-  {
-    accessCode,
-    pendingGrant,
-    iv,
-  }: {
-    accessCode: string;
-    pendingGrant: PendingRecipientGrant;
-    iv: string;
-  },
-): Promise<Uint8Array> {
-  const crypto = assertCrypto();
-  const fileKeyBytes = await unwrapPendingGrantFileKey(accessCode, pendingGrant);
-  const fileKey = await crypto.subtle.importKey(
-    "raw",
-    toArrayBuffer(fileKeyBytes),
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["decrypt"],
-  );
-  const plaintext = await crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: toArrayBuffer(b64urlDecode(iv)),
-    },
-    fileKey,
-    toArrayBuffer(toUint8Array(ciphertext)),
-  );
-  return new Uint8Array(plaintext);
+  return wrappedKeys;
 }
 
 export function storeRecoveryKeyForVault(vaultId: string, recoveryKey: string): void {

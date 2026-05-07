@@ -35,20 +35,6 @@ class RecipientWrappedFileKey(BaseModel):
     algorithm: str = Field(default="RSA-OAEP-256", min_length=3, max_length=64)
 
 
-class PendingRecipientGrant(BaseModel):
-    grant_id: str = Field(..., min_length=1, max_length=128)
-    recipient_email: str = Field(..., min_length=3, max_length=320)
-    status: Literal["pending", "resolved", "revoked"] = "pending"
-    wrapped_file_key: str = Field(..., min_length=16)
-    algorithm: str = Field(default="AES-256-GCM", min_length=3, max_length=64)
-    kdf_algorithm: str = Field(default="HKDF-SHA256", min_length=3, max_length=64)
-    salt: str = Field(..., min_length=8, max_length=256)
-    iv: str = Field(..., min_length=8, max_length=256)
-    verifier: str = Field(..., min_length=16, max_length=256)
-    resolved_at: Optional[str] = None
-    revoked_at: Optional[str] = None
-
-
 class DeliveryPackageMetadata(BaseModel):
     recipient_email: str = Field(..., min_length=3, max_length=320)
     file_name: str = Field(..., min_length=1, max_length=512)
@@ -98,7 +84,6 @@ class VaultFileMetadata(BaseModel):
     owner_wrap_salt: Optional[str] = None
     owner_wrap_iv: Optional[str] = None
     recipient_wrapped_keys: List[RecipientWrappedFileKey] = Field(default_factory=list)
-    pending_recipient_grants: List[PendingRecipientGrant] = Field(default_factory=list)
 
 
 class VaultBase(BaseModel):

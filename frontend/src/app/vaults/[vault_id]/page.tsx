@@ -19,7 +19,6 @@ import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import {
-  buildPendingGrantsForVaultFile,
   buildRecipientWrappedKeysForVaultFile,
   clearStoredRecoveryKeyForVault,
   decryptVaultFile,
@@ -28,8 +27,6 @@ import {
   normalizeRecoveryKey,
   storeRecoveryKeyForVault,
   verifyRecoveryKey,
-  type PendingGrantAccessCode,
-  type PendingRecipientGrant,
 } from "@/lib/zeroKnowledge";
 
 type ActivationRequestItem = {
@@ -107,7 +104,6 @@ type VaultFile = {
     wrapped_file_key: string;
     algorithm?: string | null;
   }>;
-  pending_recipient_grants?: PendingRecipientGrant[];
 };
 
 type VaultFilesResponse = {
@@ -258,7 +254,6 @@ export default function VaultDetailsPage() {
   const [isUpdatingFileRecipientsId, setIsUpdatingFileRecipientsId] = useState<string | null>(null);
   const [fileRecipientsMessage, setFileRecipientsMessage] = useState<string | null>(null);
   const [fileRecipientsError, setFileRecipientsError] = useState<string | null>(null);
-  const [pendingGrantAccessCodes, setPendingGrantAccessCodes] = useState<PendingGrantAccessCode[]>([]);
 
   const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -413,7 +408,9 @@ export default function VaultDetailsPage() {
   }, [authToken, fetchVaultData, isCheckingAuth]);
 
   useEffect(() => {
-    const availableRecipientEmails = recipientCryptoDirectory.map((recipient) => recipient.email);
+    const availableRecipientEmails = recipientCryptoDirectory
+      .filter((recipient) => recipient.has_document_encryption_key)
+      .map((recipient) => recipient.email);
 
     setSelectedUploadRecipientEmails((currentValue) => {
       if (currentValue.length === 0) {
@@ -625,7 +622,6 @@ export default function VaultDetailsPage() {
     setUploadError(null);
     setFileRecipientsMessage(null);
     setFileRecipientsError(null);
-    setPendingGrantAccessCodes([]);
 
     if (!selectedFile) {
       setUploadError("Please choose a file before uploading.");
@@ -643,33 +639,27 @@ export default function VaultDetailsPage() {
     setIsUploadingFile(true);
     try {
       const formData = new FormData();
-      let generatedPendingAccessCodes: PendingGrantAccessCode[] = [];
       const assignedRecipientEmails = vault?.zero_knowledge_enabled
         ? selectedUploadRecipientEmails
         : [];
       if (vault?.zero_knowledge_enabled) {
-        const recipientPublicKeys: Array<{ recipientEmail: string; publicJwk: JsonWebKey }> = [];
-        const pendingRecipientEmails: string[] = [];
-        for (const recipientEmail of assignedRecipientEmails) {
+        const recipientPublicKeys = assignedRecipientEmails.map((recipientEmail) => {
           const matchingRecipient = recipientCryptoDirectory.find(
             (recipient) => recipient.email === recipientEmail,
           );
-          if (matchingRecipient?.document_encryption_public_jwk) {
-            recipientPublicKeys.push({
-              recipientEmail,
-              publicJwk: matchingRecipient.document_encryption_public_jwk,
-            });
-          } else {
-            pendingRecipientEmails.push(recipientEmail);
+          if (!matchingRecipient?.document_encryption_public_jwk) {
+            throw new Error(`Recipient ${recipientEmail} is missing a document encryption key.`);
           }
-        }
+          return {
+            recipientEmail,
+            publicJwk: matchingRecipient.document_encryption_public_jwk,
+          };
+        });
         const encryptedPayload = await encryptVaultFile(await selectedFile.arrayBuffer(), {
           recoveryKey: recoveryKey as string,
           vaultId,
           recipientPublicKeys,
-          pendingRecipientEmails,
         });
-        generatedPendingAccessCodes = encryptedPayload.pendingAccessCodes;
         const ciphertextBuffer = encryptedPayload.ciphertext.buffer.slice(
           encryptedPayload.ciphertext.byteOffset,
           encryptedPayload.ciphertext.byteOffset + encryptedPayload.ciphertext.byteLength,
@@ -707,12 +697,6 @@ export default function VaultDetailsPage() {
 
       setSelectedFile(null);
       setFileInputKey((currentValue) => currentValue + 1);
-      if (generatedPendingAccessCodes.length) {
-        setPendingGrantAccessCodes((currentValue) => [
-          ...generatedPendingAccessCodes,
-          ...currentValue,
-        ]);
-      }
       setUploadMessage("File uploaded successfully.");
       await fetchVaultData(false);
     } catch (error) {
@@ -747,8 +731,6 @@ export default function VaultDetailsPage() {
         wrapped_file_key: string;
         algorithm: "RSA-OAEP-256";
       }> | undefined;
-      let pendingRecipientGrants: PendingRecipientGrant[] | undefined;
-      let generatedPendingAccessCodes: PendingGrantAccessCode[] = [];
 
       if (matchingFile?.zero_knowledge) {
         if (
@@ -760,29 +742,18 @@ export default function VaultDetailsPage() {
           throw new Error("Unlock this vault with the recovery key before updating file recipients.");
         }
 
-        const recipientPublicKeys: Array<{ recipientEmail: string; publicJwk: JsonWebKey }> = [];
-        const pendingRecipientEmails: string[] = [];
-        const existingPendingRecipientEmails = new Set(
-          (matchingFile.pending_recipient_grants ?? [])
-            .filter((grant) => grant.status === "pending")
-            .map((grant) => grant.recipient_email),
-        );
-
-        for (const recipientEmail of recipientEmails) {
+        const recipientPublicKeys = recipientEmails.map((recipientEmail) => {
           const matchingRecipient = recipientCryptoDirectory.find(
             (recipient) => recipient.email === recipientEmail,
           );
-          if (matchingRecipient?.document_encryption_public_jwk) {
-            recipientPublicKeys.push({
-              recipientEmail,
-              publicJwk: matchingRecipient.document_encryption_public_jwk,
-            });
-            continue;
+          if (!matchingRecipient?.document_encryption_public_jwk) {
+            throw new Error(`Recipient ${recipientEmail} does not have a document encryption key yet.`);
           }
-          if (!existingPendingRecipientEmails.has(recipientEmail)) {
-            pendingRecipientEmails.push(recipientEmail);
-          }
-        }
+          return {
+            recipientEmail,
+            publicJwk: matchingRecipient.document_encryption_public_jwk,
+          };
+        });
 
         recipientWrappedKeys = await buildRecipientWrappedKeysForVaultFile({
           recoveryKey,
@@ -792,19 +763,6 @@ export default function VaultDetailsPage() {
           ownerWrapIv: matchingFile.owner_wrap_iv,
           recipientPublicKeys,
         });
-
-        if (pendingRecipientEmails.length) {
-          const pendingGrantPayload = await buildPendingGrantsForVaultFile({
-            recoveryKey,
-            vaultId,
-            ownerWrappedFileKey: matchingFile.owner_wrapped_file_key,
-            ownerWrapSalt: matchingFile.owner_wrap_salt,
-            ownerWrapIv: matchingFile.owner_wrap_iv,
-            pendingRecipientEmails,
-          });
-          pendingRecipientGrants = pendingGrantPayload.grants;
-          generatedPendingAccessCodes = pendingGrantPayload.accessCodes;
-        }
       }
 
       const response = await fetch(
@@ -815,7 +773,6 @@ export default function VaultDetailsPage() {
           body: JSON.stringify({
             recipient_emails: recipientEmails,
             recipient_wrapped_keys: recipientWrappedKeys,
-            pending_recipient_grants: pendingRecipientGrants,
           }),
         },
       );
@@ -830,12 +787,6 @@ export default function VaultDetailsPage() {
         throw new Error(message);
       }
 
-      if (generatedPendingAccessCodes.length) {
-        setPendingGrantAccessCodes((currentValue) => [
-          ...generatedPendingAccessCodes,
-          ...currentValue,
-        ]);
-      }
       setFileRecipientsMessage("File recipients updated.");
       await fetchVaultData(false);
     } catch (error) {
@@ -1662,7 +1613,7 @@ export default function VaultDetailsPage() {
                 </Text>
                 <Alert
                   variant="info"
-                  message="Recipients can be added and assigned to encrypted files immediately. If they do not have an account yet, access is completed when they sign in during delivery."
+                  message="Recipients can be added to the vault immediately, but they must verify their account before they can be assigned to encrypted files."
                 />
 
                 <form
@@ -1797,32 +1748,6 @@ export default function VaultDetailsPage() {
               {uploadMessage ? <Alert variant="success" message={uploadMessage} /> : null}
               {fileRecipientsError ? <Alert variant="error" message={fileRecipientsError} /> : null}
               {fileRecipientsMessage ? <Alert variant="success" message={fileRecipientsMessage} /> : null}
-              {pendingGrantAccessCodes.length ? (
-                <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
-                  <Alert
-                    variant="warning"
-                    message="Save and share these delivery access codes with the matching recipients. Last Writes cannot recover them because they are not stored on the server."
-                  />
-                  {pendingGrantAccessCodes.map((grant) => (
-                    <Card key={grant.grantId} variant="secondary" style={{ padding: t.space.s, gap: t.space.xs }}>
-                      <Text variant="label">{grant.recipientEmail}</Text>
-                      <Input
-                        id={`pending-grant-${grant.grantId}`}
-                        label="Delivery access code"
-                        value={grant.accessCode}
-                        readOnly
-                      />
-                      <Button
-                        type="button"
-                        variant="Primary"
-                        onClick={() => void navigator.clipboard?.writeText(grant.accessCode)}
-                      >
-                        Copy Access Code
-                      </Button>
-                    </Card>
-                  ))}
-                </Card>
-              ) : null}
 
               <form
                 onSubmit={handleFileUpload}
@@ -1862,7 +1787,7 @@ export default function VaultDetailsPage() {
                             <input
                               type="checkbox"
                               checked={selectedUploadRecipientEmails.includes(recipient.email)}
-                              disabled={isArchivedFinal}
+                              disabled={!recipient.has_document_encryption_key}
                               onChange={(event) => {
                                 setSelectedUploadRecipientEmails((currentValue) =>
                                   event.target.checked
@@ -1876,7 +1801,7 @@ export default function VaultDetailsPage() {
                             <span>
                               {recipient.email}
                               {!recipient.has_document_encryption_key
-                                ? " - access will be completed when this recipient signs in during delivery"
+                                ? " - must verify their account before they can receive encrypted files"
                                 : ""}
                             </span>
                           </label>
@@ -1891,7 +1816,7 @@ export default function VaultDetailsPage() {
                     {recipientCryptoDirectory.some((recipient) => !recipient.has_document_encryption_key) ? (
                       <Alert
                         variant="info"
-                        message="Recipients without an account can be assigned now. The browser will create a delivery access code that must be shared with them for first download."
+                        message="Recipients must verify their account before they can be added to encrypted files."
                       />
                     ) : null}
                   </Card>
@@ -1979,18 +1904,7 @@ export default function VaultDetailsPage() {
                                 const cryptoRecipient = recipientCryptoDirectory.find(
                                   (candidate) => candidate.email === recipient.email,
                                 );
-                                const hasDirectAccess = Boolean(
-                                  fileItem.recipient_wrapped_keys?.some(
-                                    (wrappedKey) => wrappedKey.recipient_email === recipient.email,
-                                  ),
-                                );
-                                const hasPendingAccess = Boolean(
-                                  fileItem.pending_recipient_grants?.some(
-                                    (grant) =>
-                                      grant.recipient_email === recipient.email &&
-                                      grant.status === "pending",
-                                  ),
-                                );
+                                const canAssign = Boolean(cryptoRecipient?.document_encryption_public_jwk);
                                 return (
                                   <label
                                     key={`${fileItem.id}-${recipient.email}`}
@@ -2007,7 +1921,8 @@ export default function VaultDetailsPage() {
                                       checked={isChecked}
                                       disabled={
                                         isArchivedFinal ||
-                                        isUpdatingFileRecipientsId === fileItem.id
+                                        isUpdatingFileRecipientsId === fileItem.id ||
+                                        (!canAssign && !isChecked)
                                       }
                                       onChange={(event) => {
                                         const nextRecipientEmails = event.target.checked
@@ -2020,11 +1935,8 @@ export default function VaultDetailsPage() {
                                     />
                                     <span>
                                       {recipient.email}
-                                      {isChecked && !hasDirectAccess && hasPendingAccess
-                                        ? " - access will be completed when this recipient signs in during delivery"
-                                        : ""}
-                                      {!isChecked && !cryptoRecipient?.document_encryption_public_jwk
-                                        ? " - will use a delivery access code"
+                                      {!canAssign && !isChecked
+                                        ? " - must verify their account before they can receive encrypted files"
                                         : ""}
                                     </span>
                                   </label>
@@ -2032,7 +1944,7 @@ export default function VaultDetailsPage() {
                               })}
                               <Alert
                                 variant="info"
-                                message="Recipients can be assigned now even without an account. If they do not have a document key yet, the browser creates a delivery access code for late-binding."
+                                message="Updating zero-knowledge file recipients re-wraps access for the selected recipients without re-uploading the file."
                               />
                             </div>
                           ) : (

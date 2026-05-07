@@ -228,256 +228,60 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertIsNone(payload["encryption_public_jwk"])
         self.assertIsNone(payload["encrypted_private_key_bundle"])
 
-    def test_owner_can_assign_zero_knowledge_file_to_email_without_account(self) -> None:
+    def test_verified_recipient_can_expose_document_key_before_first_login(self) -> None:
         owner_token = self._register_and_login(f"owner-{uuid4().hex[:8]}@example.com")
-        recovery_key = secrets.token_bytes(32)
-        vault = self._create_vault_with_options(
+        vault = self._create_vault(
             owner_token,
-            name="Pending Recipient Vault",
-            owner_message="Recipient can be assigned before account creation.",
-            zero_knowledge_enabled=True,
-            recovery_key_verifier=self._build_recovery_key_verifier(recovery_key),
-        )
-        recipient_email = f"future-{uuid4().hex[:8]}@example.com"
-
-        add_recipient_response = self.client.post(
-            f"/vaults/{vault['id']}/recipients",
-            headers=self._auth_headers(owner_token),
-            json={"email": recipient_email, "can_activate": True},
-        )
-        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
-
-        upload_response = self._upload_zero_knowledge_file_for_recipients(
-            owner_token,
-            vault["id"],
-            "future-ready.txt",
-            b"recipient can be assigned before account creation",
-            recovery_key,
-            recipient_emails=[recipient_email],
-            pending_recipient_emails=[recipient_email],
-        )
-        self.assertEqual(upload_response["recipient_emails"], [recipient_email])
-        self.assertEqual(upload_response.get("recipient_wrapped_keys"), [])
-        self.assertEqual(len(upload_response["pending_recipient_grants"]), 1)
-        self.assertEqual(upload_response["pending_recipient_grants"][0]["recipient_email"], recipient_email)
-        self.assertEqual(upload_response["pending_recipient_grants"][0]["status"], "pending")
-        self.assertEqual(len(upload_response["_pending_access_codes"]), 1)
-
-    def test_recipient_resolves_pending_grant_after_account_creation(self) -> None:
-        owner_token = self._register_and_login(f"owner-resolve-{uuid4().hex[:8]}@example.com")
-        recovery_key = secrets.token_bytes(32)
-        vault = self._create_vault_with_options(
-            owner_token,
-            name="Resolve Pending Grant Vault",
-            owner_message="Late binding grant.",
-            zero_knowledge_enabled=True,
-            recovery_key_verifier=self._build_recovery_key_verifier(recovery_key),
-        )
-        recipient_email = f"late-{uuid4().hex[:8]}@example.com"
-        add_recipient_response = self.client.post(
-            f"/vaults/{vault['id']}/recipients",
-            headers=self._auth_headers(owner_token),
-            json={"email": recipient_email, "can_activate": True},
-        )
-        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
-        uploaded_file = self._upload_zero_knowledge_file_for_recipients(
-            owner_token,
-            vault["id"],
-            "late.txt",
-            b"late binding payload",
-            recovery_key,
-            recipient_emails=[recipient_email],
-            pending_recipient_emails=[recipient_email],
+            name="Recipient Key Readiness Vault",
+            owner_message="Recipient key readiness.",
         )
 
         recipient_private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-        recipient_token = self._register_and_login(recipient_email)
-        self._install_document_crypto_profile(
-            recipient_token,
-            self._public_jwk_from_private_key(recipient_private_key),
-        )
-        pending_grant = uploaded_file["pending_recipient_grants"][0]
-        access_code = uploaded_file["_pending_access_codes"][0]["access_code"]
-        recipient_wrapped_key = self._build_recipient_wrapped_key_from_pending_grant(
-            access_code,
-            pending_grant,
-            recipient_private_key.public_key(),
-        )
-
-        resolve_response = self.client.post(
-            f"/vaults/{vault['id']}/pending-grants/resolve",
-            headers=self._auth_headers(recipient_token),
+        register_response = self.client.post(
+            "/auth/register",
             json={
-                "resolutions": [
-                    {
-                        "file_id": uploaded_file["id"],
-                        "grant_id": pending_grant["grant_id"],
-                        "recipient_wrapped_key": recipient_wrapped_key["wrapped_file_key"],
-                        "algorithm": "RSA-OAEP-256",
-                    }
-                ]
+                "email": f"ready-{uuid4().hex[:8]}@example.com",
+                "username": f"user_{uuid4().hex[:8]}",
+                "full_name": "Recipient Ready",
+                "birth_date": "2000-01-01",
+                "password": "Password123!",
+                "encryption_public_jwk": self._public_jwk_from_private_key(recipient_private_key),
+                "encrypted_private_key_bundle": {
+                    "schema_version": "1",
+                    "wrapping_algorithm": "AES-256-GCM",
+                    "kdf_algorithm": "PBKDF2-SHA256",
+                    "salt": b64url_encode(secrets.token_bytes(16)),
+                    "iv": b64url_encode(secrets.token_bytes(12)),
+                    "ciphertext": b64url_encode(secrets.token_bytes(128)),
+                },
             },
         )
-        self.assertEqual(resolve_response.status_code, 200, resolve_response.text)
-        self.assertEqual(resolve_response.json()["resolved_grants"][0]["recipient_email"], recipient_email)
+        self.assertEqual(register_response.status_code, 201, register_response.text)
+        recipient_email = register_response.json()["email"]
 
-        files_response = self.client.get(
-            f"/vaults/{vault['id']}/files",
-            headers=self._auth_headers(owner_token),
+        verify_response = self.client.post(
+            "/auth/verify-email",
+            json={"token": register_response.json()["verification_token"]},
         )
-        self.assertEqual(files_response.status_code, 200, files_response.text)
-        resolved_file = files_response.json()["files"][0]
-        self.assertEqual(resolved_file["pending_recipient_grants"][0]["status"], "resolved")
-        self.assertEqual(
-            resolved_file["recipient_wrapped_keys"][0]["recipient_email"],
-            recipient_email,
-        )
+        self.assertEqual(verify_response.status_code, 200, verify_response.text)
 
-    def test_wrong_recipient_cannot_resolve_another_email_pending_grant(self) -> None:
-        owner_token = self._register_and_login(f"owner-wrong-{uuid4().hex[:8]}@example.com")
-        recovery_key = secrets.token_bytes(32)
-        vault = self._create_vault_with_options(
-            owner_token,
-            name="Wrong Recipient Grant Vault",
-            owner_message="Wrong recipient must be denied.",
-            zero_knowledge_enabled=True,
-            recovery_key_verifier=self._build_recovery_key_verifier(recovery_key),
-        )
-        recipient_email = f"target-{uuid4().hex[:8]}@example.com"
-        wrong_email = f"wrong-{uuid4().hex[:8]}@example.com"
-        for email in (recipient_email, wrong_email):
-            add_response = self.client.post(
-                f"/vaults/{vault['id']}/recipients",
-                headers=self._auth_headers(owner_token),
-                json={"email": email, "can_activate": True},
-            )
-            self.assertEqual(add_response.status_code, 200, add_response.text)
-        uploaded_file = self._upload_zero_knowledge_file_for_recipients(
-            owner_token,
-            vault["id"],
-            "wrong.txt",
-            b"do not claim this",
-            recovery_key,
-            recipient_emails=[recipient_email],
-            pending_recipient_emails=[recipient_email],
-        )
-        wrong_private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-        wrong_token = self._register_and_login(wrong_email)
-        self._install_document_crypto_profile(
-            wrong_token,
-            self._public_jwk_from_private_key(wrong_private_key),
-        )
-        pending_grant = uploaded_file["pending_recipient_grants"][0]
-        access_code = uploaded_file["_pending_access_codes"][0]["access_code"]
-        recipient_wrapped_key = self._build_recipient_wrapped_key_from_pending_grant(
-            access_code,
-            pending_grant,
-            wrong_private_key.public_key(),
-        )
-
-        resolve_response = self.client.post(
-            f"/vaults/{vault['id']}/pending-grants/resolve",
-            headers=self._auth_headers(wrong_token),
-            json={
-                "resolutions": [
-                    {
-                        "file_id": uploaded_file["id"],
-                        "grant_id": pending_grant["grant_id"],
-                        "recipient_wrapped_key": recipient_wrapped_key["wrapped_file_key"],
-                        "algorithm": "RSA-OAEP-256",
-                    }
-                ]
-            },
-        )
-        self.assertEqual(resolve_response.status_code, 403, resolve_response.text)
-
-    def test_owner_can_revoke_pending_zero_knowledge_grant(self) -> None:
-        owner_token = self._register_and_login(f"owner-revoke-{uuid4().hex[:8]}@example.com")
-        recovery_key = secrets.token_bytes(32)
-        vault = self._create_vault_with_options(
-            owner_token,
-            name="Revoke Pending Grant Vault",
-            owner_message="Pending grant revoke.",
-            zero_knowledge_enabled=True,
-            recovery_key_verifier=self._build_recovery_key_verifier(recovery_key),
-        )
-        recipient_email = f"revoke-{uuid4().hex[:8]}@example.com"
-        add_response = self.client.post(
+        add_recipient_response = self.client.post(
             f"/vaults/{vault['id']}/recipients",
             headers=self._auth_headers(owner_token),
             json={"email": recipient_email, "can_activate": True},
         )
-        self.assertEqual(add_response.status_code, 200, add_response.text)
-        uploaded_file = self._upload_zero_knowledge_file_for_recipients(
-            owner_token,
-            vault["id"],
-            "revoke.txt",
-            b"revoke pending payload",
-            recovery_key,
-            recipient_emails=[recipient_email],
-            pending_recipient_emails=[recipient_email],
-        )
+        self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
 
-        update_response = self.client.patch(
-            f"/vaults/{vault['id']}/files/{uploaded_file['id']}",
+        directory_response = self.client.get(
+            f"/vaults/{vault['id']}/recipient-crypto-directory",
             headers=self._auth_headers(owner_token),
-            json={
-                "recipient_emails": [],
-                "recipient_wrapped_keys": [],
-                "pending_recipient_grants": [],
-            },
         )
-        self.assertEqual(update_response.status_code, 200, update_response.text)
-        updated_file = update_response.json()["file"]
-        self.assertEqual(updated_file["recipient_emails"], [])
-        self.assertEqual(updated_file["pending_recipient_grants"][0]["status"], "revoked")
-
-    @staticmethod
-    def _build_pending_recipient_grants(
-        file_key: bytes,
-        recipient_emails: list[str],
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        grants: list[dict[str, str]] = []
-        access_codes: list[dict[str, str]] = []
-        for raw_email in recipient_emails:
-            recipient_email = str(raw_email).strip().lower()
-            if not recipient_email:
-                continue
-            grant_id = str(uuid4())
-            access_code_bytes = secrets.token_bytes(32)
-            access_code = b64url_encode(access_code_bytes)
-            salt = secrets.token_bytes(16)
-            iv = secrets.token_bytes(12)
-            wrap_key = HKDF(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                info=f"lastwrites:pending-grant:{grant_id}".encode("utf-8"),
-            ).derive(access_code_bytes)
-            verifier_digest = hashes.Hash(hashes.SHA256())
-            verifier_digest.update(b"lastwrites:pending-grant-code:v1:")
-            verifier_digest.update(access_code_bytes)
-            grants.append(
-                {
-                    "grant_id": grant_id,
-                    "recipient_email": recipient_email,
-                    "status": "pending",
-                    "wrapped_file_key": b64url_encode(AESGCM(wrap_key).encrypt(iv, file_key, None)),
-                    "algorithm": "AES-256-GCM",
-                    "kdf_algorithm": "HKDF-SHA256",
-                    "salt": b64url_encode(salt),
-                    "iv": b64url_encode(iv),
-                    "verifier": b64url_encode(verifier_digest.finalize()),
-                }
-            )
-            access_codes.append(
-                {
-                    "recipient_email": recipient_email,
-                    "grant_id": grant_id,
-                    "access_code": access_code,
-                }
-            )
-        return grants, access_codes
+        self.assertEqual(directory_response.status_code, 200, directory_response.text)
+        recipient_entry = next(
+            item for item in directory_response.json()["recipients"] if item["email"] == recipient_email
+        )
+        self.assertTrue(recipient_entry["has_document_encryption_key"])
+        self.assertTrue(recipient_entry["document_encryption_public_jwk"])
 
     @staticmethod
     def _encrypt_zero_knowledge_payload(
@@ -486,7 +290,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         vault_id: str,
         *,
         recipient_public_keys: list[dict[str, object]] | None = None,
-        pending_recipient_emails: list[str] | None = None,
     ) -> dict:
         file_key = secrets.token_bytes(32)
         file_iv = secrets.token_bytes(12)
@@ -523,15 +326,8 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
                     "algorithm": "RSA-OAEP-256",
                 }
             )
-        pending_recipient_grants, pending_access_codes = (
-            EncryptedDeliveryFlowTests._build_pending_recipient_grants(
-                file_key,
-                pending_recipient_emails or [],
-            )
-        )
         return {
             "ciphertext": ciphertext,
-            "pending_access_codes": pending_access_codes,
             "metadata": {
                 "encrypted": True,
                 "zero_knowledge": True,
@@ -549,7 +345,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
                 "owner_wrap_salt": b64url_encode(owner_wrap_salt),
                 "owner_wrap_iv": b64url_encode(owner_wrap_iv),
                 "recipient_wrapped_keys": recipient_wrapped_keys,
-                "pending_recipient_grants": pending_recipient_grants,
             },
         }
 
@@ -613,38 +408,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         return recipient_wrapped_keys
 
     @staticmethod
-    def _build_recipient_wrapped_key_from_pending_grant(
-        access_code: str,
-        pending_grant: dict,
-        recipient_public_key,
-    ) -> dict[str, str]:
-        access_code_bytes = b64url_decode(access_code)
-        wrap_key = HKDF(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=b64url_decode(str(pending_grant["salt"])),
-            info=f"lastwrites:pending-grant:{pending_grant['grant_id']}".encode("utf-8"),
-        ).derive(access_code_bytes)
-        file_key = AESGCM(wrap_key).decrypt(
-            b64url_decode(str(pending_grant["iv"])),
-            b64url_decode(str(pending_grant["wrapped_file_key"])),
-            None,
-        )
-        wrapped_file_key = recipient_public_key.encrypt(
-            file_key,
-            asym_padding.OAEP(
-                mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
-        )
-        return {
-            "recipient_email": str(pending_grant["recipient_email"]).strip().lower(),
-            "wrapped_file_key": b64url_encode(wrapped_file_key),
-            "algorithm": "RSA-OAEP-256",
-        }
-
-    @staticmethod
     def _decrypt_zero_knowledge_payload_for_recipient(
         ciphertext: bytes,
         recipient_private_key: rsa.RSAPrivateKey,
@@ -675,14 +438,12 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         *,
         recipient_emails: list[str] | None,
         recipient_public_keys: list[dict[str, object]] | None = None,
-        pending_recipient_emails: list[str] | None = None,
     ) -> dict:
         encryption_payload = self._encrypt_zero_knowledge_payload(
             content,
             recovery_key,
             vault_id,
             recipient_public_keys=recipient_public_keys,
-            pending_recipient_emails=pending_recipient_emails,
         )
         data = {
             "zero_knowledge_metadata_json": json.dumps(encryption_payload["metadata"]),
@@ -696,9 +457,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             data=data,
         )
         self.assertEqual(response.status_code, 201, response.text)
-        uploaded_file = response.json()["file"]
-        uploaded_file["_pending_access_codes"] = encryption_payload.get("pending_access_codes", [])
-        return uploaded_file
+        return response.json()["file"]
 
     def _deliver_vault(self, vault_id: str) -> dict:
         internal_vault_id = self.backend_main.app.state.cosmos_service.get_vault_by_short_id(vault_id)["id"]
@@ -922,7 +681,6 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             [first_recipient_email, second_recipient_email],
         )
         self.assertEqual(len(updated_file["recipient_wrapped_keys"]), 2)
-        self.assertEqual(updated_file.get("pending_recipient_grants", []), [])
 
     def test_worker_generates_recipient_specific_delivery_zips_for_encrypted_vault(self) -> None:
         email = f"worker-owner-{uuid4().hex[:8]}@example.com"

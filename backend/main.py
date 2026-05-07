@@ -119,9 +119,6 @@ ZERO_KNOWLEDGE_FILE_SCHEMA_VERSION = 4
 ZERO_KNOWLEDGE_KDF_ALGORITHM = "HKDF-SHA256"
 ZERO_KNOWLEDGE_OWNER_WRAP_ALGORITHM = "AES-256-GCM"
 ZERO_KNOWLEDGE_RECIPIENT_WRAP_ALGORITHM = "RSA-OAEP-256"
-ZERO_KNOWLEDGE_PENDING_GRANT_WRAP_ALGORITHM = "AES-256-GCM"
-ZERO_KNOWLEDGE_PENDING_GRANT_KDF_ALGORITHM = "HKDF-SHA256"
-ZERO_KNOWLEDGE_PENDING_GRANT_ACTIVE_STATUSES = {"pending"}
 DEFAULT_ALLOWED_UPLOAD_CONTENT_TYPES = {
     "application/json",
     "application/msword",
@@ -153,19 +150,7 @@ class RecipientPermissionUpdateRequest(BaseModel):
 
 class FileRecipientAssignmentsUpdateRequest(BaseModel):
     recipient_emails: List[str] = Field(default_factory=list)
-    recipient_wrapped_keys: Optional[List[Dict[str, Any]]] = None
-    pending_recipient_grants: Optional[List[Dict[str, Any]]] = None
-
-
-class PendingGrantResolutionItem(BaseModel):
-    file_id: str = Field(..., min_length=1, max_length=128)
-    grant_id: str = Field(..., min_length=1, max_length=128)
-    recipient_wrapped_key: str = Field(..., min_length=16)
-    algorithm: str = Field(default=ZERO_KNOWLEDGE_RECIPIENT_WRAP_ALGORITHM, min_length=3, max_length=64)
-
-
-class PendingGrantResolutionRequest(BaseModel):
-    resolutions: List[PendingGrantResolutionItem] = Field(default_factory=list)
+    recipient_wrapped_keys: Optional[List[Dict[str, str]]] = None
 
 
 def get_recipient_email(recipient: object) -> str:
@@ -731,64 +716,6 @@ def parse_recipient_emails_json(raw_value: Optional[str]) -> Optional[List[str]]
     return [str(item or "") for item in parsed_value]
 
 
-def normalize_pending_recipient_grants(raw_value: Any) -> List[Dict[str, str]]:
-    if not isinstance(raw_value, list):
-        return []
-
-    normalized_grants: List[Dict[str, str]] = []
-    seen_grant_ids: set[str] = set()
-    for item in raw_value:
-        if not isinstance(item, dict):
-            continue
-
-        grant_id = str(item.get("grant_id", "")).strip()
-        recipient_email = str(item.get("recipient_email", "")).strip().lower()
-        grant_status = str(item.get("status", "pending")).strip().lower() or "pending"
-        wrapped_file_key = str(item.get("wrapped_file_key", "")).strip()
-        algorithm = str(item.get("algorithm", ZERO_KNOWLEDGE_PENDING_GRANT_WRAP_ALGORITHM)).strip()
-        kdf_algorithm = str(
-            item.get("kdf_algorithm", ZERO_KNOWLEDGE_PENDING_GRANT_KDF_ALGORITHM)
-        ).strip()
-        salt = str(item.get("salt", "")).strip()
-        iv = str(item.get("iv", "")).strip()
-        verifier = str(item.get("verifier", "")).strip()
-        if (
-            not grant_id
-            or grant_id in seen_grant_ids
-            or not is_valid_email(recipient_email)
-            or grant_status not in {"pending", "resolved", "revoked"}
-            or not wrapped_file_key
-            or algorithm != ZERO_KNOWLEDGE_PENDING_GRANT_WRAP_ALGORITHM
-            or kdf_algorithm != ZERO_KNOWLEDGE_PENDING_GRANT_KDF_ALGORITHM
-            or not salt
-            or not iv
-            or not verifier
-        ):
-            continue
-
-        seen_grant_ids.add(grant_id)
-        normalized_grant: Dict[str, str] = {
-            "grant_id": grant_id,
-            "recipient_email": recipient_email,
-            "status": grant_status,
-            "wrapped_file_key": wrapped_file_key,
-            "algorithm": algorithm,
-            "kdf_algorithm": kdf_algorithm,
-            "salt": salt,
-            "iv": iv,
-            "verifier": verifier,
-        }
-        resolved_at = str(item.get("resolved_at", "")).strip()
-        revoked_at = str(item.get("revoked_at", "")).strip()
-        if resolved_at:
-            normalized_grant["resolved_at"] = resolved_at
-        if revoked_at:
-            normalized_grant["revoked_at"] = revoked_at
-        normalized_grants.append(normalized_grant)
-
-    return normalized_grants
-
-
 def _normalize_zero_knowledge_metadata(raw_metadata: Dict[str, Any]) -> Dict[str, Any]:
     recipient_wrapped_keys_raw = raw_metadata.get("recipient_wrapped_keys", [])
     if not isinstance(recipient_wrapped_keys_raw, list):
@@ -835,9 +762,6 @@ def _normalize_zero_knowledge_metadata(raw_metadata: Dict[str, Any]) -> Dict[str
         "owner_wrap_salt": str(raw_metadata.get("owner_wrap_salt", "")).strip() or None,
         "owner_wrap_iv": str(raw_metadata.get("owner_wrap_iv", "")).strip() or None,
         "recipient_wrapped_keys": normalized_recipient_wrapped_keys,
-        "pending_recipient_grants": normalize_pending_recipient_grants(
-            raw_metadata.get("pending_recipient_grants", [])
-        ),
         "kdf_algorithm": None,
         "kdf_salt": None,
     }
@@ -899,16 +823,6 @@ def validate_zero_knowledge_recipient_wraps(
         for item in wrapped_keys
         if isinstance(item, dict)
     }
-    pending_grants = metadata.get("pending_recipient_grants", [])
-    if not isinstance(pending_grants, list):
-        pending_grants = []
-    available_recipient_emails.update(
-        str(item.get("recipient_email", "")).strip().lower()
-        for item in pending_grants
-        if isinstance(item, dict)
-        and str(item.get("status", "pending")).strip().lower()
-        in ZERO_KNOWLEDGE_PENDING_GRANT_ACTIVE_STATUSES
-    )
     missing_recipient_emails = [
         recipient_email
         for recipient_email in assigned_recipient_emails
@@ -918,57 +832,6 @@ def validate_zero_knowledge_recipient_wraps(
         raise ValueError(
             "Missing wrapped file keys for: " + ", ".join(sorted(missing_recipient_emails))
         )
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def reconcile_pending_recipient_grants(
-    existing_grants_raw: Any,
-    submitted_grants_raw: Any,
-    *,
-    assigned_recipient_emails: List[str],
-) -> List[Dict[str, str]]:
-    assigned_email_set = {str(email).strip().lower() for email in assigned_recipient_emails}
-    existing_grants = normalize_pending_recipient_grants(existing_grants_raw)
-    submitted_grants = normalize_pending_recipient_grants(submitted_grants_raw)
-    submitted_grants = [
-        grant
-        for grant in submitted_grants
-        if grant["recipient_email"] in assigned_email_set
-        and grant["status"] in ZERO_KNOWLEDGE_PENDING_GRANT_ACTIVE_STATUSES
-    ]
-    submitted_grants_by_email = {grant["recipient_email"]: grant for grant in submitted_grants}
-    submitted_grant_ids = {grant["grant_id"] for grant in submitted_grants}
-
-    reconciled: List[Dict[str, str]] = []
-    now_iso: Optional[str] = None
-    for grant in existing_grants:
-        grant_status = grant["status"]
-        recipient_email = grant["recipient_email"]
-        should_revoke_active_grant = (
-            grant_status == "pending"
-            and (
-                recipient_email not in assigned_email_set
-                or (
-                    recipient_email in submitted_grants_by_email
-                    and grant["grant_id"] not in submitted_grant_ids
-                )
-            )
-        )
-        if should_revoke_active_grant:
-            if now_iso is None:
-                now_iso = _utc_now_iso()
-            grant = {**grant, "status": "revoked", "revoked_at": now_iso}
-
-        if grant["grant_id"] in submitted_grant_ids:
-            continue
-        if grant["status"] in {"resolved", "revoked"} or grant["recipient_email"] in assigned_email_set:
-            reconciled.append(grant)
-
-    reconciled.extend(submitted_grants)
-    return reconciled
 
 
 def sanitize_filename(file_name: str) -> str:
@@ -1188,16 +1051,6 @@ def _list_delivery_files_for_actor(
                 for item in wrapped_keys
                 if isinstance(item, dict)
                 and str(item.get("recipient_email", "")).strip().lower() == normalized_email
-            ]
-            pending_grants = sanitized_file_item.get("pending_recipient_grants", [])
-            if not isinstance(pending_grants, list):
-                pending_grants = []
-            sanitized_file_item["pending_recipient_grants"] = [
-                item
-                for item in pending_grants
-                if isinstance(item, dict)
-                and str(item.get("recipient_email", "")).strip().lower() == normalized_email
-                and str(item.get("status", "pending")).strip().lower() == "pending"
             ]
         allowed_files.append(sanitized_file_item)
 
@@ -3179,159 +3032,6 @@ def list_delivery_files(
     )
 
 
-@app.post("/vaults/{vault_id}/pending-grants/resolve")
-def resolve_pending_recipient_grants(
-    vault_id: str,
-    payload: PendingGrantResolutionRequest,
-    request: Request,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-):
-    if not payload.resolutions:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one pending grant resolution is required.",
-        )
-
-    cosmos_service = get_cosmos_service(request)
-    try:
-        vault_item = resolve_vault_by_public_id(cosmos_service, vault_id)
-    except Exception:
-        logger.exception("Unhandled error while resolving pending grants for vault id=%s", vault_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to resolve pending grants.",
-        ) from None
-
-    if vault_item is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
-
-    current_email = str(current_user.get("email", "")).strip().lower()
-    if not current_email or not _is_vault_recipient(vault_item, current_email):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
-    if not user_has_document_encryption_key(current_user):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Create your document encryption profile before resolving delivery access.",
-        )
-
-    resolutions_by_file_id: Dict[str, List[PendingGrantResolutionItem]] = defaultdict(list)
-    for resolution in payload.resolutions:
-        if resolution.algorithm != ZERO_KNOWLEDGE_RECIPIENT_WRAP_ALGORITHM:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Recipient wrapped keys must use RSA-OAEP-256.",
-            )
-        resolutions_by_file_id[resolution.file_id].append(resolution)
-
-    existing_files = vault_item.get("files", [])
-    if not isinstance(existing_files, list):
-        existing_files = []
-
-    updated_files: List[Any] = []
-    resolved_grants: List[Dict[str, str]] = []
-    saw_forbidden_grant = False
-    for file_item in existing_files:
-        if not isinstance(file_item, dict):
-            updated_files.append(file_item)
-            continue
-
-        file_id = str(file_item.get("id", "")).strip()
-        requested_resolutions = resolutions_by_file_id.get(file_id, [])
-        if not requested_resolutions:
-            updated_files.append(file_item)
-            continue
-
-        updated_file_item = dict(file_item)
-        recipient_emails = [
-            str(candidate).strip().lower()
-            for candidate in file_item.get("recipient_emails", [])
-            if str(candidate).strip()
-        ] if isinstance(file_item.get("recipient_emails", []), list) else []
-        if current_email not in recipient_emails or not bool(file_item.get("zero_knowledge", False)):
-            saw_forbidden_grant = True
-            updated_files.append(file_item)
-            continue
-
-        pending_grants = normalize_pending_recipient_grants(file_item.get("pending_recipient_grants", []))
-        recipient_wrapped_keys = _normalize_zero_knowledge_metadata(file_item).get(
-            "recipient_wrapped_keys", []
-        )
-        file_resolved = False
-        now_iso: Optional[str] = None
-
-        for resolution in requested_resolutions:
-            matching_grant_index = next(
-                (
-                    index
-                    for index, grant in enumerate(pending_grants)
-                    if grant["grant_id"] == resolution.grant_id
-                ),
-                None,
-            )
-            if matching_grant_index is None:
-                continue
-
-            matching_grant = pending_grants[matching_grant_index]
-            if matching_grant["recipient_email"] != current_email:
-                saw_forbidden_grant = True
-                continue
-            if matching_grant["status"] != "pending":
-                saw_forbidden_grant = True
-                continue
-
-            recipient_wrapped_keys = [
-                wrapped_key
-                for wrapped_key in recipient_wrapped_keys
-                if str(wrapped_key.get("recipient_email", "")).strip().lower() != current_email
-            ]
-            recipient_wrapped_keys.append(
-                {
-                    "recipient_email": current_email,
-                    "wrapped_file_key": resolution.recipient_wrapped_key.strip(),
-                    "algorithm": resolution.algorithm,
-                }
-            )
-            if now_iso is None:
-                now_iso = _utc_now_iso()
-            pending_grants[matching_grant_index] = {
-                **matching_grant,
-                "status": "resolved",
-                "resolved_at": now_iso,
-            }
-            resolved_grants.append(
-                {
-                    "file_id": file_id,
-                    "grant_id": resolution.grant_id,
-                    "recipient_email": current_email,
-                }
-            )
-            file_resolved = True
-
-        if file_resolved:
-            updated_file_item["recipient_wrapped_keys"] = recipient_wrapped_keys
-            updated_file_item["pending_recipient_grants"] = pending_grants
-
-        updated_files.append(updated_file_item)
-
-    if not resolved_grants:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN if saw_forbidden_grant else status.HTTP_404_NOT_FOUND,
-            detail="No pending grants were resolved for this account.",
-        )
-
-    updated_vault = cosmos_service.update_vault(
-        str(vault_item.get("id", "")).strip(),
-        {"files": updated_files},
-    )
-    if updated_vault is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vault not found.")
-
-    return {
-        "vault_id": str(updated_vault.get("short_id", "")).strip() or vault_id,
-        "resolved_grants": resolved_grants,
-    }
-
-
 @app.get("/vaults/{vault_id}/audit", response_model=List[AuditLogEntry])
 def list_vault_audit_logs(
     vault_id: str,
@@ -3538,17 +3238,8 @@ def update_vault_file_recipients(
                 candidate_metadata = dict(file_item)
                 if payload.recipient_wrapped_keys is not None:
                     candidate_metadata["recipient_wrapped_keys"] = payload.recipient_wrapped_keys
-                if payload.pending_recipient_grants is not None:
-                    candidate_metadata["pending_recipient_grants"] = payload.pending_recipient_grants
 
                 normalized_zero_knowledge_metadata = _normalize_zero_knowledge_metadata(candidate_metadata)
-                normalized_zero_knowledge_metadata["pending_recipient_grants"] = (
-                    reconcile_pending_recipient_grants(
-                        file_item.get("pending_recipient_grants", []),
-                        normalized_zero_knowledge_metadata.get("pending_recipient_grants", []),
-                        assigned_recipient_emails=assigned_recipient_emails,
-                    )
-                )
                 validate_zero_knowledge_recipient_wraps(
                     normalized_zero_knowledge_metadata,
                     assigned_recipient_emails=assigned_recipient_emails,
@@ -3559,9 +3250,6 @@ def update_vault_file_recipients(
                     if str(wrapped_key.get("recipient_email", "")).strip().lower()
                     in assigned_recipient_emails
                 ]
-                updated_file_item["pending_recipient_grants"] = normalized_zero_knowledge_metadata.get(
-                    "pending_recipient_grants", []
-                )
             updated_files.append(updated_file_item)
 
         updated_vault = cosmos_service.update_vault(internal_vault_id, {"files": updated_files})
