@@ -150,6 +150,7 @@ class RecipientPermissionUpdateRequest(BaseModel):
 
 class FileRecipientAssignmentsUpdateRequest(BaseModel):
     recipient_emails: List[str] = Field(default_factory=list)
+    recipient_wrapped_keys: Optional[List[Dict[str, str]]] = None
 
 
 def get_recipient_email(recipient: object) -> str:
@@ -2999,6 +3000,7 @@ def list_delivery_files(
     return DeliveryFileAccessResponse(
         vault_id=str(vault_item.get("short_id", "")).strip() or vault_id,
         zero_knowledge_enabled=bool(vault_item.get("zero_knowledge_enabled", False)),
+        owner_message=str(vault_item.get("owner_message", "")).strip() or None,
         files=allowed_files,
     )
 
@@ -3189,18 +3191,6 @@ def update_vault_file_recipients(
             payload.recipient_emails,
             vault_item.get("recipients", []),
         )
-        existing_recipient_emails = (
-            normalize_file_recipient_emails(
-                file_metadata.get("recipient_emails"),
-                vault_item.get("recipients", []),
-            )
-            if bool(file_metadata.get("zero_knowledge", False))
-            else []
-        )
-        if bool(file_metadata.get("zero_knowledge", False)) and assigned_recipient_emails != existing_recipient_emails:
-            raise ValueError(
-                "Recipient assignments for zero-knowledge files are fixed at upload time. Re-upload the file to change them."
-            )
         existing_files = vault_item.get("files", [])
         if not isinstance(existing_files, list):
             existing_files = []
@@ -3217,6 +3207,22 @@ def update_vault_file_recipients(
 
             updated_file_item = dict(file_item)
             updated_file_item["recipient_emails"] = assigned_recipient_emails
+            if bool(file_item.get("zero_knowledge", False)):
+                candidate_metadata = dict(file_item)
+                if payload.recipient_wrapped_keys is not None:
+                    candidate_metadata["recipient_wrapped_keys"] = payload.recipient_wrapped_keys
+
+                normalized_zero_knowledge_metadata = _normalize_zero_knowledge_metadata(candidate_metadata)
+                validate_zero_knowledge_recipient_wraps(
+                    normalized_zero_knowledge_metadata,
+                    assigned_recipient_emails=assigned_recipient_emails,
+                )
+                updated_file_item["recipient_wrapped_keys"] = [
+                    wrapped_key
+                    for wrapped_key in normalized_zero_knowledge_metadata.get("recipient_wrapped_keys", [])
+                    if str(wrapped_key.get("recipient_email", "")).strip().lower()
+                    in assigned_recipient_emails
+                ]
             updated_files.append(updated_file_item)
 
         updated_vault = cosmos_service.update_vault(internal_vault_id, {"files": updated_files})

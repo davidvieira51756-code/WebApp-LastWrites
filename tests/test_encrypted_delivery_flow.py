@@ -313,6 +313,46 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         )
 
     @staticmethod
+    def _build_recipient_wrapped_keys(
+        recovery_key: bytes,
+        vault_id: str,
+        metadata: dict,
+        *,
+        recipient_public_keys: list[dict[str, object]],
+    ) -> list[dict[str, str]]:
+        owner_wrap_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=b64url_decode(str(metadata["owner_wrap_salt"])),
+            info=f"lastwrites:owner-file-key:{vault_id}".encode("utf-8"),
+        ).derive(recovery_key)
+        file_key = AESGCM(owner_wrap_key).decrypt(
+            b64url_decode(str(metadata["owner_wrap_iv"])),
+            b64url_decode(str(metadata["owner_wrapped_file_key"])),
+            None,
+        )
+        recipient_wrapped_keys: list[dict[str, str]] = []
+        for item in recipient_public_keys:
+            recipient_email = str(item["recipient_email"]).strip().lower()
+            public_key = item["public_key"]
+            wrapped_file_key = public_key.encrypt(
+                file_key,
+                asym_padding.OAEP(
+                    mgf=asym_padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None,
+                ),
+            )
+            recipient_wrapped_keys.append(
+                {
+                    "recipient_email": recipient_email,
+                    "wrapped_file_key": b64url_encode(wrapped_file_key),
+                    "algorithm": "RSA-OAEP-256",
+                }
+            )
+        return recipient_wrapped_keys
+
+    @staticmethod
     def _decrypt_zero_knowledge_payload_for_recipient(
         ciphertext: bytes,
         recipient_private_key: rsa.RSAPrivateKey,
@@ -499,6 +539,93 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             uploaded_file,
         )
         self.assertEqual(decrypted, plaintext)
+
+    def test_zero_knowledge_file_recipients_can_be_updated_after_upload(self) -> None:
+        owner_email = f"zk-update-owner-{uuid4().hex[:8]}@example.com"
+        owner_token = self._register_and_login(owner_email)
+        recovery_key = secrets.token_bytes(32)
+
+        vault = self._create_vault_with_options(
+            owner_token,
+            name="Recipient Update Vault",
+            owner_message="Update recipient access after upload.",
+            zero_knowledge_enabled=True,
+            recovery_key_verifier=self._build_recovery_key_verifier(recovery_key),
+        )
+        vault_id = vault["id"]
+        first_recipient_email = f"zk-update-a-{uuid4().hex[:8]}@example.com"
+        second_recipient_email = f"zk-update-b-{uuid4().hex[:8]}@example.com"
+
+        for recipient_email in (first_recipient_email, second_recipient_email):
+            add_recipient_response = self.client.post(
+                f"/vaults/{vault_id}/recipients",
+                headers=self._auth_headers(owner_token),
+                json={"email": recipient_email, "can_activate": True},
+            )
+            self.assertEqual(add_recipient_response.status_code, 200, add_recipient_response.text)
+
+        first_recipient_private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+        second_recipient_private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+        self._install_document_crypto_profile(
+            self._register_and_login(first_recipient_email),
+            self._public_jwk_from_private_key(first_recipient_private_key),
+        )
+        self._install_document_crypto_profile(
+            self._register_and_login(second_recipient_email),
+            self._public_jwk_from_private_key(second_recipient_private_key),
+        )
+
+        uploaded_file = self._upload_zero_knowledge_file_for_recipients(
+            owner_token,
+            vault_id,
+            "rotating.txt",
+            b"top secret",
+            recovery_key,
+            recipient_emails=[first_recipient_email],
+            recipient_public_keys=[
+                {
+                    "recipient_email": first_recipient_email,
+                    "public_key": first_recipient_private_key.public_key(),
+                }
+            ],
+        )
+
+        updated_wrapped_keys = self._build_recipient_wrapped_keys(
+            recovery_key,
+            vault_id,
+            uploaded_file,
+            recipient_public_keys=[
+                {
+                    "recipient_email": first_recipient_email,
+                    "public_key": first_recipient_private_key.public_key(),
+                },
+                {
+                    "recipient_email": second_recipient_email,
+                    "public_key": second_recipient_private_key.public_key(),
+                },
+            ],
+        )
+        update_response = self.client.patch(
+            f"/vaults/{vault_id}/files/{uploaded_file['id']}",
+            headers=self._auth_headers(owner_token),
+            json={
+                "recipient_emails": [first_recipient_email, second_recipient_email],
+                "recipient_wrapped_keys": updated_wrapped_keys,
+            },
+        )
+        self.assertEqual(update_response.status_code, 200, update_response.text)
+
+        files_response = self.client.get(
+            f"/vaults/{vault_id}/files",
+            headers=self._auth_headers(owner_token),
+        )
+        self.assertEqual(files_response.status_code, 200, files_response.text)
+        updated_file = files_response.json()["files"][0]
+        self.assertEqual(
+            updated_file["recipient_emails"],
+            [first_recipient_email, second_recipient_email],
+        )
+        self.assertEqual(len(updated_file["recipient_wrapped_keys"]), 2)
 
     def test_worker_generates_recipient_specific_delivery_zips_for_encrypted_vault(self) -> None:
         email = f"worker-owner-{uuid4().hex[:8]}@example.com"
@@ -730,10 +857,13 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         self.assertEqual(delivery_package_response.status_code, 200, delivery_package_response.text)
         archive = ZipFile(io.BytesIO(delivery_package_response.content))
         archive_names = set(archive.namelist())
+        self.assertIn("Delivery.pdf", archive_names)
         self.assertIn("README.txt", archive_names)
         self.assertIn("manifest.json", archive_names)
         encrypted_entries = [name for name in archive_names if name.endswith(".lwenc")]
         self.assertEqual(len(encrypted_entries), 1)
+        self.assertIn(b"Owner Message:", archive.read("README.txt"))
+        self.assertIn(b"Use the recovery key shared by the owner.", archive.read("README.txt"))
 
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
         self.assertEqual(manifest["format"], "lastwrites-zero-knowledge-delivery-bundle-v1")

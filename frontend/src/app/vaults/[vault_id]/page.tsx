@@ -19,6 +19,7 @@ import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import {
+  buildRecipientWrappedKeysForVaultFile,
   clearStoredRecoveryKeyForVault,
   decryptVaultFile,
   encryptVaultFile,
@@ -726,12 +727,55 @@ export default function VaultDetailsPage() {
 
     setIsUpdatingFileRecipientsId(fileId);
     try {
+      const matchingFile = files.find((fileItem) => fileItem.id === fileId);
+      let recipientWrappedKeys: Array<{
+        recipient_email: string;
+        wrapped_file_key: string;
+        algorithm: "RSA-OAEP-256";
+      }> | undefined;
+
+      if (matchingFile?.zero_knowledge) {
+        if (
+          !recoveryKey ||
+          !matchingFile.owner_wrapped_file_key ||
+          !matchingFile.owner_wrap_salt ||
+          !matchingFile.owner_wrap_iv
+        ) {
+          throw new Error("Unlock this vault with the recovery key before updating file recipients.");
+        }
+
+        const recipientPublicKeys = recipientEmails.map((recipientEmail) => {
+          const matchingRecipient = recipientCryptoDirectory.find(
+            (recipient) => recipient.email === recipientEmail,
+          );
+          if (!matchingRecipient?.document_encryption_public_jwk) {
+            throw new Error(`Recipient ${recipientEmail} does not have a document encryption key yet.`);
+          }
+          return {
+            recipientEmail,
+            publicJwk: matchingRecipient.document_encryption_public_jwk,
+          };
+        });
+
+        recipientWrappedKeys = await buildRecipientWrappedKeysForVaultFile({
+          recoveryKey,
+          vaultId,
+          ownerWrappedFileKey: matchingFile.owner_wrapped_file_key,
+          ownerWrapSalt: matchingFile.owner_wrap_salt,
+          ownerWrapIv: matchingFile.owner_wrap_iv,
+          recipientPublicKeys,
+        });
+      }
+
       const response = await fetch(
         `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/files/${encodeURIComponent(fileId)}`,
         {
           method: "PATCH",
           headers: buildAuthHeaders(authToken, true),
-          body: JSON.stringify({ recipient_emails: recipientEmails }),
+          body: JSON.stringify({
+            recipient_emails: recipientEmails,
+            recipient_wrapped_keys: recipientWrappedKeys,
+          }),
         },
       );
 
@@ -1851,17 +1895,55 @@ export default function VaultDetailsPage() {
                       <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.s }}>
                         <Text variant="label">Attached file recipients</Text>
                         {fileItem.zero_knowledge ? (
-                          <>
-                            <Alert
-                              variant="info"
-                              message="Recipient assignments for zero-knowledge files are fixed at upload time. Re-upload the file if you need a different recipient set."
-                            />
-                            <Text variant="bodySmall" color="secondary">
-                              {fileItem.recipient_emails?.length
-                                ? fileItem.recipient_emails.join(", ")
-                                : "No recipients assigned"}
-                            </Text>
-                          </>
+                          vault?.recipients.length ? (
+                            <div style={{ display: "grid", gap: t.space.xs }}>
+                              {vault.recipients.map((recipient) => {
+                                const currentRecipientEmails = fileItem.recipient_emails ?? [];
+                                const isChecked = currentRecipientEmails.includes(recipient.email);
+                                const canAssign = Boolean(recipient.document_encryption_public_jwk);
+                                return (
+                                  <label
+                                    key={`${fileItem.id}-${recipient.email}`}
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: t.space.xs,
+                                      color: t.colors.text.secondary,
+                                      fontSize: t.typography.bodySmall.fontSize,
+                                    }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      disabled={
+                                        isArchivedFinal ||
+                                        isUpdatingFileRecipientsId === fileItem.id ||
+                                        (!canAssign && !isChecked)
+                                      }
+                                      onChange={(event) => {
+                                        const nextRecipientEmails = event.target.checked
+                                          ? [...currentRecipientEmails, recipient.email].filter(
+                                              (value, index, values) => values.indexOf(value) === index,
+                                            )
+                                          : currentRecipientEmails.filter((value) => value !== recipient.email);
+                                        void handleUpdateFileRecipients(fileItem.id, nextRecipientEmails);
+                                      }}
+                                    />
+                                    <span>
+                                      {recipient.email}
+                                      {!canAssign && !isChecked ? " - no document key yet" : ""}
+                                    </span>
+                                  </label>
+                                );
+                              })}
+                              <Alert
+                                variant="info"
+                                message="Updating zero-knowledge file recipients re-wraps access for the selected recipients without re-uploading the file."
+                              />
+                            </div>
+                          ) : (
+                            <Alert variant="info" message="No recipients available for this file yet." />
+                          )
                         ) : vault?.recipients.length ? (
                           <div style={{ display: "grid", gap: t.space.xs }}>
                             {vault.recipients.map((recipient) => {

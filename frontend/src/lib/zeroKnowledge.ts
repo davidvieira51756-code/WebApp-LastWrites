@@ -33,6 +33,12 @@ type EncryptVaultFileResult = {
   metadata: ZeroKnowledgeFileMetadata;
 };
 
+export type RecipientWrappedKeyAssignment = {
+  recipient_email: string;
+  wrapped_file_key: string;
+  algorithm: "RSA-OAEP-256";
+};
+
 function assertCrypto(): Crypto {
   if (typeof window === "undefined" || !window.crypto?.subtle) {
     throw new Error("Web Crypto is not available in this browser.");
@@ -371,6 +377,74 @@ export async function decryptVaultFileForRecipient(
     toArrayBuffer(toUint8Array(ciphertext)),
   );
   return new Uint8Array(plaintext);
+}
+
+export async function buildRecipientWrappedKeysForVaultFile(
+  {
+    recoveryKey,
+    vaultId,
+    ownerWrappedFileKey,
+    ownerWrapSalt,
+    ownerWrapIv,
+    recipientPublicKeys,
+  }: {
+    recoveryKey: string;
+    vaultId: string;
+    ownerWrappedFileKey: string;
+    ownerWrapSalt: string;
+    ownerWrapIv: string;
+    recipientPublicKeys: Array<{ recipientEmail: string; publicJwk: JsonWebKey }>;
+  },
+): Promise<RecipientWrappedKeyAssignment[]> {
+  const crypto = assertCrypto();
+  const ownerWrapKey = await deriveOwnerWrapKey(normalizeRecoveryKey(recoveryKey), {
+    vaultId,
+    ownerWrapSalt,
+  });
+  const fileKeyBytes = new Uint8Array(
+    await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: toArrayBuffer(b64urlDecode(ownerWrapIv)),
+      },
+      ownerWrapKey,
+      toArrayBuffer(b64urlDecode(ownerWrappedFileKey)),
+    ),
+  );
+
+  const wrappedKeys: RecipientWrappedKeyAssignment[] = [];
+  for (const recipientPublicKey of recipientPublicKeys) {
+    const recipientEmail = recipientPublicKey.recipientEmail.trim().toLowerCase();
+    if (!recipientEmail) {
+      continue;
+    }
+    const importedPublicKey = await crypto.subtle.importKey(
+      "jwk",
+      recipientPublicKey.publicJwk,
+      {
+        name: "RSA-OAEP",
+        hash: "SHA-256",
+      },
+      true,
+      ["encrypt"],
+    );
+    const wrappedFileKey = new Uint8Array(
+      await crypto.subtle.encrypt(
+        {
+          name: "RSA-OAEP",
+        },
+        importedPublicKey,
+        toArrayBuffer(fileKeyBytes),
+      ),
+    );
+    wrappedKeys.push({
+      recipient_email: recipientEmail,
+      wrapped_file_key: b64urlEncode(wrappedFileKey),
+      algorithm: "RSA-OAEP-256",
+    });
+  }
+
+  return wrappedKeys;
 }
 
 export function storeRecoveryKeyForVault(vaultId: string, recoveryKey: string): void {

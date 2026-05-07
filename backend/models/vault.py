@@ -179,6 +179,7 @@ class RecipientVaultSummary(BaseModel):
 class DeliveryFileAccessResponse(BaseModel):
     vault_id: str
     zero_knowledge_enabled: bool = False
+    owner_message: Optional[str] = Field(default=None, max_length=4000)
     files: List[VaultFileMetadata] = Field(default_factory=list)
 
 
