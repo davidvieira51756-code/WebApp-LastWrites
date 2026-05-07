@@ -24,6 +24,7 @@ import {
   decryptVaultFile,
   encryptVaultFile,
   getStoredRecoveryKeyForVault,
+  normalizeRecoveryKey,
   storeRecoveryKeyForVault,
   verifyRecoveryKey,
 } from "@/lib/zeroKnowledge";
@@ -258,7 +259,6 @@ export default function VaultDetailsPage() {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
   const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
-  const [recoveryKeyMessage, setRecoveryKeyMessage] = useState<string | null>(null);
   const [recoveryKeyError, setRecoveryKeyError] = useState<string | null>(null);
   const [recipientCryptoDirectory, setRecipientCryptoDirectory] = useState<VaultRecipient[]>([]);
   const [selectedUploadRecipientEmails, setSelectedUploadRecipientEmails] = useState<string[]>([]);
@@ -458,7 +458,6 @@ export default function VaultDetailsPage() {
   }, [vault?.recovery_key_verifier, vault?.zero_knowledge_enabled, vaultId]);
 
   const handleUnlockRecoveryKey = async () => {
-    setRecoveryKeyMessage(null);
     setRecoveryKeyError(null);
 
     if (!vaultId || !vault?.recovery_key_verifier) {
@@ -476,11 +475,10 @@ export default function VaultDetailsPage() {
       return;
     }
 
-    storeRecoveryKeyForVault(vaultId, recoveryKeyInput);
-    const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
-    setRecoveryKey(storedRecoveryKey);
+    const normalizedRecoveryKey = normalizeRecoveryKey(recoveryKeyInput);
+    storeRecoveryKeyForVault(vaultId, normalizedRecoveryKey);
+    setRecoveryKey(normalizedRecoveryKey);
     setRecoveryKeyInput("");
-    setRecoveryKeyMessage("Vault unlocked on this device for the current session.");
   };
 
   const handleSignOut = useCallback(() => {
@@ -1338,9 +1336,7 @@ export default function VaultDetailsPage() {
 
                     {recoveryKey ? (
                       <>
-                        {!recoveryKeyMessage ? (
-                          <Alert variant="success" message="Vault unlocked on this device for the current session." />
-                        ) : null}
+                        <Alert variant="success" message="Vault unlocked on this device for the current session." />
                         <Text variant="bodySmall" color="secondary">
                           This recovery key stays only in the current browser session and is cleared when you sign out.
                         </Text>
@@ -1369,7 +1365,6 @@ export default function VaultDetailsPage() {
                 )}
 
                 {recoveryKeyError ? <Alert variant="error" message={recoveryKeyError} /> : null}
-                {recoveryKeyMessage ? <Alert variant="success" message={recoveryKeyMessage} /> : null}
               </Card>
 
               <Card variant="elevated" style={{ gap: t.space.s }}>
