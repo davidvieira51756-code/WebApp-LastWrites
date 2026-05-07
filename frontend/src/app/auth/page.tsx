@@ -7,7 +7,7 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, Input, Text, useCatTheme } from "@/components/catmagui";
 import BrandLogo from "@/components/BrandLogo";
 import { getApiUrl, getErrorDetail } from "@/lib/api";
-import { getAuthToken, setAuthSession } from "@/lib/auth";
+import { getAuthToken, setAuthSession, setPostLoginWarning } from "@/lib/auth";
 import { ensureUserDocumentEncryptionProfile } from "@/lib/documentAccess";
 
 type AuthMode = "signin" | "signup";
@@ -154,10 +154,19 @@ function AuthPageContent() {
           email: payload.email,
           userId: payload.user_id,
         });
-        await ensureUserDocumentEncryptionProfile(apiUrl, payload.access_token, {
-          email: payload.email,
-          password,
-        });
+        try {
+          await ensureUserDocumentEncryptionProfile(apiUrl, payload.access_token, {
+            email: payload.email,
+            password,
+          });
+        } catch (cryptoProfileError) {
+          const detail = cryptoProfileError instanceof Error
+            ? cryptoProfileError.message
+            : "Document encryption setup is unavailable right now.";
+          setPostLoginWarning(
+            `${detail} You are signed in, but zero-knowledge uploads and downloads may require you to sign in again to retry document encryption setup.`,
+          );
+        }
         router.replace(nextPath);
         return;
       }

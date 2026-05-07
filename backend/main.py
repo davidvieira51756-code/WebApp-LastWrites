@@ -439,8 +439,24 @@ def normalize_recovery_key_verifier(value: Optional[str]) -> Optional[str]:
     return normalized_value
 
 
-def normalize_encryption_public_jwk(value: Any) -> Optional[Dict[str, str]]:
+def normalize_encryption_public_jwk(value: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(value, dict):
+        return None
+
+    ext_value = value.get("ext", True)
+    if isinstance(ext_value, bool):
+        normalized_ext = ext_value
+    elif isinstance(ext_value, str) and ext_value.strip().lower() in {"true", "false"}:
+        normalized_ext = ext_value.strip().lower() == "true"
+    else:
+        return None
+
+    key_ops_value = value.get("key_ops", ["encrypt"])
+    if isinstance(key_ops_value, str):
+        normalized_key_ops = [key_ops_value.strip()] if key_ops_value.strip() else []
+    elif isinstance(key_ops_value, list):
+        normalized_key_ops = [str(item).strip() for item in key_ops_value if str(item).strip()]
+    else:
         return None
 
     normalized = {
@@ -448,14 +464,15 @@ def normalize_encryption_public_jwk(value: Any) -> Optional[Dict[str, str]]:
         "alg": str(value.get("alg", "")).strip(),
         "n": str(value.get("n", "")).strip(),
         "e": str(value.get("e", "")).strip(),
-        "ext": str(value.get("ext", "true")).strip().lower(),
-        "key_ops": value.get("key_ops"),
+        "ext": normalized_ext,
+        "key_ops": normalized_key_ops,
     }
     if (
         normalized["kty"] != "RSA"
         or not normalized["n"]
         or not normalized["e"]
         or normalized["alg"] not in {"RSA-OAEP", "RSA-OAEP-256"}
+        or "encrypt" not in normalized["key_ops"]
     ):
         return None
     return normalized

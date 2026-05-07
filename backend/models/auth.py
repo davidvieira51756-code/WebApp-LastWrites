@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -78,10 +78,10 @@ class AuthDeleteAccountRequest(BaseModel):
 
 class AuthCryptoProfileResponse(BaseModel):
     initialized: bool = False
-    encryption_public_jwk: dict[str, str] | None = None
+    encryption_public_jwk: dict[str, Any] | None = None
     encrypted_private_key_bundle: dict[str, str] | None = None
 
 
 class AuthCryptoProfileUpdateRequest(BaseModel):
-    encryption_public_jwk: dict[str, str]
+    encryption_public_jwk: dict[str, Any]
     encrypted_private_key_bundle: dict[str, str]

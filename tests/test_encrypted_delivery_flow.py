@@ -155,7 +155,7 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
         return b64url_encode(digest.finalize())
 
     @staticmethod
-    def _public_jwk_from_private_key(private_key: rsa.RSAPrivateKey) -> dict[str, str]:
+    def _public_jwk_from_private_key(private_key: rsa.RSAPrivateKey) -> dict[str, object]:
         public_numbers = private_key.public_key().public_numbers()
         modulus = public_numbers.n.to_bytes((public_numbers.n.bit_length() + 7) // 8, "big")
         exponent = public_numbers.e.to_bytes((public_numbers.e.bit_length() + 7) // 8, "big")
@@ -164,11 +164,11 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             "alg": "RSA-OAEP-256",
             "n": b64url_encode(modulus),
             "e": b64url_encode(exponent),
-            "ext": "true",
+            "ext": True,
             "key_ops": ["encrypt"],
         }
 
-    def _install_document_crypto_profile(self, token: str, public_jwk: dict[str, str]) -> None:
+    def _install_document_crypto_profile(self, token: str, public_jwk: dict[str, object]) -> None:
         response = self.client.put(
             "/auth/crypto-profile",
             headers=self._auth_headers(token),
@@ -185,6 +185,48 @@ class EncryptedDeliveryFlowTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 200, response.text)
+
+    def test_crypto_profile_accepts_standard_jwk_types(self) -> None:
+        token = self._register_and_login(f"profile-{uuid4().hex[:8]}@example.com")
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+        public_jwk = self._public_jwk_from_private_key(private_key)
+
+        response = self.client.put(
+            "/auth/crypto-profile",
+            headers=self._auth_headers(token),
+            json={
+                "encryption_public_jwk": public_jwk,
+                "encrypted_private_key_bundle": {
+                    "schema_version": "1",
+                    "wrapping_algorithm": "AES-256-GCM",
+                    "kdf_algorithm": "PBKDF2-SHA256",
+                    "salt": b64url_encode(secrets.token_bytes(16)),
+                    "iv": b64url_encode(secrets.token_bytes(12)),
+                    "ciphertext": b64url_encode(secrets.token_bytes(128)),
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["initialized"])
+        self.assertIs(payload["encryption_public_jwk"]["ext"], True)
+        self.assertEqual(payload["encryption_public_jwk"]["key_ops"], ["encrypt"])
+
+    def test_login_succeeds_without_crypto_profile(self) -> None:
+        email = f"noprofile-{uuid4().hex[:8]}@example.com"
+        token = self._register_and_login(email)
+        self.assertTrue(token)
+
+        response = self.client.get(
+            "/auth/crypto-profile",
+            headers=self._auth_headers(token),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertFalse(payload["initialized"])
+        self.assertIsNone(payload["encryption_public_jwk"])
+        self.assertIsNone(payload["encrypted_private_key_bundle"])
 
     @staticmethod
     def _encrypt_zero_knowledge_payload(

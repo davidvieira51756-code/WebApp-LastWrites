@@ -5,6 +5,7 @@ export const AUTH_USER_ID_STORAGE_KEY = "lw.auth.user_id";
 
 export const AUTH_TOKEN_COOKIE = "lw_auth_token";
 export const AUTH_EXP_COOKIE = "lw_auth_exp";
+export const POST_LOGIN_WARNING_STORAGE_KEY = "lw.post_login.warning";
 const ZERO_KNOWLEDGE_RECOVERY_PREFIX = "lw.zk.recovery.";
 const ZERO_KNOWLEDGE_BACKUP_PREFIX = "lw.zk.recovery.backed-up.";
 const DOCUMENT_ACCESS_PRIVATE_KEY_PREFIX = "lw.docaccess.private.";
@@ -46,6 +47,7 @@ export function clearAuthSession(): void {
     window.localStorage.removeItem(AUTH_EXPIRES_AT_STORAGE_KEY);
     window.localStorage.removeItem(AUTH_EMAIL_STORAGE_KEY);
     window.localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY);
+    window.localStorage.removeItem(POST_LOGIN_WARNING_STORAGE_KEY);
 
     const keysToRemove: string[] = [];
     for (let index = 0; index < window.sessionStorage.length; index += 1) {
@@ -121,4 +123,22 @@ export function getAuthUserId(): string | null {
     return null;
   }
   return window.localStorage.getItem(AUTH_USER_ID_STORAGE_KEY);
+}
+
+export function setPostLoginWarning(message: string): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(POST_LOGIN_WARNING_STORAGE_KEY, message);
+}
+
+export function consumePostLoginWarning(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const message = window.localStorage.getItem(POST_LOGIN_WARNING_STORAGE_KEY);
+  if (message) {
+    window.localStorage.removeItem(POST_LOGIN_WARNING_STORAGE_KEY);
+  }
+  return message;
 }

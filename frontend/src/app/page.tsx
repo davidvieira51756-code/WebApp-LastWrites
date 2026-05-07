@@ -16,7 +16,7 @@ import BrandLogo from "@/components/BrandLogo";
 import DocumentProtectionDialog from "@/components/DocumentProtectionDialog";
 import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
-import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
+import { clearAuthSession, consumePostLoginWarning, getAuthEmail, getAuthToken } from "@/lib/auth";
 import CreateVaultForm, { type Vault } from "../components/CreateVaultForm";
 
 type IncomingVaultSummary = {
@@ -76,6 +76,7 @@ export default function DashboardPage() {
     const [signedInEmail, setSignedInEmail] = useState<string | null>(null);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [incomingError, setIncomingError] = useState<string | null>(null);
+    const [postLoginWarning, setPostLoginWarning] = useState<string | null>(null);
     const [isProtectionDialogOpen, setIsProtectionDialogOpen] = useState(false);
 
     const redirectToAuth = useCallback(() => {
@@ -94,6 +95,7 @@ export default function DashboardPage() {
 
         setAuthToken(token);
         setSignedInEmail(getAuthEmail());
+        setPostLoginWarning(consumePostLoginWarning());
         setIsCheckingAuth(false);
     }, [redirectToAuth]);
 
@@ -289,6 +291,15 @@ export default function DashboardPage() {
                         variant="warning"
                         title="Missing API URL"
                         message="Configure NEXT_PUBLIC_API_URL in your frontend environment to connect to FastAPI."
+                        style={{ marginBottom: t.space.m }}
+                    />
+                ) : null}
+
+                {postLoginWarning ? (
+                    <Alert
+                        variant="warning"
+                        title="Document Encryption Setup Needs Attention"
+                        message={postLoginWarning}
                         style={{ marginBottom: t.space.m }}
                     />
                 ) : null}

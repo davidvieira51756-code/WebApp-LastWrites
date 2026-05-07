@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -26,7 +26,7 @@ class VaultRecipient(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
     can_activate: bool = True
     has_document_encryption_key: bool = False
-    document_encryption_public_jwk: Optional[Dict[str, str]] = None
+    document_encryption_public_jwk: Optional[Dict[str, Any]] = None
 
 
 class RecipientWrappedFileKey(BaseModel):
