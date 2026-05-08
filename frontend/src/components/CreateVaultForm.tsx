@@ -53,6 +53,7 @@ export type Vault = {
 };
 
 type PendingRecoveryKeyBackup = {
+    vault: Vault;
     vaultId: string;
     vaultName: string;
     recoveryKey: string;
@@ -148,10 +149,10 @@ export default function CreateVaultForm({
                 throw new Error("Vault recovery key verification failed. Please try again.");
             }
 
-            onCreated(createdVault);
             storeRecoveryKeyForVault(createdVault.id, recoveryKey);
             clearRecoveryKeyBackupConfirmationForVault(createdVault.id);
             setPendingRecoveryKeyBackup({
+                vault: createdVault,
                 vaultId: createdVault.id,
                 vaultName: createdVault.name,
                 recoveryKey,
@@ -197,6 +198,7 @@ export default function CreateVaultForm({
                     confirmButtonLabel="I Saved The Recovery Key"
                     onConfirmed={() => {
                         setRecoveryKeyBackupConfirmedForVault(pendingRecoveryKeyBackup.vaultId);
+                        onCreated(pendingRecoveryKeyBackup.vault);
                         setPendingRecoveryKeyBackup(null);
                         setSuccessMessage("Vault created successfully and recovery key backup confirmed.");
                     }}

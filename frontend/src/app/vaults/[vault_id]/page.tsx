@@ -15,16 +15,20 @@ import {
   useCatTheme,
 } from "@/components/catmagui";
 import BrandLogo from "@/components/BrandLogo";
+import RecoveryKeyBackupPanel from "@/components/RecoveryKeyBackupPanel";
 import ThemeToggleButton from "@/components/ThemeToggleButton";
 import { buildAuthHeaders, getApiUrl, getErrorDetail, isUnauthorizedStatus } from "@/lib/api";
 import { clearAuthSession, getAuthEmail, getAuthToken } from "@/lib/auth";
 import {
   buildRecipientWrappedKeysForVaultFile,
+  clearRecoveryKeyBackupConfirmationForVault,
   clearStoredRecoveryKeyForVault,
   decryptVaultFile,
   encryptVaultFile,
   getStoredRecoveryKeyForVault,
+  hasConfirmedRecoveryKeyBackupForVault,
   normalizeRecoveryKey,
+  setRecoveryKeyBackupConfirmedForVault,
   storeRecoveryKeyForVault,
   verifyRecoveryKey,
 } from "@/lib/zeroKnowledge";
@@ -110,6 +114,13 @@ type VaultFilesResponse = {
   vault_id: string;
   files: VaultFile[];
 };
+
+type PendingRecoveryKeyBackup = {
+  vaultId: string;
+  vaultName: string;
+  recoveryKey: string;
+};
+
 type VaultRecipientCryptoDirectoryResponse = {
   vault_id: string;
   recipients: VaultRecipient[];
@@ -260,6 +271,8 @@ export default function VaultDetailsPage() {
   const [recoveryKey, setRecoveryKey] = useState<string | null>(null);
   const [recoveryKeyInput, setRecoveryKeyInput] = useState("");
   const [recoveryKeyError, setRecoveryKeyError] = useState<string | null>(null);
+  const [pendingRecoveryKeyBackup, setPendingRecoveryKeyBackup] =
+    useState<PendingRecoveryKeyBackup | null>(null);
   const [recipientCryptoDirectory, setRecipientCryptoDirectory] = useState<VaultRecipient[]>([]);
   const [selectedUploadRecipientEmails, setSelectedUploadRecipientEmails] = useState<string[]>([]);
 
@@ -424,6 +437,7 @@ export default function VaultDetailsPage() {
     if (!vaultId || !vault?.zero_knowledge_enabled || !vault.recovery_key_verifier) {
       setRecoveryKey(null);
       setRecoveryKeyInput("");
+      setPendingRecoveryKeyBackup(null);
       return;
     }
 
@@ -431,6 +445,7 @@ export default function VaultDetailsPage() {
     const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
     if (!storedRecoveryKey) {
       setRecoveryKey(null);
+      setPendingRecoveryKeyBackup(null);
       return;
     }
 
@@ -444,11 +459,24 @@ export default function VaultDetailsPage() {
         return;
       }
       if (isValid) {
-        setRecoveryKey(storedRecoveryKey);
-        setRecoveryKeyInput("");
+        if (hasConfirmedRecoveryKeyBackupForVault(vaultId)) {
+          setRecoveryKey(storedRecoveryKey);
+          setPendingRecoveryKeyBackup(null);
+          setRecoveryKeyInput("");
+        } else {
+          setRecoveryKey(null);
+          setRecoveryKeyInput("");
+          setPendingRecoveryKeyBackup({
+            vaultId,
+            vaultName: vault.name || "Unnamed Vault",
+            recoveryKey: storedRecoveryKey,
+          });
+        }
       } else {
         clearStoredRecoveryKeyForVault(vaultId);
+        clearRecoveryKeyBackupConfirmationForVault(vaultId);
         setRecoveryKey(null);
+        setPendingRecoveryKeyBackup(null);
       }
     })();
 
@@ -1315,7 +1343,27 @@ export default function VaultDetailsPage() {
           </Card>
         ) : null}
 
-        {!isLoading && !pageError ? (
+        {!isLoading && !pageError && pendingRecoveryKeyBackup ? (
+          <Card variant="elevated" style={{ gap: t.space.s }}>
+            <RecoveryKeyBackupPanel
+              recoveryKey={pendingRecoveryKeyBackup.recoveryKey}
+              vaultId={pendingRecoveryKeyBackup.vaultId}
+              vaultName={pendingRecoveryKeyBackup.vaultName}
+              title="Save This Recovery Key Before Opening The Vault"
+              description="This vault was just created on this device. Confirm the backup step before you continue into the vault."
+              warningMessage="If you lose this recovery key, zero-knowledge files in this vault can become permanently unreadable."
+              confirmLabel="I have saved this recovery key somewhere safe and understand it cannot be recovered by the server."
+              confirmButtonLabel="I Saved The Recovery Key"
+              onConfirmed={() => {
+                setRecoveryKeyBackupConfirmedForVault(pendingRecoveryKeyBackup.vaultId);
+                setRecoveryKey(pendingRecoveryKeyBackup.recoveryKey);
+                setPendingRecoveryKeyBackup(null);
+              }}
+            />
+          </Card>
+        ) : null}
+
+        {!isLoading && !pageError && !pendingRecoveryKeyBackup ? (
           <section
             style={{
               display: "grid",
