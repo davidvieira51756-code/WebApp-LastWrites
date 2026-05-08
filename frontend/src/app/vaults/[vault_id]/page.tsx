@@ -156,6 +156,11 @@ function formatStatusLabel(status: string): string {
   return status.replace(/_/g, " ");
 }
 
+function isFinalVaultStatus(status: string | null | undefined): boolean {
+  const normalized = (status || "").toLowerCase();
+  return normalized === "delivered" || normalized === "delivered_archived";
+}
+
 function formatIsoDate(value: string | null | undefined): string {
   if (!value) return "—";
   const isoMatch = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/);
@@ -441,6 +446,13 @@ export default function VaultDetailsPage() {
       return;
     }
 
+    if (isFinalVaultStatus(vault.status)) {
+      setRecoveryKey(null);
+      setRecoveryKeyInput("");
+      setPendingRecoveryKeyBackup(null);
+      return;
+    }
+
     let isCancelled = false;
     const storedRecoveryKey = getStoredRecoveryKeyForVault(vaultId);
     if (!storedRecoveryKey) {
@@ -483,7 +495,7 @@ export default function VaultDetailsPage() {
     return () => {
       isCancelled = true;
     };
-  }, [vault?.recovery_key_verifier, vault?.zero_knowledge_enabled, vaultId]);
+  }, [vault?.name, vault?.recovery_key_verifier, vault?.status, vault?.zero_knowledge_enabled, vaultId]);
 
   const handleUnlockRecoveryKey = async () => {
     setRecoveryKeyError(null);
@@ -1132,8 +1144,9 @@ export default function VaultDetailsPage() {
   const activatableRecipientsCount = activatableRecipients.length;
   const thresholdInputMax = activatableRecipientsCount > 0 ? activatableRecipientsCount : 1;
   const normalizedStatus = (vault?.status || "active").toLowerCase();
-  const isArchivedFinal =
-    normalizedStatus === "delivered" || normalizedStatus === "delivered_archived";
+  const isArchivedFinal = isFinalVaultStatus(normalizedStatus);
+  const activePendingRecoveryKeyBackup = isArchivedFinal ? null : pendingRecoveryKeyBackup;
+  const shouldShowRecoveryKeyBackup = Boolean(activePendingRecoveryKeyBackup);
   const isPendingOrGrace =
     normalizedStatus === "pending_activation" || normalizedStatus === "grace_period";
 
@@ -1343,27 +1356,27 @@ export default function VaultDetailsPage() {
           </Card>
         ) : null}
 
-        {!isLoading && !pageError && pendingRecoveryKeyBackup ? (
+        {!isLoading && !pageError && activePendingRecoveryKeyBackup ? (
           <Card variant="elevated" style={{ gap: t.space.s }}>
             <RecoveryKeyBackupPanel
-              recoveryKey={pendingRecoveryKeyBackup.recoveryKey}
-              vaultId={pendingRecoveryKeyBackup.vaultId}
-              vaultName={pendingRecoveryKeyBackup.vaultName}
+              recoveryKey={activePendingRecoveryKeyBackup.recoveryKey}
+              vaultId={activePendingRecoveryKeyBackup.vaultId}
+              vaultName={activePendingRecoveryKeyBackup.vaultName}
               title="Save This Recovery Key Before Opening The Vault"
               description="This vault was just created on this device. Confirm the backup step before you continue into the vault."
               warningMessage="If you lose this recovery key, zero-knowledge files in this vault can become permanently unreadable."
               confirmLabel="I have saved this recovery key somewhere safe and understand it cannot be recovered by the server."
               confirmButtonLabel="I Saved The Recovery Key"
               onConfirmed={() => {
-                setRecoveryKeyBackupConfirmedForVault(pendingRecoveryKeyBackup.vaultId);
-                setRecoveryKey(pendingRecoveryKeyBackup.recoveryKey);
+                setRecoveryKeyBackupConfirmedForVault(activePendingRecoveryKeyBackup.vaultId);
+                setRecoveryKey(activePendingRecoveryKeyBackup.recoveryKey);
                 setPendingRecoveryKeyBackup(null);
               }}
             />
           </Card>
         ) : null}
 
-        {!isLoading && !pageError && !pendingRecoveryKeyBackup ? (
+        {!isLoading && !pageError && !shouldShowRecoveryKeyBackup ? (
           <section
             style={{
               display: "grid",

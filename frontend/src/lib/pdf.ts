@@ -4,31 +4,13 @@ function encodeAscii(value: string): Uint8Array {
   return new TextEncoder().encode(value);
 }
 
-function encodePdfUtf16Hex(value: string): string {
-  const bytes: number[] = [0xfe, 0xff];
-  for (const character of value) {
-    const codePoint = character.codePointAt(0);
-    if (typeof codePoint !== "number") {
-      continue;
-    }
+function encodePdfLiteralString(value: string): string {
+  const asciiText = value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7E]/g, "?");
 
-    if (codePoint <= 0xffff) {
-      bytes.push((codePoint >> 8) & 0xff, codePoint & 0xff);
-      continue;
-    }
-
-    const adjustedCodePoint = codePoint - 0x10000;
-    const highSurrogate = 0xd800 + (adjustedCodePoint >> 10);
-    const lowSurrogate = 0xdc00 + (adjustedCodePoint & 0x3ff);
-    bytes.push(
-      (highSurrogate >> 8) & 0xff,
-      highSurrogate & 0xff,
-      (lowSurrogate >> 8) & 0xff,
-      lowSurrogate & 0xff,
-    );
-  }
-
-  return bytes.map((byte) => byte.toString(16).padStart(2, "0").toUpperCase()).join("");
+  return `(${asciiText.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")})`;
 }
 
 function wrapText(value: string, maxLineLength = 88): string[] {
@@ -95,8 +77,8 @@ export function buildDeliveryCoverPdf({
   let y = 790;
   const commands: string[] = [];
   for (const line of lines) {
-    const encodedText = encodePdfUtf16Hex(line.text);
-    commands.push(`BT /F1 ${line.size} Tf 50 ${y} Td <${encodedText}> Tj ET`);
+    const encodedText = encodePdfLiteralString(line.text);
+    commands.push(`BT /F1 ${line.size} Tf 50 ${y} Td ${encodedText} Tj ET`);
     y -= line.size >= 20 ? 30 : line.size >= 16 ? 22 : 16;
     if (y < 50) {
       break;

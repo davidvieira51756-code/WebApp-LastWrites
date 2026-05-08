@@ -26,25 +26,40 @@ type CatmaguiThemeProviderProps = {
   initialMode?: CatThemeMode;
 };
 
+function getInitialThemeMode(fallbackMode: CatThemeMode): CatThemeMode {
+  if (typeof window === "undefined") {
+    return fallbackMode;
+  }
+
+  const persistedMode = window.localStorage.getItem(STORAGE_KEY) as CatThemeMode | null;
+  if (persistedMode === "light" || persistedMode === "dark" || persistedMode === "system") {
+    return persistedMode;
+  }
+
+  return fallbackMode;
+}
+
+function getInitialPrefersDark(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
 export function CatmaguiThemeProvider({
   children,
   initialMode = "system",
 }: CatmaguiThemeProviderProps) {
-  const [mode, setModeState] = useState<CatThemeMode>(initialMode);
-  const [prefersDark, setPrefersDark] = useState(false);
+  const [mode, setModeState] = useState<CatThemeMode>(() => getInitialThemeMode(initialMode));
+  const [prefersDark, setPrefersDark] = useState(() => getInitialPrefersDark());
 
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
 
-    const persistedMode = window.localStorage.getItem(STORAGE_KEY) as CatThemeMode | null;
-    if (persistedMode === "light" || persistedMode === "dark" || persistedMode === "system") {
-      setModeState(persistedMode);
-    }
-
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-    setPrefersDark(mediaQuery.matches);
 
     const listener = (event: MediaQueryListEvent) => {
       setPrefersDark(event.matches);
@@ -52,7 +67,7 @@ export function CatmaguiThemeProvider({
 
     mediaQuery.addEventListener("change", listener);
     return () => mediaQuery.removeEventListener("change", listener);
-  }, [initialMode]);
+  }, []);
 
   const isDark = mode === "system" ? prefersDark : mode === "dark";
 

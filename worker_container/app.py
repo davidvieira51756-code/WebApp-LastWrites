@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import html
 import json
 import logging
 import os
@@ -886,6 +887,10 @@ def _load_vault_file_payload(file_metadata: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _pdf_paragraph_text(value: Any) -> str:
+    return html.escape(str(value), quote=False)
+
+
 def _generate_cover_pdf(
     vault_document: Dict[str, Any],
     file_items: List[Dict[str, Any]],
@@ -898,22 +903,39 @@ def _generate_cover_pdf(
 
     story.append(Paragraph("Last Writes Delivery Package", styles["Title"]))
     story.append(Spacer(1, 12))
-    story.append(Paragraph(f"Vault: {vault_document.get('name', 'Unnamed Vault')}", styles["Heading2"]))
-    story.append(Paragraph(f"Delivered: {_date_from_iso(delivered_at)}", styles["BodyText"]))
+    story.append(
+        Paragraph(
+            _pdf_paragraph_text(f"Vault: {vault_document.get('name', 'Unnamed Vault')}"),
+            styles["Heading2"],
+        )
+    )
+    story.append(
+        Paragraph(
+            _pdf_paragraph_text(f"Delivered: {_date_from_iso(delivered_at)}"),
+            styles["BodyText"],
+        )
+    )
     story.append(Spacer(1, 12))
 
     owner_message = str(vault_document.get("owner_message", "")).strip()
     story.append(Paragraph("Owner Message", styles["Heading3"]))
     story.append(
         Paragraph(
-            owner_message if owner_message else "No personal message was provided by the vault owner.",
+            _pdf_paragraph_text(
+                owner_message if owner_message else "No personal message was provided by the vault owner."
+            ),
             styles["BodyText"],
         )
     )
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("From", styles["Heading3"]))
-    story.append(Paragraph(owner_display_name or "Unknown owner", styles["BodyText"]))
+    story.append(
+        Paragraph(
+            _pdf_paragraph_text(owner_display_name or "Unknown owner"),
+            styles["BodyText"],
+        )
+    )
     story.append(Spacer(1, 12))
 
     story.append(Paragraph("Included Files", styles["Heading3"]))
