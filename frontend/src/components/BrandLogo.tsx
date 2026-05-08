@@ -1,4 +1,5 @@
 import Image from "next/image";
+import { useCatTheme } from "./catmagui";
 
 type BrandLogoProps = {
     maxWidth?: number;
@@ -6,9 +7,15 @@ type BrandLogoProps = {
 };
 
 export default function BrandLogo({
-    maxWidth = 200,
+    maxWidth = 256,
     marginBottom = 0,
 }: BrandLogoProps) {
+
+    const { isDark } = useCatTheme();
+    const logoSrc = isDark
+        ? "/brand/lastwrite_darkmode.png"
+        : "/brand/lastwrite_lightmode.png";
+
     return (
         <div
             style={{
@@ -21,10 +28,10 @@ export default function BrandLogo({
         >
             <div style={{ width: "100%", maxWidth }}>
                 <Image
-                    src="/brand/LASTWRITE_w.png"
+                    src={logoSrc}
                     alt="Last Write logo"
-                    width={1024}
-                    height={1024}
+                    width={2048}
+                    height={2048}
                     priority
                     style={{ width: "100%", height: "auto", display: "block" }}
                 />
