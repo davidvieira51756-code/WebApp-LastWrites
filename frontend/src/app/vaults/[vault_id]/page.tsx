@@ -1428,118 +1428,120 @@ export default function VaultDetailsPage() {
                 {recoveryKeyError ? <Alert variant="error" message={recoveryKeyError} /> : null}
               </Card>
 
-              <Card variant="elevated" style={{ gap: t.space.s }}>
-                <Text variant="h3">Vault Settings</Text>
-                <form
-                  onSubmit={handleUpdateVault}
-                  style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
-                >
-                  <Input
-                    id="vault-name"
-                    label="Vault Name"
-                    value={editableName}
-                    onChange={(event) => setEditableName(event.target.value)}
-                    disabled={isArchivedFinal}
-                    required
-                  />
-
-                  <label
-                    htmlFor="vault-grace-unit"
-                    style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: t.space.xs,
-                    }}
+              {!isArchivedFinal ? (
+                <Card variant="elevated" style={{ gap: t.space.s }}>
+                  <Text variant="h3">Vault Settings</Text>
+                  <form
+                    onSubmit={handleUpdateVault}
+                    style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
                   >
-                    <Text variant="label" color="secondary">Grace Period Unit</Text>
-                    <select
-                      id="vault-grace-unit"
-                      value={editableGracePeriodUnit}
-                      onChange={(event) => setEditableGracePeriodUnit(event.target.value as "days" | "hours")}
+                    <Input
+                      id="vault-name"
+                      label="Vault Name"
+                      value={editableName}
+                      onChange={(event) => setEditableName(event.target.value)}
                       disabled={isArchivedFinal}
+                      required
+                    />
+
+                    <label
+                      htmlFor="vault-grace-unit"
                       style={{
-                        width: "100%",
-                        border: `1px solid ${t.colors.components.input.border}`,
-                        backgroundColor: t.colors.components.input.bg,
-                        color: t.colors.text.primary,
-                        borderRadius: t.radius.full,
-                        padding: `${t.space.s}px ${t.space.m}px`,
-                        fontFamily: "var(--font-geist-sans), sans-serif",
-                        fontSize: t.typography.body.fontSize,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: t.space.xs,
                       }}
                     >
-                      <option value="days">Days</option>
-                      <option value="hours">Hours</option>
-                    </select>
-                  </label>
+                      <Text variant="label" color="secondary">Grace Period Unit</Text>
+                      <select
+                        id="vault-grace-unit"
+                        value={editableGracePeriodUnit}
+                        onChange={(event) => setEditableGracePeriodUnit(event.target.value as "days" | "hours")}
+                        disabled={isArchivedFinal}
+                        style={{
+                          width: "100%",
+                          border: `1px solid ${t.colors.components.input.border}`,
+                          backgroundColor: t.colors.components.input.bg,
+                          color: t.colors.text.primary,
+                          borderRadius: t.radius.full,
+                          padding: `${t.space.s}px ${t.space.m}px`,
+                          fontFamily: "var(--font-geist-sans), sans-serif",
+                          fontSize: t.typography.body.fontSize,
+                        }}
+                      >
+                        <option value="days">Days</option>
+                        <option value="hours">Hours</option>
+                      </select>
+                    </label>
 
-                  <Input
-                    id="vault-grace"
-                    type="number"
-                    min={1}
-                    max={editableGracePeriodUnit === "days" ? 3650 : 87600}
-                    label={`Grace Period (${editableGracePeriodUnit})`}
-                    value={editableGracePeriod}
-                    onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
-                    disabled={isArchivedFinal}
-                    required
-                  />
+                    <Input
+                      id="vault-grace"
+                      type="number"
+                      min={1}
+                      max={editableGracePeriodUnit === "days" ? 3650 : 87600}
+                      label={`Grace Period (${editableGracePeriodUnit})`}
+                      value={editableGracePeriod}
+                      onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
+                      disabled={isArchivedFinal}
+                      required
+                    />
 
-                  <Input
-                    id="vault-owner-message"
-                    label="Message For Recipients"
-                    value={editableOwnerMessage}
-                    onChange={(event) => setEditableOwnerMessage(event.target.value)}
-                    placeholder="Visible delivery note. Do not put secrets here."
-                    maxLength={4000}
-                    disabled={isArchivedFinal}
-                    multiline
-                  />
+                    <Input
+                      id="vault-owner-message"
+                      label="Message For Recipients"
+                      value={editableOwnerMessage}
+                      onChange={(event) => setEditableOwnerMessage(event.target.value)}
+                      placeholder="Visible delivery note. Do not put secrets here."
+                      maxLength={4000}
+                      disabled={isArchivedFinal}
+                      multiline
+                    />
 
-                  <Input
-                    id="vault-threshold"
-                    type="number"
-                    min={1}
-                    max={thresholdInputMax}
-                    label="Activation Threshold (recipient votes)"
-                    value={editableThreshold}
-                    onChange={(event) => setEditableThreshold(Number(event.target.value))}
-                    disabled={isArchivedFinal}
-                    required
-                  />
+                    <Input
+                      id="vault-threshold"
+                      type="number"
+                      min={1}
+                      max={thresholdInputMax}
+                      label="Activation Threshold (recipient votes)"
+                      value={editableThreshold}
+                      onChange={(event) => setEditableThreshold(Number(event.target.value))}
+                      disabled={isArchivedFinal}
+                      required
+                    />
 
-                  <Text variant="bodySmall" color="secondary">
-                    {activatableRecipientsCount > 0
-                      ? `Only ${activatableRecipientsCount} recipient${activatableRecipientsCount === 1 ? "" : "s"} can request activation right now, so the threshold cannot be higher than that.`
-                      : "No recipient is currently allowed to request activation."}
-                  </Text>
+                    <Text variant="bodySmall" color="secondary">
+                      {activatableRecipientsCount > 0
+                        ? `Only ${activatableRecipientsCount} recipient${activatableRecipientsCount === 1 ? "" : "s"} can request activation right now, so the threshold cannot be higher than that.`
+                        : "No recipient is currently allowed to request activation."}
+                    </Text>
 
-                  <Text variant="bodySmall" color="secondary">
-                    Vault status is managed automatically by activation requests, grace periods, and the delivery pipeline.
-                  </Text>
+                    <Text variant="bodySmall" color="secondary">
+                      Vault status is managed automatically by activation requests, grace periods, and the delivery pipeline.
+                    </Text>
+
+                    <Button
+                      type="submit"
+                      size="full"
+                      variant="SolidPrimary"
+                      disabled={isUpdatingVault || isArchivedFinal}
+                    >
+                      {isUpdatingVault ? "Updating Vault..." : "Save Vault Settings"}
+                    </Button>
+                  </form>
 
                   <Button
-                    type="submit"
-                    size="full"
-                    variant="SolidPrimary"
-                    disabled={isUpdatingVault || isArchivedFinal}
+                    type="button"
+                    variant="Destructive"
+                    onClick={() => void handleDeleteVault()}
+                    disabled={isDeletingVault || isArchivedFinal}
                   >
-                    {isUpdatingVault ? "Updating Vault..." : "Save Vault Settings"}
+                    {isDeletingVault ? "Deleting Vault..." : "Delete Vault"}
                   </Button>
-                </form>
 
-                <Button
-                  type="button"
-                  variant="Destructive"
-                  onClick={() => void handleDeleteVault()}
-                  disabled={isDeletingVault || isArchivedFinal}
-                >
-                  {isDeletingVault ? "Deleting Vault..." : "Delete Vault"}
-                </Button>
-
-                {updateError ? <Alert variant="error" message={updateError} /> : null}
-                {updateMessage ? <Alert variant="success" message={updateMessage} /> : null}
-              </Card>
+                  {updateError ? <Alert variant="error" message={updateError} /> : null}
+                  {updateMessage ? <Alert variant="success" message={updateMessage} /> : null}
+                </Card>
+              ) : null}
 
               <Card variant="elevated" style={{ gap: t.space.s }}>
                 <Text variant="h3">Delivery Package</Text>
@@ -1615,7 +1617,8 @@ export default function VaultDetailsPage() {
                 )}
               </Card>
 
-              <Card variant="elevated" style={{ gap: t.space.s }}>
+              {!isArchivedFinal ? (
+                <Card variant="elevated" style={{ gap: t.space.s }}>
                 <div
                   style={{
                     display: "flex",
@@ -1665,127 +1668,131 @@ export default function VaultDetailsPage() {
                     ))}
                   </div>
                 )}
-              </Card>
+                </Card>
+              ) : null}
 
-              <Card variant="elevated" style={{ gap: t.space.s }}>
-                <Text variant="h3">Recipients</Text>
-                <Text variant="bodySmall" color="secondary">
-                  Add recipients who can receive the vault when delivery is initiated.
-                </Text>
-                <Alert
-                  variant="info"
-                  message="Recipients can be added to the vault immediately, but they must verify their account before they can be assigned to encrypted files."
-                />
-
-                <form
-                  onSubmit={handleAddRecipient}
-                  style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
-                >
-                  <Input
-                    type="email"
-                    value={recipientEmail}
-                    onChange={(event) => setRecipientEmail(event.target.value)}
-                    placeholder="recipient@example.com"
-                    disabled={isArchivedFinal}
-                    required
+              {!isArchivedFinal ? (
+                <Card variant="elevated" style={{ gap: t.space.s }}>
+                  <Text variant="h3">Recipients</Text>
+                  <Text variant="bodySmall" color="secondary">
+                    Add recipients who can receive the vault when delivery is initiated.
+                  </Text>
+                  <Alert
+                    variant="info"
+                    message="Recipients can be added to the vault immediately, but they must verify their account before they can be assigned to encrypted files."
                   />
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: t.space.xs,
-                      color: t.colors.text.secondary,
-                      fontSize: t.typography.bodySmall.fontSize,
-                    }}
+
+                  <form
+                    onSubmit={handleAddRecipient}
+                    style={{ display: "flex", flexDirection: "column", gap: t.space.s }}
                   >
-                    <input
-                      type="checkbox"
-                      checked={newRecipientCanActivate}
-                      onChange={(event) => setNewRecipientCanActivate(event.target.checked)}
+                    <Input
+                      type="email"
+                      value={recipientEmail}
+                      onChange={(event) => setRecipientEmail(event.target.value)}
+                      placeholder="recipient@example.com"
                       disabled={isArchivedFinal}
+                      required
                     />
-                    Can request activation
-                  </label>
-                  <Button
-                    type="submit"
-                    size="full"
-                    variant="SolidPrimary"
-                    disabled={isAddingRecipient || isArchivedFinal}
-                  >
-                    {isAddingRecipient ? "Adding Recipient..." : "Add Recipient"}
-                  </Button>
-                </form>
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: t.space.xs,
+                        color: t.colors.text.secondary,
+                        fontSize: t.typography.bodySmall.fontSize,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={newRecipientCanActivate}
+                        onChange={(event) => setNewRecipientCanActivate(event.target.checked)}
+                        disabled={isArchivedFinal}
+                      />
+                      Can request activation
+                    </label>
+                    <Button
+                      type="submit"
+                      size="full"
+                      variant="SolidPrimary"
+                      disabled={isAddingRecipient || isArchivedFinal}
+                    >
+                      {isAddingRecipient ? "Adding Recipient..." : "Add Recipient"}
+                    </Button>
+                  </form>
 
-                {recipientError ? <Alert variant="error" message={recipientError} /> : null}
-                {recipientMessage ? <Alert variant="success" message={recipientMessage} /> : null}
+                  {recipientError ? <Alert variant="error" message={recipientError} /> : null}
+                  {recipientMessage ? <Alert variant="success" message={recipientMessage} /> : null}
 
-                <div style={{ display: "grid", gap: t.space.xs }}>
-                  {vault?.recipients.length ? (
-                    vault.recipients.map((recipient) => (
-                      <Card key={recipient.email} variant="secondary" style={{ padding: t.space.s, gap: t.space.xs }}>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "flex-start",
-                            gap: t.space.xs,
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <div style={{ display: "grid", gap: t.space.xxs }}>
-                            <Text variant="bodySmall">{recipient.email}</Text>
-                            <label
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: t.space.xs,
-                                color: t.colors.text.secondary,
-                                fontSize: t.typography.bodySmall.fontSize,
-                              }}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={recipient.can_activate}
-                                disabled={isArchivedFinal || isUpdatingRecipientPermission === recipient.email}
-                                onChange={(event) =>
-                                  void handleUpdateRecipientPermission(
-                                    recipient.email,
-                                    event.target.checked,
-                                  )
-                                }
+                  <div style={{ display: "grid", gap: t.space.xs }}>
+                    {vault?.recipients.length ? (
+                      vault.recipients.map((recipient) => (
+                        <Card key={recipient.email} variant="secondary" style={{ padding: t.space.s, gap: t.space.xs }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              alignItems: "flex-start",
+                              gap: t.space.xs,
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <div style={{ display: "grid", gap: t.space.xxs }}>
+                              <Text variant="bodySmall">{recipient.email}</Text>
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: t.space.xs,
+                                  color: t.colors.text.secondary,
+                                  fontSize: t.typography.bodySmall.fontSize,
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={recipient.can_activate}
+                                  disabled={isArchivedFinal || isUpdatingRecipientPermission === recipient.email}
+                                  onChange={(event) =>
+                                    void handleUpdateRecipientPermission(
+                                      recipient.email,
+                                      event.target.checked,
+                                    )
+                                  }
+                                />
+                                Can request activation
+                              </label>
+                            </div>
+                            <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
+                              <Badge
+                                label={recipient.can_activate ? "Can activate" : "Cannot activate"}
+                                variant={recipient.can_activate ? "success" : "default"}
+                                size="sm"
+                                outlineOnly
                               />
-                              Can request activation
-                            </label>
+                              <Button
+                                type="button"
+                                size="default"
+                                variant="Destructive"
+                                disabled={isDeletingRecipient === recipient.email || isArchivedFinal}
+                                onClick={() => void handleDeleteRecipient(recipient.email)}
+                              >
+                                {isDeletingRecipient === recipient.email ? "Removing..." : "Remove"}
+                              </Button>
+                            </div>
                           </div>
-                          <div style={{ display: "flex", gap: t.space.xs, flexWrap: "wrap" }}>
-                            <Badge
-                              label={recipient.can_activate ? "Can activate" : "Cannot activate"}
-                              variant={recipient.can_activate ? "success" : "default"}
-                              size="sm"
-                              outlineOnly
-                            />
-                            <Button
-                              type="button"
-                              size="default"
-                              variant="Destructive"
-                              disabled={isDeletingRecipient === recipient.email || isArchivedFinal}
-                              onClick={() => void handleDeleteRecipient(recipient.email)}
-                            >
-                              {isDeletingRecipient === recipient.email ? "Removing..." : "Remove"}
-                            </Button>
-                          </div>
-                        </div>
-                      </Card>
-                    ))
-                  ) : (
-                    <Alert variant="info" message="No recipients configured yet." />
-                  )}
-                </div>
-              </Card>
+                        </Card>
+                      ))
+                    ) : (
+                      <Alert variant="info" message="No recipients configured yet." />
+                    )}
+                  </div>
+                </Card>
+              ) : null}
 
             </div>
 
-            <Card variant="elevated" style={{ gap: t.space.s }}>
+            {!isArchivedFinal ? (
+              <Card variant="elevated" style={{ gap: t.space.s }}>
               <div
                 style={{
                   display: "flex",
@@ -2056,7 +2063,8 @@ export default function VaultDetailsPage() {
                   ))}
                 </div>
               )}
-            </Card>
+              </Card>
+            ) : null}
           </section>
         ) : null}
       </div>
