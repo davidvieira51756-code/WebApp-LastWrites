@@ -52,6 +52,9 @@ function statusBadgeVariant(
 }
 
 function formatStatusLabel(status: string): string {
+    if (status.toLowerCase() === "delivered_archived") {
+        return "delivered";
+    }
     return status.replace(/_/g, " ");
 }
 

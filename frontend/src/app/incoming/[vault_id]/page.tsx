@@ -30,6 +30,8 @@ type RecipientVaultSummary = {
   owner_display_name?: string | null;
   status: string;
   grace_period_days: number;
+  grace_period_value: number;
+  grace_period_unit: "days" | "hours";
   activation_threshold: number;
   activation_requests_count: number;
   has_requested_activation: boolean;
@@ -84,7 +86,15 @@ function statusBadgeVariant(
 }
 
 function formatStatusLabel(status: string): string {
+  if (status.toLowerCase() === "delivered_archived") {
+    return "delivered";
+  }
   return status.replace(/_/g, " ");
+}
+
+function formatGracePeriod(value: number, unit: "days" | "hours"): string {
+  const suffix = value === 1 ? unit.slice(0, -1) : unit;
+  return `${value} ${suffix}`;
 }
 
 function formatIsoDate(value: string | null | undefined): string {
@@ -630,7 +640,9 @@ export default function RecipientActivationPage() {
               </Card>
               <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>
                 <Text variant="caption" color="muted">Grace Period</Text>
-                <Text variant="label">{summary.grace_period_days} days</Text>
+                <Text variant="label">
+                  {formatGracePeriod(summary.grace_period_value, summary.grace_period_unit)}
+                </Text>
               </Card>
               {summary.grace_period_expires_at ? (
                 <Card variant="secondary" style={{ padding: t.space.s, gap: t.space.xxs }}>

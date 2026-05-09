@@ -90,11 +90,11 @@ def _format_timestamp(raw_value: str) -> str:
 
     iso_match = normalized_value[:19]
     if len(iso_match) == 19 and iso_match[10] == "T":
-        return f"{iso_match[:10]}, {iso_match[11:19]}"
+        return f"{iso_match[:10]}, {iso_match[11:19]} (GMT)"
 
     try:
-        return datetime.fromisoformat(normalized_value.replace("Z", "+00:00")).strftime(
-            "%Y-%m-%d, %H:%M:%S"
+        return (
+            f"{datetime.fromisoformat(normalized_value.replace('Z', '+00:00')).strftime('%Y-%m-%d, %H:%M:%S')} (GMT)"
         )
     except ValueError:
         return normalized_value
