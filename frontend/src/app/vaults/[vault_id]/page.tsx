@@ -153,6 +153,9 @@ function statusBadgeVariant(
 }
 
 function formatStatusLabel(status: string): string {
+  if (status.toLowerCase() === "delivered_archived") {
+    return "delivered";
+  }
   return status.replace(/_/g, " ");
 }
 
@@ -192,14 +195,6 @@ function getDownloadFileName(response: Response, fallbackName: string): string {
   }
 
   return fallbackName;
-}
-
-function buildDeliveryZipFallbackName(vault?: VaultDetail | null): string {
-  if (!vault) {
-    return "vault-delivery.zip";
-  }
-
-  return `${vault.name}-${vault.id}.zip`;
 }
 
 function triggerBrowserDownload(blob: Blob, fileName: string): void {
@@ -298,8 +293,6 @@ export default function VaultDetailsPage() {
   const [checkInError, setCheckInError] = useState<string | null>(null);
 
   const [isDeletingVault, setIsDeletingVault] = useState(false);
-  const [isDownloadingPackage, setIsDownloadingPackage] = useState(false);
-  const [downloadingPackageRecipient, setDownloadingPackageRecipient] = useState<string | null>(null);
 
   const authRedirectPath = useMemo(() => {
     if (!vaultId) {
@@ -908,54 +901,6 @@ export default function VaultDetailsPage() {
     }
   };
 
-  const handleDownloadDeliveryPackage = async (recipientEmail?: string) => {
-    setDownloadError(null);
-    if (!apiUrl || !vaultId || !authToken) {
-      setDownloadError("API URL or vault identifier is missing.");
-      return;
-    }
-
-    setIsDownloadingPackage(true);
-    setDownloadingPackageRecipient(recipientEmail || null);
-    try {
-      const searchParams = new URLSearchParams();
-      if (recipientEmail) {
-        searchParams.set("recipient_email", recipientEmail);
-      }
-      const response = await fetch(
-        `${apiUrl}/vaults/${encodeURIComponent(vaultId)}/delivery-package${searchParams.size ? `?${searchParams.toString()}` : ""}`,
-        {
-          headers: buildAuthHeaders(authToken, false),
-        },
-      );
-
-      if (isUnauthorizedStatus(response.status)) {
-        handleUnauthorized();
-        return;
-      }
-
-      if (!response.ok) {
-        const message = await getErrorDetail(response, "Failed to download delivery package.");
-        throw new Error(message);
-      }
-
-      const blob = await response.blob();
-      triggerBrowserDownload(
-        blob,
-        getDownloadFileName(response, vault?.delivery_file_name || buildDeliveryZipFallbackName(vault)),
-      );
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Unexpected error while downloading the delivery package.";
-      setDownloadError(message);
-    } finally {
-      setIsDownloadingPackage(false);
-      setDownloadingPackageRecipient(null);
-    }
-  };
-
   const handleDeleteFile = async (fileId: string) => {
     setDownloadError(null);
     if (!apiUrl || !vaultId || !authToken) {
@@ -1545,79 +1490,6 @@ export default function VaultDetailsPage() {
                 </Card>
               ) : null}
 
-              <Card variant="elevated" style={{ gap: t.space.s }}>
-                <Text variant="h3">Delivery Package</Text>
-                <Text variant="bodySmall" color="secondary">
-                  When the grace period expires, the vault contents are prepared for each
-                  recipient and the final delivery ZIP packages become available here.
-                </Text>
-
-                {vault?.delivery_error ? (
-                  <Alert variant="error" message={`Last delivery error: ${vault.delivery_error}`} />
-                ) : null}
-
-                {vault?.delivery_packages?.length ? (
-                  <>
-                    <Alert
-                      variant="success"
-                      message={
-                        vault.delivered_at
-                          ? `Delivery packages ready since ${formatIsoDate(vault.delivered_at)}.`
-                          : "Delivery packages ready."
-                      }
-                    />
-                    <div style={{ display: "grid", gap: t.space.xs }}>
-                      {vault.delivery_packages.map((deliveryPackage) => (
-                        <Card
-                          key={deliveryPackage.recipient_email}
-                          variant="secondary"
-                          style={{ padding: t.space.s, gap: t.space.xs }}
-                        >
-                          <Text variant="label">{deliveryPackage.recipient_email}</Text>
-                          <Text variant="caption" color="muted">
-                            {deliveryPackage.delivered_at
-                              ? `Ready since ${formatIsoDate(deliveryPackage.delivered_at)}`
-                              : "Ready"}
-                          </Text>
-                          <Button
-                            type="button"
-                            variant="SolidPrimary"
-                            onClick={() => void handleDownloadDeliveryPackage(deliveryPackage.recipient_email)}
-                            disabled={
-                              isDownloadingPackage &&
-                              downloadingPackageRecipient === deliveryPackage.recipient_email
-                            }
-                          >
-                            {isDownloadingPackage &&
-                            downloadingPackageRecipient === deliveryPackage.recipient_email
-                              ? "Downloading..."
-                              : "Download Delivery ZIP"}
-                          </Button>
-                        </Card>
-                      ))}
-                    </div>
-                  </>
-                ) : vault?.delivery_blob_name ? (
-                  <Button
-                    type="button"
-                    variant="SolidPrimary"
-                    onClick={() => void handleDownloadDeliveryPackage()}
-                    disabled={isDownloadingPackage}
-                  >
-                    {isDownloadingPackage ? "Downloading..." : "Download Delivery ZIP"}
-                  </Button>
-                ) : normalizedStatus === "delivery_initiated" ? (
-                  <Alert
-                    variant="info"
-                    message="The delivery job has started. Refresh this page in a moment to check whether the final ZIP is ready."
-                  />
-                ) : (
-                  <Alert
-                    variant="info"
-                    message="No final delivery package exists yet. It only appears after the grace period expires and the delivery job completes."
-                  />
-                )}
-              </Card>
 
               {!isArchivedFinal ? (
                 <Card variant="elevated" style={{ gap: t.space.s }}>
