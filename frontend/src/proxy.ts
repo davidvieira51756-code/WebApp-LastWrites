@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const PUBLIC_ROUTE_PREFIXES = ["/auth", "/verify-email", "/reset-password"];
+const PUBLIC_ROUTE_PREFIXES = ["/auth", "/forgot-password", "/verify-email", "/reset-password"];
 const REDIRECT_IF_AUTH_ROUTE_PREFIXES = ["/auth"];
 const AUTH_TOKEN_COOKIE = "lw_auth_token";
 const AUTH_EXP_COOKIE = "lw_auth_exp";

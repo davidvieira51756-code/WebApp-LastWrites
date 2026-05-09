@@ -1418,6 +1418,98 @@ def register_account(payload: AuthRegisterRequest, request: Request) -> AuthRegi
     )
 
 
+@app.post("/auth/request-password-reset")
+def request_password_reset(payload: PasswordResetEmailRequest, request: Request):
+    cosmos_service = get_cosmos_service(request)
+    auth_service = get_auth_service(request)
+    email_service = get_email_service(request)
+
+    normalized_email = auth_service.normalize_email(str(payload.email or "").strip())
+    if not normalized_email or not is_valid_email(normalized_email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A valid email is required.",
+        )
+
+    try:
+        user_item = cosmos_service.get_user_by_email(normalized_email)
+    except Exception:
+        logger.exception("Failed to resolve user for password reset email request.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process password reset request.",
+        ) from None
+
+    if user_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account exists with that email address.",
+        )
+
+    reset_payload = auth_service.issue_password_reset()
+    try:
+        updated_user = cosmos_service.update_user(
+            str(user_item.get("id")),
+            {
+                "password_reset_token_hash": reset_payload["token_hash"],
+                "password_reset_token_expires_at": reset_payload["expires_at"],
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Failed to create password reset token. user_id=%s",
+            user_item.get("id"),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process password reset request.",
+        ) from None
+
+    if updated_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process password reset request.",
+        )
+
+    reset_url = auth_service.build_password_reset_url(reset_payload["token"])
+    email_result = email_service.send_password_reset_email(
+        recipient=normalized_email,
+        reset_url=reset_url,
+    )
+    if email_result.sent:
+        write_audit_event(
+            cosmos_service,
+            event_type="password_reset_email_sent",
+            owner_user_id=str(user_item.get("id", "")),
+            actor_user_id=str(user_item.get("id", "")),
+            actor_email=normalized_email,
+            metadata={
+                "recipient_email": normalized_email,
+                "message_id": email_result.message_id,
+            },
+        )
+    elif email_result.failed:
+        write_audit_event(
+            cosmos_service,
+            event_type="email_send_failed",
+            owner_user_id=str(user_item.get("id", "")),
+            actor_user_id=str(user_item.get("id", "")),
+            actor_email=normalized_email,
+            metadata={
+                "email_kind": "password_reset",
+                "recipient_email": normalized_email,
+                "error": email_result.error,
+            },
+        )
+
+    return {
+        "message": "If email delivery is configured, a password reset link has been sent.",
+        "email": normalized_email,
+        "sent": email_result.sent,
+        "skipped": email_result.skipped,
+    }
+
+
 @app.post("/auth/verify-email")
 def verify_email(payload: EmailVerificationRequest, request: Request):
     cosmos_service = get_cosmos_service(request)

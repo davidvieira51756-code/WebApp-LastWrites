@@ -343,6 +343,17 @@ function AuthPageContent() {
                 required
               />
 
+              {mode === "signin" ? (
+                <Button
+                  type="button"
+                  variant="Primary"
+                  size="full"
+                  onClick={() => router.push("/forgot-password")}
+                >
+                  Forgot Password?
+                </Button>
+              ) : null}
+
               {mode === "signup" ? (
                 <Input
                   id="auth-confirm-password"
