@@ -282,7 +282,6 @@ export default function VaultDetailsPage() {
   const [editableName, setEditableName] = useState("");
   const [editableOwnerMessage, setEditableOwnerMessage] = useState("");
   const [editableGracePeriod, setEditableGracePeriod] = useState(30);
-  const [editableGracePeriodUnit, setEditableGracePeriodUnit] = useState<"days" | "hours">("days");
   const [editableThreshold, setEditableThreshold] = useState(1);
   const [isUpdatingVault, setIsUpdatingVault] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
@@ -393,8 +392,11 @@ export default function VaultDetailsPage() {
         setVault(vaultPayload);
         setEditableName(vaultPayload.name || "");
         setEditableOwnerMessage(vaultPayload.owner_message || "");
-        setEditableGracePeriod(Number(vaultPayload.grace_period_value || vaultPayload.grace_period_days || 1));
-        setEditableGracePeriodUnit(vaultPayload.grace_period_unit === "hours" ? "hours" : "days");
+        const currentGraceUnit = vaultPayload.grace_period_unit === "hours" ? "hours" : "days";
+        const currentGraceValue = Number(vaultPayload.grace_period_value || vaultPayload.grace_period_days || 1);
+        setEditableGracePeriod(
+          currentGraceUnit === "hours" ? Math.max(1, Math.ceil(currentGraceValue / 24)) : currentGraceValue
+        );
         setEditableThreshold(Number(vaultPayload.activation_threshold || 1));
         setFiles(Array.isArray(filesPayload.files) ? filesPayload.files : []);
         setRecipientCryptoDirectory(
@@ -954,7 +956,7 @@ export default function VaultDetailsPage() {
     }
 
     if (!Number.isFinite(editableGracePeriod) || editableGracePeriod < 1) {
-      setUpdateError(`Grace period must be at least 1 ${editableGracePeriodUnit === "hours" ? "hour" : "day"}.`);
+      setUpdateError("Grace period must be at least 1 day.");
       return;
     }
 
@@ -976,7 +978,7 @@ export default function VaultDetailsPage() {
           name: normalizedName,
           owner_message: editableOwnerMessage.trim() || null,
           grace_period_value: Number(editableGracePeriod),
-          grace_period_unit: editableGracePeriodUnit,
+          grace_period_unit: "days",
           activation_threshold:
             activatableRecipientsCount > 0
               ? Math.min(Math.floor(Number(editableThreshold)), activatableRecipientsCount)
@@ -1391,42 +1393,12 @@ export default function VaultDetailsPage() {
                       required
                     />
 
-                    <label
-                      htmlFor="vault-grace-unit"
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: t.space.xs,
-                      }}
-                    >
-                      <Text variant="label" color="secondary">Grace Period Unit</Text>
-                      <select
-                        id="vault-grace-unit"
-                        value={editableGracePeriodUnit}
-                        onChange={(event) => setEditableGracePeriodUnit(event.target.value as "days" | "hours")}
-                        disabled={isArchivedFinal}
-                        style={{
-                          width: "100%",
-                          border: `1px solid ${t.colors.components.input.border}`,
-                          backgroundColor: t.colors.components.input.bg,
-                          color: t.colors.text.primary,
-                          borderRadius: t.radius.full,
-                          padding: `${t.space.s}px ${t.space.m}px`,
-                          fontFamily: "var(--font-geist-sans), sans-serif",
-                          fontSize: t.typography.body.fontSize,
-                        }}
-                      >
-                        <option value="days">Days</option>
-                        <option value="hours">Hours</option>
-                      </select>
-                    </label>
-
                     <Input
                       id="vault-grace"
                       type="number"
                       min={1}
-                      max={editableGracePeriodUnit === "days" ? 3650 : 87600}
-                      label={`Grace Period (${editableGracePeriodUnit})`}
+                      max={3650}
+                      label="Grace Period (days)"
                       value={editableGracePeriod}
                       onChange={(event) => setEditableGracePeriod(Number(event.target.value))}
                       disabled={isArchivedFinal}

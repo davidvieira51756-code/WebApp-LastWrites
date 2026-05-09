@@ -76,7 +76,6 @@ export default function CreateVaultForm({
     const [name, setName] = useState("");
     const [ownerMessage, setOwnerMessage] = useState("");
     const [gracePeriodValue, setGracePeriodValue] = useState(30);
-    const [gracePeriodUnit, setGracePeriodUnit] = useState<"days" | "hours">("days");
     const [activationThreshold, setActivationThreshold] = useState(1);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -118,7 +117,7 @@ export default function CreateVaultForm({
                     name: normalizedName,
                     owner_message: ownerMessage.trim() || null,
                     grace_period_value: Number(gracePeriodValue),
-                    grace_period_unit: gracePeriodUnit,
+                    grace_period_unit: "days",
                     recipients: [],
                     activation_threshold: normalizedThreshold,
                     zero_knowledge_enabled: true,
@@ -160,7 +159,6 @@ export default function CreateVaultForm({
             setName("");
             setOwnerMessage("");
             setGracePeriodValue(30);
-            setGracePeriodUnit("days");
             setActivationThreshold(1);
             setSuccessMessage("Vault created. Save the recovery key to finish setup.");
         } catch (error) {
@@ -223,41 +221,12 @@ export default function CreateVaultForm({
                         required
                     />
 
-                    <label
-                        htmlFor="grace-period-unit"
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: t.space.xs,
-                        }}
-                    >
-                        <Text variant="label" color="secondary">Grace Period Unit</Text>
-                        <select
-                            id="grace-period-unit"
-                            value={gracePeriodUnit}
-                            onChange={(event) => setGracePeriodUnit(event.target.value as "days" | "hours")}
-                            style={{
-                                width: "100%",
-                                border: `1px solid ${t.colors.components.input.border}`,
-                                backgroundColor: t.colors.components.input.bg,
-                                color: t.colors.text.primary,
-                                borderRadius: t.radius.full,
-                                padding: `${t.space.s}px ${t.space.m}px`,
-                                fontFamily: "var(--font-geist-sans), sans-serif",
-                                fontSize: t.typography.body.fontSize,
-                            }}
-                        >
-                            <option value="days">Days</option>
-                            <option value="hours">Hours</option>
-                        </select>
-                    </label>
-
                     <Input
                         id="grace-period"
-                        label={`Grace Period (${gracePeriodUnit})`}
+                        label="Grace Period (days)"
                         type="number"
                         min={1}
-                        max={gracePeriodUnit === "days" ? 3650 : 87600}
+                        max={3650}
                         value={gracePeriodValue}
                         onChange={(event) => setGracePeriodValue(Number(event.target.value))}
                         required
