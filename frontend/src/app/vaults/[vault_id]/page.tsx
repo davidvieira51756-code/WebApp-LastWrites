@@ -1386,49 +1386,47 @@ export default function VaultDetailsPage() {
             }}
           >
             <div style={{ display: "grid", gap: t.space.m }}>
-              {!isArchivedFinal ? (
-                <Card variant="elevated" style={{ gap: t.space.s }}>
-                  <Text variant="h3">Private File Access</Text>
-                  {vault?.zero_knowledge_enabled ? (
-                    <>
-                      <Text variant="bodySmall" color="secondary">
-                        This vault uses zero-knowledge file encryption. The recovery key never
-                        leaves your browser and is required to encrypt uploads and decrypt downloads.
-                      </Text>
+              <Card variant="elevated" style={{ gap: t.space.s }}>
+                <Text variant="h3">Private File Access</Text>
+                {vault?.zero_knowledge_enabled ? (
+                  <>
+                    <Text variant="bodySmall" color="secondary">
+                      This vault uses zero-knowledge file encryption. The recovery key never
+                      leaves your browser and is required to encrypt uploads and decrypt downloads.
+                    </Text>
 
-                      {recoveryKey ? (
-                        <>
-                          <Alert variant="success" message="Vault unlocked on this device for the current session." />
-                          <Text variant="bodySmall" color="secondary">
-                            This recovery key stays only in the current browser session and is cleared when you sign out.
-                          </Text>
-                        </>
-                      ) : (
-                        <>
-                          <Input
-                            id="vault-recovery-key"
-                            type="password"
-                            label="Recovery Key"
-                            value={recoveryKeyInput}
-                            onChange={(event) => setRecoveryKeyInput(event.target.value)}
-                            placeholder="Paste the vault recovery key"
-                          />
-                          <Button type="button" variant="SolidPrimary" onClick={() => void handleUnlockRecoveryKey()}>
-                            Unlock Vault
-                          </Button>
-                        </>
-                      )}
-                    </>
-                  ) : (
-                    <Alert
-                      variant="error"
-                      message="This vault is missing its zero-knowledge recovery configuration."
-                    />
-                  )}
+                    {recoveryKey ? (
+                      <>
+                        <Alert variant="success" message="Vault unlocked on this device for the current session." />
+                        <Text variant="bodySmall" color="secondary">
+                          This recovery key stays only in the current browser session and is cleared when you sign out.
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        <Input
+                          id="vault-recovery-key"
+                          type="password"
+                          label="Recovery Key"
+                          value={recoveryKeyInput}
+                          onChange={(event) => setRecoveryKeyInput(event.target.value)}
+                          placeholder="Paste the vault recovery key"
+                        />
+                        <Button type="button" variant="SolidPrimary" onClick={() => void handleUnlockRecoveryKey()}>
+                          Unlock Vault
+                        </Button>
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <Alert
+                    variant="error"
+                    message="This vault is missing its zero-knowledge recovery configuration."
+                  />
+                )}
 
-                  {recoveryKeyError ? <Alert variant="error" message={recoveryKeyError} /> : null}
-                </Card>
-              ) : null}
+                {recoveryKeyError ? <Alert variant="error" message={recoveryKeyError} /> : null}
+              </Card>
 
               {!isArchivedFinal ? (
                 <Card variant="elevated" style={{ gap: t.space.s }}>
