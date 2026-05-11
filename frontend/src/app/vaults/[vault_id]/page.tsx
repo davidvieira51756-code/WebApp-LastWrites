@@ -512,6 +512,7 @@ export default function VaultDetailsPage() {
 
     const normalizedRecoveryKey = normalizeRecoveryKey(recoveryKeyInput);
     storeRecoveryKeyForVault(vaultId, normalizedRecoveryKey);
+    setRecoveryKeyBackupConfirmedForVault(vaultId);
     setRecoveryKey(normalizedRecoveryKey);
     setRecoveryKeyInput("");
   };

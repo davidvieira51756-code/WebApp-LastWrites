@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Location = "switzerlandnorth",
+    [string]$Location = "italynorth",
     [string]$Prefix = "lastwrites",
     [string]$ResourceGroupName = "",
     [string]$GithubRepo = "",
@@ -1442,13 +1442,13 @@ try {
         Write-Host "Container Apps job '$containerAppsJobName' already exists. Updating configuration." -ForegroundColor Yellow
     }
 
-    Invoke-AzCli -Arguments @(
+    Invoke-AzCliWithRetry -Arguments @(
         "containerapp", "job", "identity", "assign",
         "--name", $containerAppsJobName,
         "--resource-group", $ResourceGroupName,
         "--system-assigned",
         "-o", "none"
-    ) | Out-Null
+    ) -Attempts 6 -DelaySeconds 10 -RetryDescription "Assigning managed identity to Container Apps job '$containerAppsJobName'" | Out-Null
     $deliveryJobPrincipalId = Resolve-ContainerAppJobPrincipalId -JobName $containerAppsJobName -ResourceGroupName $ResourceGroupName
 
     $deliveryJobResourceId = Get-AzCliTsv -Arguments @("containerapp", "job", "show", "--name", $containerAppsJobName, "--resource-group", $ResourceGroupName, "--query", "id", "-o", "tsv")
